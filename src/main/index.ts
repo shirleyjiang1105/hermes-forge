@@ -1,0 +1,301 @@
+import { app, BrowserWindow } from "electron";
+import path from "node:path";
+import { AppPaths } from "./app-paths";
+import { AutoHotkeyService } from "./autohotkey-service";
+import { registerIpcHandlers } from "./ipc";
+import { RuntimeConfigStore } from "./runtime-config";
+import { RuntimeEnvResolver } from "./runtime-env-resolver";
+import { SessionLog } from "./session-log";
+import { HermesWindowsBridgeTestService } from "./hermes-windows-bridge-test-service";
+import { WindowsControlBridge } from "./windows-control-bridge";
+import { WindowsNativeIntentService } from "./windows-native-intent-service";
+import { WindowsToolExecutor } from "./windows-tool-executor";
+import { WorkSessionService } from "./work-session-service";
+import { HermesCliAdapter } from "../adapters/hermes/hermes-cli-adapter";
+import { SecretVault } from "../auth/secret-vault";
+import { DiagnosticsService } from "../diagnostics/diagnostics-service";
+import { FileTreeService } from "../file-manager/file-tree-service";
+import { HermesConnectorService } from "./hermes-connector-service";
+import { HermesWebUiService } from "./hermes-webui-service";
+import { MemoryBudgeter } from "../memory/memory-budgeter";
+import { MemoryBroker } from "../memory/memory-broker";
+import { SnapshotManager } from "../process/snapshot-manager";
+import { HermesToolLoopRunner } from "../process/hermes-tool-loop-runner";
+import { TaskPreflightService } from "../process/task-preflight-service";
+import { TaskRunner } from "../process/task-runner";
+import { WorkspaceLock } from "../process/workspace-lock";
+import { EngineProbeService } from "../probes/engine-probe-service";
+import { SetupService } from "../setup/setup-service";
+import { UpdateService } from "../updater/update-service";
+import { runCommand } from "../process/command-runner";
+import { resolveEnginePermissions } from "../shared/types";
+
+const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR;
+const isPortable = Boolean(portableRoot);
+const isDevMode = Boolean(process.env.VITE_DEV_SERVER_URL);
+
+let mainWindow: BrowserWindow | undefined;
+let windowsControlBridge: WindowsControlBridge | undefined;
+
+async function resolveWindowsHostForWsl(distro?: string) {
+  const args = [
+    ...(distro?.trim() ? ["-d", distro.trim()] : []),
+    "ip",
+    "route",
+    "show",
+    "default",
+  ];
+  const result = await runCommand("wsl.exe", args, {
+    cwd: process.cwd(),
+    timeoutMs: 5000,
+  }).catch(() => undefined);
+  const host = parseWslHost(result?.stdout ?? "");
+  return host || "127.0.0.1";
+}
+
+function parseWslHost(stdout: string) {
+  const first = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.includes(" via ")) ?? stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
+  const match = first.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
+  return match?.[0];
+}
+
+function scheduleStartupWarmup(input: {
+  hermes: HermesCliAdapter;
+  configStore: RuntimeConfigStore;
+  runtimeEnvResolver: RuntimeEnvResolver;
+}) {
+  setTimeout(() => {
+    void runStartupWarmup(input);
+  }, 1200);
+}
+
+async function runStartupWarmup(input: {
+  hermes: HermesCliAdapter;
+  configStore: RuntimeConfigStore;
+  runtimeEnvResolver: RuntimeEnvResolver;
+}) {
+  const config = await input.configStore.read().catch(() => undefined);
+  const mode = config?.startupWarmupMode ?? "cheap";
+  if (mode === "off") return;
+
+  await input.hermes.healthCheck().catch(() => undefined);
+  if (mode === "real_probe") {
+    await input.runtimeEnvResolver.resolve(config?.defaultModelProfileId).catch(() => undefined);
+  }
+}
+
+app.whenReady().then(async () => {
+  app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
+  
+  const singleInstanceLock = app.requestSingleInstanceLock();
+  if (!singleInstanceLock) {
+    app.quit();
+    return;
+  }
+
+  app.on("second-instance", () => {
+    if (!mainWindow) return;
+    if (mainWindow.isMinimized()) {
+      mainWindow.restore();
+    }
+    mainWindow.focus();
+  });
+
+  const userDataPath = portableRoot ? path.join(portableRoot, "user-data") : app.getPath("userData");
+  app.setName("Hermes桌面端");
+  app.setPath("userData", userDataPath);
+  
+  const appPaths = new AppPaths(userDataPath);
+  await appPaths.ensureBaseLayout();
+
+  const configStore = new RuntimeConfigStore(appPaths.runtimeConfigPath());
+  const budgeter = new MemoryBudgeter();
+  const autoHotkeyService = new AutoHotkeyService();
+  const windowsToolExecutor = new WindowsToolExecutor(
+    async () => resolveEnginePermissions(await configStore.read(), "hermes"),
+    autoHotkeyService,
+  );
+  windowsControlBridge = new WindowsControlBridge(
+    async () => resolveEnginePermissions(await configStore.read(), "hermes"),
+    () => app.getVersion(),
+    windowsToolExecutor,
+  );
+  await windowsControlBridge.start();
+  const hermesWindowsBridgeTestService = new HermesWindowsBridgeTestService(
+    windowsControlBridge,
+    () => configStore.read(),
+    fetch,
+    runCommand,
+    windowsToolExecutor,
+  );
+  const hermes = new HermesCliAdapter(
+    appPaths,
+    budgeter,
+    () => configStore.getEnginePath("hermes"),
+    () => configStore.read(),
+    async (distro?: string) => {
+      const config = await configStore.read();
+      const permissions = resolveEnginePermissions(config, "hermes");
+      if (!permissions.contextBridge || !permissions.enabled) {
+        return undefined;
+      }
+      const host = config.hermesRuntime?.mode === "wsl"
+        ? await resolveWindowsHostForWsl(distro)
+        : "127.0.0.1";
+      return windowsControlBridge?.accessForHost(host);
+    },
+  );
+  const memoryBroker = new MemoryBroker(budgeter);
+  const sessionLog = new SessionLog(appPaths);
+  const workSessionService = new WorkSessionService(appPaths);
+  await workSessionService.ensureDefault();
+  const workspaceLock = new WorkspaceLock();
+  const snapshotManager = new SnapshotManager(appPaths);
+  const fileTreeService = new FileTreeService();
+  const updateService = new UpdateService([hermes]);
+  const secretVault = new SecretVault(path.join(appPaths.vaultDir(), "secrets.enc"));
+  await secretVault.status();
+  const runtimeEnvResolver = new RuntimeEnvResolver(configStore, secretVault);
+  const engineProbeService = new EngineProbeService(appPaths, hermes, configStore);
+  const setupService = new SetupService(appPaths, hermes, configStore, secretVault);
+  const diagnosticsService = new DiagnosticsService(
+    appPaths,
+    setupService,
+    configStore,
+    sessionLog,
+    hermes,
+    engineProbeService,
+    snapshotManager,
+    workspaceLock,
+    () => ({
+      appVersion: app.getVersion(),
+      userDataPath,
+      portable: isPortable,
+      rendererMode: isDevMode ? "dev" : "built",
+    }),
+  );
+  const hermesWebUiService = new HermesWebUiService(appPaths, () => configStore.getEnginePath("hermes"));
+  const hermesConnectorService = new HermesConnectorService(
+    appPaths,
+    secretVault,
+    () => configStore.getEnginePath("hermes"),
+    async () => (await configStore.read()).hermesRuntime?.pythonCommand,
+  );
+  const windowsNativeIntentService = new WindowsNativeIntentService();
+  const hermesToolLoopRunner = new HermesToolLoopRunner(hermes, windowsToolExecutor);
+  const preflightService = new TaskPreflightService(
+    appPaths,
+    workspaceLock,
+    hermes,
+    configStore,
+    secretVault,
+  );
+
+  function createWindow() {
+    mainWindow = new BrowserWindow({
+      width: 1280,
+      height: 820,
+      minWidth: 980,
+      minHeight: 680,
+      title: "Hermes桌面端",
+      backgroundColor: "#f5f7f8",
+      autoHideMenuBar: true,
+      webPreferences: {
+        preload: path.join(__dirname, "..", "preload", "index.js"),
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: false,
+      },
+    });
+
+    mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+      if (permission === "media") {
+        callback(true);
+      } else {
+        callback(false);
+      }
+    });
+
+    const devServerUrl = process.env.VITE_DEV_SERVER_URL;
+    if (devServerUrl) {
+      void mainWindow.loadURL(devServerUrl);
+    } else {
+      void mainWindow.loadFile(path.join(__dirname, "..", "..", "renderer", "index.html"));
+    }
+
+    if (isDevMode) {
+      mainWindow.webContents.openDevTools();
+    }
+
+    mainWindow.on("closed", () => {
+      mainWindow = undefined;
+    });
+  }
+
+  createWindow();
+
+  if (!mainWindow) {
+    throw new Error("主窗口创建失败");
+  }
+
+  const taskRunner = new TaskRunner(
+    appPaths,
+    memoryBroker,
+    workspaceLock,
+    snapshotManager,
+    preflightService,
+    runtimeEnvResolver,
+    hermes,
+    sessionLog,
+    () => mainWindow,
+    hermesToolLoopRunner,
+    windowsNativeIntentService,
+  );
+
+  registerIpcHandlers(mainWindow, {
+    appPaths,
+    taskRunner,
+    snapshotManager,
+    fileTreeService,
+    workspaceLock,
+    sessionLog,
+    workSessionService,
+    hermes,
+    updateService,
+    engineProbeService,
+    configStore,
+    runtimeEnvResolver,
+    secretVault,
+    setupService,
+    diagnosticsService,
+    hermesWebUiService,
+    hermesConnectorService,
+    windowsControlBridge,
+    hermesWindowsBridgeTestService,
+    clientInfo: () => ({
+      appVersion: app.getVersion(),
+      userDataPath,
+      portable: isPortable,
+      rendererMode: isDevMode ? "dev" : "built",
+    }),
+  });
+
+  scheduleStartupWarmup({ hermes, configStore, runtimeEnvResolver });
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0) {
+      createWindow();
+    }
+  });
+
+  app.on("window-all-closed", () => {
+    if (process.platform !== "darwin") {
+      app.quit();
+    }
+  });
+
+  app.on("before-quit", () => {
+    void windowsControlBridge?.stop();
+    void hermesConnectorService.shutdown();
+  });
+});

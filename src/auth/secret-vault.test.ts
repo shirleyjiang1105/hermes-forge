@@ -1,0 +1,42 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { tmpdir } from "node:os";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const decryptString = vi.fn((buffer: Buffer) => buffer.toString("utf8"));
+
+vi.mock("electron", () => ({
+  safeStorage: {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(value, "utf8"),
+    decryptString,
+  },
+}));
+
+describe("SecretVault", () => {
+  beforeEach(() => {
+    decryptString.mockImplementation((buffer: Buffer) => buffer.toString("utf8"));
+  });
+
+  it("returns undefined instead of throwing when a stored ciphertext is corrupted", async () => {
+    const { SecretVault } = await import("./secret-vault");
+    const dir = await fs.mkdtemp(path.join(tmpdir(), "secret-vault-"));
+    const vaultPath = path.join(dir, "secrets.enc");
+    await fs.writeFile(vaultPath, JSON.stringify({
+      mode: "safe-storage",
+      items: { "provider.openrouter.apiKey": Buffer.from("broken").toString("base64") },
+      metadata: {},
+    }), "utf8");
+    decryptString.mockImplementation(() => {
+      throw new Error("cannot decrypt");
+    });
+
+    const vault = new SecretVault(vaultPath);
+
+    await expect(vault.readSecret("provider.openrouter.apiKey")).resolves.toBeUndefined();
+    await expect(vault.hasSecret("provider.openrouter.apiKey")).resolves.toBe(false);
+    await expect(vault.getSecretMeta("provider.openrouter.apiKey")).resolves.toMatchObject({
+      lastError: "cannot decrypt",
+    });
+  });
+});

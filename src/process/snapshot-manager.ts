@@ -1,0 +1,185 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import type { AppPaths } from "../main/app-paths";
+import type { SnapshotRecord, SnapshotRestoreResult } from "../shared/types";
+
+const EXCLUDED_DIRS = new Set([
+  ".git",
+  "node_modules",
+  "dist",
+  "release",
+  ".cache",
+  ".pnpm-store",
+  "__pycache__",
+]);
+
+type SnapshotManifest = SnapshotRecord;
+type SnapshotOptions = {
+  markLatest?: boolean;
+  manifestOnly?: boolean;
+  scopedPaths?: string[];
+};
+
+export class SnapshotManager {
+  constructor(private readonly appPaths: AppPaths) {}
+
+  async createSnapshot(workspaceId: string, workspacePath: string, sessionId: string, options: SnapshotOptions = {}) {
+    const snapshotId = `${new Date().toISOString().replace(/[:.]/g, "-")}-${sessionId.slice(0, 8)}`;
+    const snapshotDir = this.snapshotDir(workspaceId, snapshotId);
+    const manifest: SnapshotManifest = {
+      snapshotId,
+      workspaceId,
+      workspacePath,
+      createdAt: new Date().toISOString(),
+      copiedFiles: 0,
+      skippedFiles: 0,
+      mode: options.manifestOnly ? "manifest" : (options.scopedPaths?.length ? "scoped" : "full"),
+      manifestOnly: Boolean(options.manifestOnly),
+      scopedPaths: [],
+    };
+
+    await fs.mkdir(snapshotDir, { recursive: true });
+    const scopedPaths = this.normalizeScopedPaths(workspacePath, options.scopedPaths ?? []);
+    manifest.scopedPaths = scopedPaths.map((target) => path.relative(workspacePath, target) || ".");
+    if (options.manifestOnly) {
+      manifest.skippedFiles += 1;
+    } else if (scopedPaths.length > 0) {
+      await this.copySelected(workspacePath, snapshotDir, scopedPaths, manifest);
+    } else {
+      await this.copyTree(workspacePath, snapshotDir, manifest);
+    }
+    await fs.writeFile(path.join(snapshotDir, "snapshot.manifest.json"), JSON.stringify(manifest, null, 2), "utf8");
+    if (options.markLatest ?? true) {
+      await fs.writeFile(path.join(this.snapshotsRoot(workspaceId), "latest.txt"), snapshotId, "utf8");
+    }
+    return manifest;
+  }
+
+  async restoreLatest(workspaceId: string): Promise<SnapshotRestoreResult> {
+    const latestPath = path.join(this.snapshotsRoot(workspaceId), "latest.txt");
+    const snapshotId = (await fs.readFile(latestPath, "utf8").catch(() => "")).trim();
+    if (!snapshotId) {
+      return { restored: false, message: "没有找到可撤销的快照。" };
+    }
+
+    const snapshotDir = this.snapshotDir(workspaceId, snapshotId);
+    const manifestPath = path.join(snapshotDir, "snapshot.manifest.json");
+    const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8")) as SnapshotManifest;
+    await this.createSnapshot(workspaceId, manifest.workspacePath, "before-restore", { markLatest: false });
+    await this.copyTree(snapshotDir, manifest.workspacePath, {
+      ...manifest,
+      copiedFiles: 0,
+      skippedFiles: 0,
+    }, new Set(["snapshot.manifest.json"]));
+
+    return {
+      restored: true,
+      snapshotId,
+      message: "已把最新快照覆盖回工作区。为避免误删，撤销不会删除快照后新增的文件。",
+    };
+  }
+
+  async listSnapshots(workspaceId: string): Promise<SnapshotRecord[]> {
+    const root = this.snapshotsRoot(workspaceId);
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const snapshots = await Promise.all(
+      entries
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const manifestPath = path.join(root, entry.name, "snapshot.manifest.json");
+          const raw = await fs.readFile(manifestPath, "utf8").catch(() => "");
+          if (!raw) {
+            return undefined;
+          }
+          return JSON.parse(raw) as SnapshotRecord;
+        }),
+    );
+
+    return snapshots
+      .filter((snapshot): snapshot is SnapshotRecord => Boolean(snapshot))
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, 12);
+  }
+
+  private snapshotsRoot(workspaceId: string) {
+    return path.join(this.appPaths.workspaceDir(workspaceId), "snapshots");
+  }
+
+  private snapshotDir(workspaceId: string, snapshotId: string) {
+    return path.join(this.snapshotsRoot(workspaceId), snapshotId);
+  }
+
+  private async copyTree(
+    source: string,
+    target: string,
+    manifest: SnapshotManifest,
+    excludedFiles = new Set<string>(),
+  ) {
+    await fs.mkdir(target, { recursive: true });
+    const entries = await fs.readdir(source, { withFileTypes: true }).catch(() => []);
+
+    for (const entry of entries) {
+      if (excludedFiles.has(entry.name) || EXCLUDED_DIRS.has(entry.name)) {
+        manifest.skippedFiles += 1;
+        continue;
+      }
+
+      const sourcePath = path.join(source, entry.name);
+      const targetPath = path.join(target, entry.name);
+
+      if (entry.isDirectory()) {
+        await this.copyTree(sourcePath, targetPath, manifest, excludedFiles);
+        continue;
+      }
+
+      if (!entry.isFile()) {
+        manifest.skippedFiles += 1;
+        continue;
+      }
+
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.copyFile(sourcePath, targetPath);
+      manifest.copiedFiles += 1;
+    }
+  }
+
+  private async copySelected(
+    workspacePath: string,
+    snapshotDir: string,
+    scopedPaths: string[],
+    manifest: SnapshotManifest,
+  ) {
+    for (const scopedPath of scopedPaths) {
+      const relativePath = path.relative(workspacePath, scopedPath);
+      if (!relativePath || relativePath.startsWith("..")) {
+        manifest.skippedFiles += 1;
+        continue;
+      }
+      const targetPath = path.join(snapshotDir, relativePath);
+      const stat = await fs.stat(scopedPath).catch(() => undefined);
+      if (!stat) {
+        manifest.skippedFiles += 1;
+        continue;
+      }
+      if (stat.isDirectory()) {
+        await this.copyTree(scopedPath, targetPath, manifest);
+        continue;
+      }
+      if (!stat.isFile()) {
+        manifest.skippedFiles += 1;
+        continue;
+      }
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.copyFile(scopedPath, targetPath);
+      manifest.copiedFiles += 1;
+    }
+  }
+
+  private normalizeScopedPaths(workspacePath: string, scopedPaths: string[]) {
+    const workspaceRoot = path.resolve(workspacePath);
+    return [...new Set(scopedPaths.map((target) => path.resolve(target).trim()).filter(Boolean))]
+      .filter((target) => target === workspaceRoot || target.startsWith(`${workspaceRoot}${path.sep}`))
+      .sort((a, b) => a.length - b.length)
+      .filter((target, index, items) => !items.slice(0, index).some((parent) => target.startsWith(`${parent}${path.sep}`)));
+  }
+}

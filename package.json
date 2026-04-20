@@ -1,0 +1,88 @@
+{
+  "name": "hermes-desktop-workspace",
+  "version": "0.1.0",
+  "description": "Electron-based local desktop workspace for Hermes Agent.",
+  "author": "",
+  "license": "MIT",
+  "main": "dist/main/main/index.js",
+  "private": false,
+  "scripts": {
+    "dev": "concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && npm run build:electron && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
+    "start": "npm run build && electron .",
+    "build": "npm run build:electron && vite build",
+    "build:electron": "tsc -p tsconfig.main.json",
+    "check": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p tsconfig.main.json",
+    "test": "vitest run",
+    "package:win": "npm run build && electron-builder --win nsis portable",
+    "package:portable": "npm run build && electron-builder --win portable"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.0",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/sql.js": "^1.4.11",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.5.0",
+    "concurrently": "^9.2.1",
+    "cross-env": "^10.1.0",
+    "electron": "^41.2.1",
+    "electron-builder": "^26.8.1",
+    "postcss": "^8.5.10",
+    "tailwindcss": "^3.4.19",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.8",
+    "vitest": "^3.2.4",
+    "wait-on": "^9.0.5"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.99.0",
+    "@types/qrcode": "^1.5.6",
+    "clsx": "^2.1.1",
+    "jsdom": "^26.1.0",
+    "lucide-react": "^1.8.0",
+    "qrcode": "^1.5.4",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-markdown": "^10.1.0",
+    "rehype-raw": "^7.0.0",
+    "rehype-sanitize": "^6.0.0",
+    "remark-gfm": "^4.0.1",
+    "sql.js": "^1.14.1",
+    "tailwind-merge": "^3.5.0",
+    "zod": "^4.3.6",
+    "zustand": "^5.0.12"
+  },
+  "build": {
+    "appId": "com.zhenghebao.aiworkbench",
+    "productName": "Hermes桌面端",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "node_modules/sql.js/**/*",
+      "node_modules/zod/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "node_modules/sql.js/dist/sql-wasm.wasm",
+        "to": "sql-wasm.wasm"
+      },
+      {
+        "from": "resources/hermes-windows-mcp-server.py",
+        "to": "hermes-windows-mcp-server.py"
+      }
+    ],
+    "win": {
+      "icon": "assets/icons/hermes-workbench.ico",
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  }
+}
