@@ -1,44 +1,45 @@
 # Hermes Forge Roadmap
 
-This roadmap is intentionally community-friendly. Pick an area, open an issue, sketch the approach, and send a Draft PR when you want early feedback.
+Hermes Forge is an early community release. The goal is to turn a working local Hermes desktop shell into a reliable, extensible and privacy-conscious desktop workspace.
 
-## 0.1 Release Readiness
+## High Priority
 
-- Finish public naming and release metadata.
-- Keep the repository free of local paths, secrets, logs, caches and build output.
-- Publish clear setup, build and contribution docs.
-- Add a basic GitHub Actions workflow for typecheck, tests and build.
+- Finish WeChat QR login: QR generation, polling, confirmation state, timeout handling, token persistence, gateway handoff and recovery from expired sessions.
+- Stabilize first-run setup: dependency diagnostics, Hermes install progress, retry actions, manual path selection and clearer failure messages.
+- Harden model setup: guided local endpoint configuration, provider profile validation, secret reference checks and live connection tests.
+- Improve Windows bridge consent: explicit permission review, command previews, audit logging and safer defaults for file writes and shell actions.
 
-## Desktop Experience
+## Connectors and Automation
 
-- Improve first-run onboarding for Hermes path selection and model setup.
-- Add a theme system with documented tokens.
-- Refine the glass UI for accessibility, contrast and keyboard navigation.
-- Add better empty states for new users who have not configured Hermes yet.
+- Implement production-grade connector adapters beyond static configuration forms.
+- Add connector health checks and gateway lifecycle controls.
+- Keep secrets in main-process storage and prevent renderer-side credential exposure.
+- Define connector test fixtures so contributors can validate behavior without real accounts.
 
-## Runtime and Platform
+## Platform and Packaging
 
-- Harden Windows / WSL runtime detection.
-- Add macOS and Linux runtime notes once maintainers can test those flows.
-- Improve diagnostics for Python, Hermes CLI, local models and bridge connectivity.
-- Make packaging output easier to sign and publish.
+- Verify Windows installer and portable builds on clean machines.
+- Add code signing and release provenance.
+- Document WSL assumptions and failure modes.
+- Add macOS and Linux runtime discovery once maintainers can test those platforms.
+- Explore auto-update channels after release signing is solved.
 
-## Extensions
+## Extension System
 
-- Define a plugin contract for panels, tools and provider integrations.
-- Add connector presets without storing secrets in the renderer.
-- Support community-maintained tool packs and setup recipes.
+- Design a plugin contract for dashboard panels, Hermes tools, model providers and connector packs.
+- Define extension permissions and review boundaries.
+- Add examples for a minimal panel plugin and a minimal connector plugin.
 
 ## Security and Privacy
 
-- Expand tests around path validation, IPC schemas and command permissions.
+- Expand tests for path validation, IPC schemas and command execution boundaries.
 - Improve redaction for diagnostics, logs and copied error output.
-- Add permission review UX before high-impact tool calls.
-- Document the threat model for local Agent operations.
+- Document the local-agent threat model.
+- Add security review checklist for PRs touching IPC, secrets, bridges or process execution.
 
 ## Documentation
 
-- Add screenshots or short demos after the UI stabilizes.
-- Add troubleshooting for common Hermes, WSL and local model issues.
-- Add architecture diagrams for IPC, task execution and bridge access.
-- Translate core docs between Chinese and English as community bandwidth allows.
+- Add screenshots and short demos.
+- Add architecture diagrams for IPC, task execution, setup and bridge access.
+- Add troubleshooting guides for Hermes CLI, Python, WSL, local model endpoints and packaging.
+- Translate core docs between Chinese and English as the community grows.
