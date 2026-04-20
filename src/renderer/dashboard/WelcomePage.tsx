@@ -88,8 +88,8 @@ export function WelcomePage(props: { onComplete: () => void }) {
             <Sparkles size={32} className="text-white" />
           </div>
           
-          <h1 className="text-2xl font-bold text-slate-900">欢迎使用 Hermes 工作台</h1>
-          <p className="mt-2 text-slate-500">智能任务助手，助您高效完成工作</p>
+          <h1 className="text-2xl font-bold text-slate-900">欢迎使用 Hermes Forge</h1>
+          <p className="mt-2 text-slate-500">本地优先的 Hermes Agent 桌面工坊</p>
         </div>
 
         <div className="mt-8 rounded-2xl bg-white p-6 shadow-lg shadow-slate-200/50">
@@ -183,7 +183,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
         </div>
 
         <p className="mt-6 text-center text-xs text-slate-400">
-          Hermes桌面端 v{store.clientInfo?.appVersion || "unknown"}
+          Hermes Forge v{store.clientInfo?.appVersion || "unknown"}
         </p>
       </div>
     </div>

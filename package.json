@@ -1,7 +1,7 @@
 {
-  "name": "hermes-desktop-workspace",
+  "name": "hermes-forge",
   "version": "0.1.0",
-  "description": "Electron-based local desktop workspace for Hermes Agent.",
+  "description": "Local-first, community-hackable desktop forge for Hermes Agent.",
   "author": "",
   "license": "MIT",
   "main": "dist/main/main/index.js",
@@ -55,8 +55,8 @@
     "zustand": "^5.0.12"
   },
   "build": {
-    "appId": "com.zhenghebao.aiworkbench",
-    "productName": "Hermes桌面端",
+    "appId": "dev.hermesforge.desktop",
+    "productName": "Hermes Forge",
     "directories": {
       "output": "release"
     },

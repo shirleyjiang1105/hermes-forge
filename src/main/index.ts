@@ -102,7 +102,7 @@ app.whenReady().then(async () => {
   });
 
   const userDataPath = portableRoot ? path.join(portableRoot, "user-data") : app.getPath("userData");
-  app.setName("Hermes桌面端");
+  app.setName("Hermes Forge");
   app.setPath("userData", userDataPath);
   
   const appPaths = new AppPaths(userDataPath);
@@ -197,7 +197,7 @@ app.whenReady().then(async () => {
       height: 820,
       minWidth: 980,
       minHeight: 680,
-      title: "Hermes桌面端",
+      title: "Hermes Forge",
       backgroundColor: "#f5f7f8",
       autoHideMenuBar: true,
       webPreferences: {

@@ -112,7 +112,7 @@ describe("DashboardView", () => {
     const header = within(screen.getByRole("banner"));
 
     expect(header.getByText("测试会话")).toBeTruthy();
-    expect(header.getByText("Hermes桌面端")).toBeTruthy();
+    expect(header.getByText("Hermes Forge")).toBeTruthy();
     expect(header.getByRole("button", { name: "文件树" })).toBeTruthy();
     expect(header.getByRole("button", { name: "检查器" })).toBeTruthy();
     expect(header.queryByRole("button", { name: "清空会话" })).toBeNull();

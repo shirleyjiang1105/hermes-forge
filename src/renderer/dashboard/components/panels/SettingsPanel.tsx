@@ -80,8 +80,8 @@ export function SettingsPanel(props: {
             <Settings size={22} className="text-indigo-600" />
           </div>
           <div>
-            <h3 className="text-base font-semibold text-slate-900">Hermes桌面端</h3>
-            <p className="text-sm text-slate-500">为 Hermes Agent 打造的原生工作台</p>
+            <h3 className="text-base font-semibold text-slate-900">Hermes Forge</h3>
+            <p className="text-sm text-slate-500">为社区共创打造的 Hermes Agent 本地工坊</p>
           </div>
         </div>
       </section>

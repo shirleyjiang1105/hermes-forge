@@ -75,7 +75,7 @@ export function HermesHeader(props: {
           <div className="grid h-8 w-8 place-items-center rounded-lg bg-indigo-100">
             <Sparkles size={16} className="text-indigo-600" />
           </div>
-          <span className="text-sm font-semibold text-slate-800">Hermes桌面端</span>
+          <span className="text-sm font-semibold text-slate-800">Hermes Forge</span>
         </div>
 
         {activeSession ? (
