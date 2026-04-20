@@ -4,6 +4,14 @@
   "description": "Local-first, community-hackable desktop forge for Hermes Agent.",
   "author": "",
   "license": "MIT",
+  "homepage": "https://github.com/Mahiruxia/hermes-forge#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Mahiruxia/hermes-forge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Mahiruxia/hermes-forge/issues"
+  },
   "main": "dist/main/main/index.js",
   "private": false,
   "scripts": {
