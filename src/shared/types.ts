@@ -875,6 +875,10 @@ export type EngineMaintenanceResult = {
   logPath?: string;
 };
 
+export type HermesInstallResult = EngineMaintenanceResult & {
+  rootPath?: string;
+};
+
 export type EngineProbeMetric = {
   label: string;
   value: string;

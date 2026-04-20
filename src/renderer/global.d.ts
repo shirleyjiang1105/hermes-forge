@@ -15,6 +15,7 @@ import type {
   HermesConnectorSaveInput,
   HermesGatewayActionResult,
   HermesGatewayStatus,
+  HermesInstallResult,
   HermesWindowsBridgeTestResult,
   HermesMemoryFile,
   HermesProbeSummary,
@@ -162,6 +163,7 @@ declare global {
       probeHermes(workspacePath?: string): Promise<EngineWarmupResult>;
       checkUpdates(): Promise<EngineUpdateStatus[]>;
       updateHermes(): Promise<EngineMaintenanceResult>;
+      installHermes(): Promise<HermesInstallResult>;
       getRuntimeConfig(): Promise<RuntimeConfig>;
       getConfigOverview(workspacePath?: string): Promise<any>;
       testHermesWindowsBridge(): Promise<HermesWindowsBridgeTestResult>;

@@ -7,6 +7,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
   const [status, setStatus] = useState<"detecting" | "found" | "not-found" | "installing">("detecting");
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("正在检测本地 Hermes...");
+  const [detail, setDetail] = useState("");
 
   useEffect(() => {
     async function detectHermes() {
@@ -24,15 +25,18 @@ export function WelcomePage(props: { onComplete: () => void }) {
         if (probe?.probe?.status === "healthy") {
           setStatus("found");
           setMessage("检测到本地 Hermes，正在加载配置...");
+          setDetail(probe.probe.secondaryMetric);
           setProgress(100);
         } else {
           setStatus("not-found");
-          setMessage("未检测到本地 Hermes");
+          setMessage("未检测到可用 Hermes");
+          setDetail(probe?.probe?.message ?? "可以手动配置路径，或使用一键部署尝试自动安装。");
         }
       } catch (error) {
         console.error("Hermes detection failed:", error);
         setStatus("not-found");
         setMessage("检测失败，请手动配置");
+        setDetail(error instanceof Error ? error.message : "未知错误");
       }
     }
     
@@ -46,27 +50,39 @@ export function WelcomePage(props: { onComplete: () => void }) {
 
   async function handleAutoDeploy() {
     setStatus("installing");
-    setProgress(0);
-    setMessage("正在部署 Hermes...");
+    setProgress(15);
+    setMessage("正在执行 Hermes 一键部署...");
+    setDetail("将检测 Git 与 Python，必要时克隆 Hermes Agent，并在完成后执行真实健康检查。");
     
     try {
-      // 模拟部署进度
-      for (let i = 0; i <= 100; i += 10) {
-        await new Promise(resolve => setTimeout(resolve, 200));
-        setProgress(i);
-        if (i < 50) setMessage("正在下载 Hermes CLI...");
-        else if (i < 80) setMessage("正在安装依赖...");
-        else setMessage("正在初始化配置...");
+      const progressTimer = window.setInterval(() => {
+        setProgress((current) => Math.min(current + 8, 88));
+      }, 1000);
+      const result = await window.workbenchClient.installHermes();
+      window.clearInterval(progressTimer);
+      setProgress(92);
+      setMessage(result.message);
+      setDetail(result.logPath ? `安装日志：${result.logPath}` : "");
+      if (!result.ok) {
+        setStatus("not-found");
+        return;
       }
-      
-      setMessage("部署完成！正在加载...");
-      await new Promise(resolve => setTimeout(resolve, 500));
-      
+      const probe = await window.workbenchClient.getHermesProbe();
+      if (probe.probe.status !== "healthy") {
+        setStatus("not-found");
+        setMessage("Hermes 已安装但仍未通过健康检查");
+        setDetail(probe.probe.message);
+        return;
+      }
+      setStatus("found");
+      setProgress(100);
+      setDetail(probe.probe.secondaryMetric);
       store.setFirstLaunch(false);
       props.onComplete();
-    } catch {
+    } catch (error) {
       setStatus("not-found");
       setMessage("部署失败，请手动安装");
+      setDetail(error instanceof Error ? error.message : "未知错误");
     }
   }
 
@@ -115,6 +131,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
               </div>
               <h3 className="text-lg font-semibold text-slate-900">检测到本地 Hermes</h3>
               <p className="mt-2 text-sm text-slate-500">将自动继承本地配置（技能、记忆等）</p>
+              {detail ? <p className="mt-2 break-all text-xs text-slate-400">{detail}</p> : null}
               <button
                 className="mt-6 w-full rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md active:scale-[0.98]"
                 onClick={() => { store.setFirstLaunch(false); props.onComplete(); }}
@@ -133,6 +150,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
               </div>
               <h3 className="text-lg font-semibold text-slate-900">未检测到 Hermes</h3>
               <p className="mt-2 text-sm text-slate-500">{message}</p>
+              {detail ? <p className="mt-2 break-all text-xs leading-5 text-slate-400">{detail}</p> : null}
               
               <div className="mt-6 space-y-3">
                 <button
@@ -171,6 +189,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
                 <Loader2 size={28} className="animate-spin text-indigo-600" />
               </div>
               <p className="text-slate-600">{message}</p>
+              {detail ? <p className="mt-2 break-all text-xs leading-5 text-slate-400">{detail}</p> : null}
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
                 <div 
                   className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-purple-500 transition-all duration-200"

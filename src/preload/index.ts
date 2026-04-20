@@ -39,6 +39,7 @@ import type {
   HermesGatewayActionResult,
   HermesGatewayStatus,
   HermesWindowsBridgeTestResult,
+  HermesInstallResult,
   HermesProfile,
   FilePreviewResult,
   FileBreadcrumbItem,
@@ -158,6 +159,7 @@ const api = {
     ipcRenderer.invoke(IpcChannels.probeHermes, workspacePath) as Promise<EngineWarmupResult>,
   checkUpdates: () => ipcRenderer.invoke(IpcChannels.checkUpdates) as Promise<EngineUpdateStatus[]>,
   updateHermes: () => ipcRenderer.invoke(IpcChannels.updateHermes) as Promise<EngineMaintenanceResult>,
+  installHermes: () => ipcRenderer.invoke(IpcChannels.installHermes) as Promise<HermesInstallResult>,
   getRuntimeConfig: () => ipcRenderer.invoke(IpcChannels.getRuntimeConfig) as Promise<RuntimeConfig>,
   getConfigOverview: (workspacePath?: string) => ipcRenderer.invoke(IpcChannels.getConfigOverview, workspacePath) as Promise<any>,
   testHermesWindowsBridge: () =>

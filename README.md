@@ -111,6 +111,23 @@ Hermes 根路径不会在源码中写死。应用会按以下顺序查找：
 
 真实 API Key、Bridge token 和本地模型地址请写入 `.env` 或应用设置，不要提交到仓库。`.env.example` 只保留空值和安全示例。
 
+首次启动时，Hermes Forge 会通过真实的 Hermes probe 检测当前登录用户环境下的 Hermes CLI 是否可用。未检测到时，一键部署会走主进程安装流程，而不是前端模拟：
+
+1. 检测 Git 与 Python 是否可用。
+2. 将 Hermes Agent 克隆到 `HERMES_INSTALL_DIR`，默认是当前系统用户目录下的 `Hermes Agent`。
+3. 如果存在 `pyproject.toml` 或 `requirements.txt`，尝试安装 Python 依赖。
+4. 保存 Hermes 根路径到本机运行配置。
+5. 再次执行 Hermes 健康检查，只有通过后才进入应用。
+
+可以通过 `.env` 覆盖安装源和安装目录：
+
+```dotenv
+HERMES_INSTALL_DIR=
+HERMES_INSTALL_REPO_URL=https://github.com/NousResearch/hermes-agent.git
+```
+
+如果目标目录已存在且不是 Hermes 安装目录，一键部署会停止并返回安装日志路径，不会覆盖用户文件。
+
 ## Project Structure
 
 ```text

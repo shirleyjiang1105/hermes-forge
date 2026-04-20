@@ -345,6 +345,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   });
 
   ipcMain.handle(IpcChannels.updateHermes, () => services.setupService.updateHermes());
+  ipcMain.handle(IpcChannels.installHermes, () => services.setupService.installHermes());
   ipcMain.handle(IpcChannels.getRuntimeConfig, () => services.configStore.read());
   ipcMain.handle(IpcChannels.testHermesWindowsBridge, () => services.hermesWindowsBridgeTestService.test());
   ipcMain.handle(IpcChannels.getConfigOverview, async (_event, workspacePath?: string) => {
