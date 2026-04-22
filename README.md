@@ -1,8 +1,8 @@
 # Hermes Forge
 
-Hermes Forge 是一个面向 Windows 桌面环境的本地优先 Hermes Agent 客户端。它不是简单的聊天壳，而是把 Hermes CLI、模型配置、Windows 原生能力、微信 Gateway、文件附件、权限审批和自动更新整合在一起的桌面工作台。
+Hermes Forge 是一个面向 Windows 桌面环境的本地优先 Hermes Agent 客户端。它不是简单的聊天壳，而是把 Hermes CLI、模型配置、Windows 原生能力、微信 Gateway、文件附件、权限审批、反馈闭环和自动更新整合在一起的桌面工作台。
 
-项目的目标是：让普通用户可以在没有手动配置 Hermes 的情况下完成首次安装与模型接入；也让开发者可以清楚地审计主进程、IPC、权限、日志和运行时边界，继续扩展一个可维护的本地 Agent 客户端。
+项目的目标是：让普通用户可以在没有手动配置 Hermes 的情况下完成首次安装、路径选择、模型接入和后续升级；也让开发者可以清楚地审计主进程、IPC、权限、日志、反馈同步和运行时边界，继续扩展一个可维护的本地 Agent 客户端。
 
 > Hermes Forge 不是 Hermes Agent 官方客户端，而是围绕 Hermes Agent 桌面体验构建的社区项目。
 
@@ -29,15 +29,19 @@ Hermes Forge 主要解决三个问题：
 3. **为本地 Agent 提供可审计的 Windows 能力边界。**
    文件写入、PowerShell、键鼠、窗口控制等高风险动作统一经过主进程审批服务；Renderer 只通过 preload 暴露的白名单 IPC 与主进程交互。
 
+4. **让反馈和维护形成闭环。**
+   客户端内置“赞助与反馈”入口，反馈会先保存在本机，再同步到维护者仪表盘；维护者可以在仪表盘查看、回复、标记状态或永久删除，客户端反馈墙会展示服务器侧回复。
+
 ## 当前状态
 
 当前公开版本为 **v0.1.6**，已经具备可安装、可演示、可继续开发的主链路：
 
 - Windows 安装包已通过 GitHub Releases 发布。
 - GitHub Actions 可在 tag 发布时自动构建 Windows 和 macOS 资产。
-- `electron-updater` 已接入 GitHub Releases，支持客户端自动检查更新。
+- `electron-updater` 已接入 GitHub Releases，支持启动后后台检查、右上角手动检查更新、下载进度和重启安装提示。
 - 核心架构已收口为 Hermes 单引擎，不再保留多引擎分叉复杂度。
 - 任务事件统一通过 `task:event` 总线传递，便于 UI、日志和审批联动。
+- v0.1.6 统一了 Release 资产命名，并修复 Windows exe 图标资源写入，自动更新元数据会指向真实存在的安装包。
 
 它仍然是早期社区版本，不建议当作完全成熟的生产软件看待。尤其是 macOS 包尚未签名，Windows 物理机兼容性、微信真实账号场景、非微信连接器 runtime、安装器签名和 Electron 冒烟测试仍需要继续打磨。
 
@@ -48,6 +52,8 @@ Hermes Forge 主要解决三个问题：
 - 首次运行自动检测 Hermes、Git、Python、winget、模型配置、微信 `aiohttp` 依赖和用户数据目录权限。
 - 未检测到 Hermes 时，可在应用内自动克隆 Hermes Agent、安装 Python 依赖并进行健康检查。
 - Git、Python、微信依赖缺失时，系统状态页和欢迎页会给出原因、建议和一键修复入口。
+- 设置页和运行环境面板支持选择 Hermes 安装目录、打开当前路径，并把自动安装部署到指定路径。
+- Hermes 自动安装过程会通过 IPC 推送阶段和百分比进度，欢迎页、设置页和控制中心都可以显示安装进度。
 - 自动安装过程会写入诊断日志，失败时不会导致客户端崩溃。
 
 ### Hermes 运行与任务工作台
@@ -78,18 +84,29 @@ Hermes Forge 主要解决三个问题：
 - 微信依赖缺失时会提供可恢复提示与修复入口。
 - 其他平台连接器已具备配置模型，但真实 runtime adapter 仍在路线图中。
 
+### 赞助、反馈与维护闭环
+
+- 内置“赞助与反馈”页面，展示微信赞赏和支付宝支持二维码。
+- 反馈表单支持匿名或展示 ID；提交后会先写入本机，再同步到维护者仪表盘。
+- 客户端反馈墙默认折叠，用户主动展开后才拉取公开反馈和维护者回复。
+- 维护者仪表盘支持查看反馈、回复反馈、标记已读/规划/完成、隐藏或永久删除。
+- 反馈同步失败不会阻断本地记录，避免离线场景下丢失用户输入。
+
 ### 发布与自动更新
 
 - 使用 `electron-builder` 打包 Windows NSIS / portable 和 macOS dmg / zip。
 - 使用 `electron-updater` + GitHub Releases 实现启动后静默检查、后台下载、进度 IPC 和下载完成重启提示。
+- 右上角提供手动检查更新按钮，下载中会展示进度。
+- Windows Release 资产使用稳定无空格命名，例如 `Hermes-Forge-0.1.6-x64.exe`，避免更新元数据指向不存在的文件。
+- Windows exe 会在打包后写入 `assets/icons/hermes-workbench.ico`，安装包、窗口和任务栏图标保持一致。
 - GitHub Actions 在推送 `v*` tag 时自动构建并上传 Release 资产。
 
 ## 下载与安装
 
 前往 [Releases](https://github.com/Mahiruxia/hermes-forge/releases) 下载最新版本。
 
-- Windows 用户下载 `Hermes.Forge.Setup.x.y.z.exe`。
-- macOS Apple Silicon 用户可下载 `Hermes.Forge-x.y.z-arm64.dmg`。
+- Windows 用户下载 `Hermes-Forge-x.y.z-x64.exe`。
+- macOS Apple Silicon 用户可下载 `Hermes-Forge-x.y.z-arm64.dmg`。
 - `latest.yml`、`latest-mac.yml`、`*.blockmap` 是自动更新元数据，普通用户不需要手动下载。
 
 注意：当前安装包尚未进行商业代码签名。Windows 或 macOS 首次打开时可能出现系统安全提示，这是早期独立开发版本的正常限制。
@@ -149,6 +166,8 @@ Hermes Forge 不会写死维护者本机路径。Hermes 根路径按以下顺序
 ```dotenv
 HERMES_INSTALL_DIR=
 HERMES_INSTALL_REPO_URL=https://github.com/NousResearch/hermes-agent.git
+HERMES_FORGE_FEEDBACK_ENDPOINT=https://xiaoxiahome.icu/api/hermes-forge/feedback
+HERMES_FORGE_FEEDBACK_WALL_ENDPOINT=https://xiaoxiahome.icu/api/hermes-forge/feedback/recent?kind=feedback&limit=50
 ```
 
 真实 Provider Key、Bridge Token、本地模型密钥等敏感配置应放在 `.env` 或应用本地密钥库中，不应提交到仓库。
