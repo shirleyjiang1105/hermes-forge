@@ -21,6 +21,7 @@ const DEFAULT_HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.gi
 const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 type InstallPublisher = (event: HermesInstallEvent) => void;
+type PythonLauncher = { command: string; argsPrefix: string[]; label: string };
 
 export class SetupService {
   private installInFlight?: Promise<HermesInstallResult>;
@@ -213,23 +214,24 @@ export class SetupService {
       await this.assertWritableDirectory(logDir, "安装日志目录", log);
       await this.assertWritableDirectory(parentDir, "Hermes 安装父目录", log);
 
-      const git = await this.runLogged("git", ["--version"], process.cwd(), log, 15000);
-      if (git.exitCode !== 0) {
+      const gitReady = await this.ensureGitAvailable(log, emit);
+      if (!gitReady.ok) {
         return await finish({
           ok: false,
           rootPath,
-          message: "无法自动安装 Hermes：未检测到可用 Git。请先安装 Git，或在设置里手动指定 Hermes 路径。",
+          message: gitReady.message,
         }, "failed");
       }
 
-      const python = await this.runLogged("python", ["--version"], process.cwd(), log, 15000);
-      if (python.exitCode !== 0) {
+      const pythonReady = await this.ensurePythonAvailable(log, emit);
+      if (!pythonReady.ok) {
         return await finish({
           ok: false,
           rootPath,
-          message: "无法自动安装 Hermes：未检测到可用 Python。请先安装 Python，或在设置里手动指定 Hermes 路径。",
+          message: pythonReady.message,
         }, "failed");
       }
+      const python = pythonReady.python;
 
       const targetState = await this.inspectTargetDirectory(rootPath, log);
       if (targetState.exists && targetState.hasHermesCli) {
@@ -254,7 +256,10 @@ export class SetupService {
 
         emit("cloning", 32, "正在下载 Hermes 核心文件。", repoUrl);
         stagingPath = path.join(parentDir, `.hermes-install-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
-        const clone = await this.runLogged("git", ["clone", "--depth", "1", repoUrl, stagingPath], parentDir, log, DEFAULT_INSTALL_TIMEOUT_MS);
+        const clone = await this.runLogged("git", ["clone", "--depth", "1", repoUrl, stagingPath], parentDir, log, DEFAULT_INSTALL_TIMEOUT_MS, {
+          heartbeatMs: 15_000,
+          onHeartbeat: (elapsedSeconds) => emit("cloning", 34, "仍在下载 Hermes 核心文件，请保持网络连接。", `已等待 ${elapsedSeconds} 秒，源：${repoUrl}`),
+        });
         if (clone.exitCode !== 0) {
           await this.cleanupDirectory(stagingPath, log);
           return await finish({ ok: false, rootPath, message: `Hermes 下载失败，详情见安装日志：${logPath}` }, "failed");
@@ -266,10 +271,10 @@ export class SetupService {
       }
 
       emit("installing_dependencies", 62, "正在安装 Hermes 运行依赖。", rootPath);
-      await this.installPythonDependencies(rootPath, log);
+      await this.installPythonDependencies(rootPath, log, python, emit);
 
       emit("health_check", 82, "正在校验 Hermes 是否可启动。", rootPath);
-      const localHealth = await this.checkInstalledHermes(rootPath, log);
+      const localHealth = await this.checkInstalledHermes(rootPath, log, python);
       if (!localHealth.available) {
         return await finish({
           ok: false,
@@ -526,16 +531,95 @@ export class SetupService {
     }
   }
 
-  private async installPythonDependencies(rootPath: string, log: string[]) {
+  private async ensureGitAvailable(log: string[], emit: (stage: HermesInstallEvent["stage"], progress: number, message: string, detail?: string) => void) {
+    const git = await this.runLogged("git", ["--version"], process.cwd(), log, 15_000);
+    if (git.exitCode === 0) {
+      return { ok: true, message: "Git 可用。" };
+    }
+
+    emit("repairing_dependencies", 12, "未检测到 Git，正在尝试自动安装 Git。", "将通过 winget 安装 Git.Git。");
+    const repair = await this.repairWithWinget("git", "Git", "Git.Git");
+    log.push(`Git repair result: ${repair.message}`);
+    if (!repair.ok) {
+      return {
+        ok: false,
+        message: `无法自动安装 Hermes：未检测到可用 Git，且自动安装 Git 失败。${repair.recommendedFix ?? "请手动安装 Git for Windows 后重启客户端。"}`,
+      };
+    }
+
+    emit("preflight", 18, "Git 安装命令已完成，正在重新检测。", repair.recommendedFix);
+    const recheck = await this.runLogged("git", ["--version"], process.cwd(), log, 15_000);
+    if (recheck.exitCode === 0) {
+      return { ok: true, message: "Git 已可用。" };
+    }
+    return {
+      ok: false,
+      message: "Git 安装命令已执行，但当前进程仍未检测到 git 命令。请重启 Hermes Forge，或手动确认 Git 已加入 PATH。",
+    };
+  }
+
+  private async ensurePythonAvailable(log: string[], emit: (stage: HermesInstallEvent["stage"], progress: number, message: string, detail?: string) => void): Promise<{ ok: true; python: PythonLauncher; message: string } | { ok: false; message: string; python?: undefined }> {
+    const detected = await this.detectPythonLauncher(log);
+    if (detected) {
+      return { ok: true, python: detected, message: `${detected.label} 可用。` };
+    }
+
+    emit("repairing_dependencies", 20, "未检测到 Python，正在尝试自动安装 Python。", "将通过 winget 安装 Python.Python.3.12。");
+    const repair = await this.repairWithWinget("python", "Python", "Python.Python.3.12");
+    log.push(`Python repair result: ${repair.message}`);
+    if (!repair.ok) {
+      return {
+        ok: false,
+        message: `无法自动安装 Hermes：未检测到可用 Python，且自动安装 Python 失败。${repair.recommendedFix ?? "请手动安装 Python 后重启客户端。"}`,
+      };
+    }
+
+    emit("preflight", 26, "Python 安装命令已完成，正在重新检测。", repair.recommendedFix);
+    const recheck = await this.detectPythonLauncher(log);
+    if (recheck) {
+      return { ok: true, python: recheck, message: `${recheck.label} 已可用。` };
+    }
+    return {
+      ok: false,
+      message: "Python 安装命令已执行，但当前进程仍未检测到 python/py 命令。请重启 Hermes Forge，或手动确认 Python 已加入 PATH。",
+    };
+  }
+
+  private async detectPythonLauncher(log: string[]): Promise<PythonLauncher | undefined> {
+    const candidates: PythonLauncher[] = [
+      { command: "python", argsPrefix: [], label: "python" },
+      { command: "py", argsPrefix: ["-3"], label: "py -3" },
+    ];
+    for (const candidate of candidates) {
+      const result = await this.runLogged(candidate.command, [...candidate.argsPrefix, "--version"], process.cwd(), log, 15_000);
+      if (result.exitCode === 0) {
+        return candidate;
+      }
+    }
+    return undefined;
+  }
+
+  private async installPythonDependencies(
+    rootPath: string,
+    log: string[],
+    python: PythonLauncher,
+    emit?: (stage: HermesInstallEvent["stage"], progress: number, message: string, detail?: string) => void,
+  ) {
     if (await this.exists(path.join(rootPath, "pyproject.toml"))) {
-      const result = await this.runLogged("python", ["-m", "pip", "install", "-e", "."], rootPath, log, DEFAULT_INSTALL_TIMEOUT_MS);
+      const result = await this.runLogged(python.command, [...python.argsPrefix, "-m", "pip", "install", "-e", "."], rootPath, log, DEFAULT_INSTALL_TIMEOUT_MS, {
+        heartbeatMs: 15_000,
+        onHeartbeat: (elapsedSeconds) => emit?.("installing_dependencies", 68, "仍在安装 Hermes Python 依赖。", `已等待 ${elapsedSeconds} 秒，使用 ${python.label}`),
+      });
       if (result.exitCode !== 0) {
         log.push("Editable pip install failed; continuing to health check so the user gets a precise runtime error.");
       }
       return;
     }
     if (await this.exists(path.join(rootPath, "requirements.txt"))) {
-      const result = await this.runLogged("python", ["-m", "pip", "install", "-r", "requirements.txt"], rootPath, log, DEFAULT_INSTALL_TIMEOUT_MS);
+      const result = await this.runLogged(python.command, [...python.argsPrefix, "-m", "pip", "install", "-r", "requirements.txt"], rootPath, log, DEFAULT_INSTALL_TIMEOUT_MS, {
+        heartbeatMs: 15_000,
+        onHeartbeat: (elapsedSeconds) => emit?.("installing_dependencies", 68, "仍在安装 Hermes Python 依赖。", `已等待 ${elapsedSeconds} 秒，使用 ${python.label}`),
+      });
       if (result.exitCode !== 0) {
         log.push("requirements.txt pip install failed; continuing to health check so the user gets a precise runtime error.");
       }
@@ -567,9 +651,27 @@ export class SetupService {
     });
   }
 
-  private async runLogged(command: string, args: string[], cwd: string, log: string[], timeoutMs: number) {
+  private async runLogged(
+    command: string,
+    args: string[],
+    cwd: string,
+    log: string[],
+    timeoutMs: number,
+    heartbeat?: { heartbeatMs: number; onHeartbeat: (elapsedSeconds: number) => void },
+  ) {
     log.push(`$ ${command} ${args.join(" ")}`);
+    const startedAt = Date.now();
+    const timer = heartbeat
+      ? setInterval(() => {
+          const elapsedSeconds = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+          log.push(`[heartbeat] ${command} still running after ${elapsedSeconds}s`);
+          heartbeat.onHeartbeat(elapsedSeconds);
+        }, heartbeat.heartbeatMs)
+      : undefined;
     const result = await runCommand(command, args, { cwd, timeoutMs });
+    if (timer) {
+      clearInterval(timer);
+    }
     if (result.stdout.trim()) log.push(result.stdout.trim());
     if (result.stderr.trim()) log.push(result.stderr.trim());
     log.push(`exit ${result.exitCode ?? "unknown"}`);
@@ -709,13 +811,14 @@ export class SetupService {
     }
   }
 
-  private async checkInstalledHermes(rootPath: string, log: string[]) {
+  private async checkInstalledHermes(rootPath: string, log: string[], preferredPython?: PythonLauncher) {
     const cliPath = path.join(rootPath, "hermes");
     if (!(await this.exists(cliPath))) {
       return { available: false, message: `未找到 Hermes CLI：${cliPath}` };
     }
 
     const candidates: Array<{ command: string; args: string[] }> = [
+      ...(preferredPython ? [{ command: preferredPython.command, args: [...preferredPython.argsPrefix, cliPath, "--version"] }] : []),
       { command: "python", args: [cliPath, "--version"] },
       { command: "py", args: ["-3", cliPath, "--version"] },
     ];

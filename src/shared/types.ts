@@ -1053,6 +1053,7 @@ export type HermesInstallResult = EngineMaintenanceResult & {
 
 export type HermesInstallStage =
   | "preflight"
+  | "repairing_dependencies"
   | "recovering"
   | "cloning"
   | "installing_dependencies"

@@ -172,6 +172,127 @@ describe("SetupService installHermes", () => {
     expect(result.ok).toBe(true);
     expect(events).toEqual(expect.arrayContaining(["preflight", "cloning", "installing_dependencies", "health_check", "completed"]));
   });
+
+  it("auto-repairs missing Git during first-run install and continues deployment", async () => {
+    const service = createService();
+    const rootPath = path.join(tempRoot, "Hermes Agent");
+    healthCheckMock
+      .mockResolvedValueOnce({
+        engineId: "hermes",
+        label: "Hermes",
+        available: false,
+        mode: "cli",
+        message: "Hermes missing",
+      })
+      .mockResolvedValueOnce({
+        engineId: "hermes",
+        label: "Hermes",
+        available: true,
+        mode: "cli",
+        path: rootPath,
+        message: "Hermes CLI ready",
+      });
+    let gitVersionChecks = 0;
+    runCommandMock.mockImplementation(async (command: string, args: string[] = []) => {
+      if (command === "git" && args[0] === "--version") {
+        gitVersionChecks += 1;
+        return gitVersionChecks === 1
+          ? { exitCode: 1, stdout: "", stderr: "git missing" }
+          : { exitCode: 0, stdout: "git version repaired", stderr: "" };
+      }
+      if (command === "winget" && args[0] === "--version") {
+        return { exitCode: 0, stdout: "v1.9.0", stderr: "" };
+      }
+      if (command === "winget" && args[0] === "install") {
+        return { exitCode: 0, stdout: "git installed", stderr: "" };
+      }
+      if (command === "python" && args[0] === "--version") {
+        return { exitCode: 0, stdout: "Python fixture", stderr: "" };
+      }
+      if (command === "git" && args[0] === "clone") {
+        const target = args.at(-1)!;
+        await fs.mkdir(target, { recursive: true });
+        await fs.writeFile(path.join(target, "hermes"), "#!/usr/bin/env python\n", "utf8");
+        await fs.writeFile(path.join(target, "pyproject.toml"), "[project]\nname='hermes'\n", "utf8");
+        return { exitCode: 0, stdout: "clone ok", stderr: "" };
+      }
+      if (command === "python" && args[0] === "-m") {
+        return { exitCode: 0, stdout: "pip ok", stderr: "" };
+      }
+      if (command === "python" && args.at(-1) === "--version") {
+        return { exitCode: 0, stdout: "Hermes Agent 0.1.0", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    const events: string[] = [];
+
+    const result = await service.installHermes((event) => events.push(event.stage));
+
+    expect(result.ok).toBe(true);
+    expect(gitVersionChecks).toBe(2);
+    expect(events).toContain("repairing_dependencies");
+    expect(runCommandMock).toHaveBeenCalledWith(
+      "winget",
+      expect.arrayContaining(["install", "--id", "Git.Git"]),
+      expect.objectContaining({ cwd: process.cwd() }),
+    );
+  });
+
+  it("uses the Python launcher when python is unavailable but py -3 works", async () => {
+    vi.spyOn(os, "homedir").mockReturnValue(tempRoot);
+    const service = createService();
+    const rootPath = path.join(tempRoot, "Hermes Agent");
+    healthCheckMock
+      .mockResolvedValueOnce({
+        engineId: "hermes",
+        label: "Hermes",
+        available: false,
+        mode: "cli",
+        message: "Hermes missing",
+      })
+      .mockResolvedValueOnce({
+        engineId: "hermes",
+        label: "Hermes",
+        available: true,
+        mode: "cli",
+        path: rootPath,
+        message: "Hermes CLI ready",
+      });
+    runCommandMock.mockImplementation(async (command: string, args: string[] = []) => {
+      if (command === "git" && args[0] === "--version") {
+        return { exitCode: 0, stdout: "git version fixture", stderr: "" };
+      }
+      if (command === "git" && args[0] === "clone") {
+        const target = args.at(-1)!;
+        await fs.mkdir(target, { recursive: true });
+        await fs.writeFile(path.join(target, "hermes"), "#!/usr/bin/env python\n", "utf8");
+        await fs.writeFile(path.join(target, "pyproject.toml"), "[project]\nname='hermes'\n", "utf8");
+        return { exitCode: 0, stdout: "clone ok", stderr: "" };
+      }
+      if (command === "python" && args[0] === "--version") {
+        return { exitCode: 1, stdout: "", stderr: "python missing" };
+      }
+      if (command === "py" && args.join(" ") === "-3 --version") {
+        return { exitCode: 0, stdout: "Python 3 launcher", stderr: "" };
+      }
+      if (command === "py" && args.slice(0, 4).join(" ") === "-3 -m pip install") {
+        return { exitCode: 0, stdout: "pip ok", stderr: "" };
+      }
+      if (command === "py" && args.at(-1) === "--version") {
+        return { exitCode: 0, stdout: "Hermes Agent 0.1.0", stderr: "" };
+      }
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+
+    const result = await service.installHermes();
+
+    expect(result.ok).toBe(true);
+    expect(runCommandMock).toHaveBeenCalledWith(
+      "py",
+      expect.arrayContaining(["-3", "-m", "pip", "install", "-e", "."]),
+      expect.objectContaining({ cwd: rootPath }),
+    );
+  });
 });
 
 describe("SetupService dependency health", () => {

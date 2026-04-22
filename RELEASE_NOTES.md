@@ -1,5 +1,31 @@
 # Release Notes
 
+## Hermes Forge v0.1.4
+
+发布日期：2026-04-22
+
+这是一次面向新电脑首次安装体验的修复版。重点解决“没有预装 Hermes Agent 时，欢迎/安装界面看起来卡住，无法真正傻瓜式部署”的问题。
+
+### 修复内容
+
+- 首启自动安装 Hermes 前会主动检查 Git 和 Python。
+- 如果缺少 Git，会尝试通过 winget 自动安装 `Git.Git`，安装后重新检测并继续部署 Hermes。
+- 如果缺少 Python，会尝试通过 winget 自动安装 `Python.Python.3.12`，安装后重新检测。
+- Python 启动器兼容 `python` 和 `py -3`：
+  - pip 依赖安装会复用检测到的 Python launcher。
+  - Hermes 自检也会优先使用同一个 launcher。
+- `git clone` 和 `pip install` 增加安装心跳事件：
+  - 慢网下载或首次安装依赖时，UI 会持续提示仍在运行。
+  - 避免用户误以为安装界面卡死。
+- 如果安装依赖后当前进程仍检测不到 PATH，会给出明确提示：重启 Hermes Forge 或手动确认 PATH，而不是静默停住。
+
+### 验证
+
+- `npm run check` 通过。
+- `npx vitest run src/setup/setup-service.test.ts` 通过，10 个测试。
+- `npm test` 通过，29 个测试文件，143 个测试。
+- `npm run build` 通过。
+
 ## Hermes Forge v0.1.3
 
 发布日期：2026-04-22
