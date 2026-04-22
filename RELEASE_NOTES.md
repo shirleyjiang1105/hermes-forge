@@ -1,5 +1,25 @@
 # Release Notes
 
+## Hermes Forge v0.1.6
+
+发布日期：2026-04-22
+
+这是一次面向发布资产和 Windows 图标的修复版。
+
+### 修复内容
+
+- 修复 GitHub 自动更新元数据与 Release 资产文件名不一致的问题：
+  - 后续发布统一使用稳定的 `Hermes-Forge-${version}-${arch}` 资产命名。
+  - 避免 `latest.yml` 指向不存在的安装包导致旧版本更新失败。
+- 修复 Windows 应用程序图标可能未写入 exe 资源的问题：
+  - 打包后使用轻量 `rcedit` 钩子写入应用图标，避免依赖 winCodeSign 解压符号链接权限。
+  - 保留 `assets/icons/hermes-workbench.ico` 作为安装包和应用图标来源。
+
+### 验证
+
+- 已确认 v0.1.5 的缺失更新资产已补传，旧版客户端可继续下载更新包。
+- 建议使用 v0.1.6 安装包验证 Windows 开始菜单、任务栏和窗口图标。
+
 ## Hermes Forge v0.1.5
 
 发布日期：2026-04-22
