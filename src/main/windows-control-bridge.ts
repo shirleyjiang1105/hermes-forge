@@ -27,6 +27,7 @@ export class WindowsControlBridge {
     private readonly getPermissions: () => Promise<EnginePermissionPolicy>,
     private readonly appVersion: () => string,
     private readonly windowsToolExecutor?: WindowsToolExecutor,
+    private readonly listenHost = process.env.HERMES_FORGE_BRIDGE_HOST?.trim() || "0.0.0.0",
   ) {}
 
   async start() {
@@ -40,7 +41,7 @@ export class WindowsControlBridge {
 
     await new Promise<void>((resolve, reject) => {
       this.server!.once("error", reject);
-      this.server!.listen(0, "0.0.0.0", () => {
+      this.server!.listen(0, this.listenHost, () => {
         this.server!.off("error", reject);
         const address = this.server!.address() as AddressInfo;
         this.port = address.port;
@@ -55,7 +56,7 @@ export class WindowsControlBridge {
     return {
       running: Boolean(this.server && this.port),
       port: this.port,
-      host: "0.0.0.0",
+      host: this.listenHost,
       capabilities: BRIDGE_CAPABILITIES,
     };
   }

@@ -13,9 +13,11 @@ import type {
   HermesWebUiSettings,
   HermesStatusSummary,
   ModelConnectionTestResult,
+  ManagedWslInstallerIpcResult,
   LocalModelDiscoveryResult,
   QuickTextFileInput,
   QuickTextFileResult,
+  PermissionOverview,
   RuntimeConfig,
   SessionAgentInsight,
   SecretRefStatus,
@@ -192,12 +194,23 @@ const api = {
   installHermes: (options?: { rootPath?: string }) => ipcRenderer.invoke(IpcChannels.installHermes, options) as Promise<HermesInstallResult>,
   repairSetupDependency: (id: SetupDependencyRepairId) =>
     ipcRenderer.invoke(IpcChannels.repairSetupDependency, id) as Promise<SetupDependencyRepairResult>,
+  installerPlan: () =>
+    ipcRenderer.invoke(IpcChannels.installerPlan) as Promise<ManagedWslInstallerIpcResult>,
+  installerDryRunRepair: () =>
+    ipcRenderer.invoke(IpcChannels.installerDryRunRepair) as Promise<ManagedWslInstallerIpcResult>,
+  installerExecuteRepair: () =>
+    ipcRenderer.invoke(IpcChannels.installerExecuteRepair) as Promise<ManagedWslInstallerIpcResult>,
+  installerInstall: () =>
+    ipcRenderer.invoke(IpcChannels.installerInstall) as Promise<ManagedWslInstallerIpcResult>,
+  installerGetLastReport: () =>
+    ipcRenderer.invoke(IpcChannels.installerGetLastReport) as Promise<ManagedWslInstallerIpcResult>,
   onInstallHermesEvent: (callback: (event: HermesInstallEvent) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: HermesInstallEvent) => callback(payload);
     ipcRenderer.on(IpcChannels.installHermesEvent, wrapped);
     return () => ipcRenderer.removeListener(IpcChannels.installHermesEvent, wrapped);
   },
   getRuntimeConfig: () => ipcRenderer.invoke(IpcChannels.getRuntimeConfig) as Promise<RuntimeConfig>,
+  getPermissionOverview: () => ipcRenderer.invoke(IpcChannels.getPermissionOverview) as Promise<PermissionOverview>,
   getConfigOverview: (workspacePath?: string) => ipcRenderer.invoke(IpcChannels.getConfigOverview, workspacePath) as Promise<any>,
   importExistingHermesConfig: () => ipcRenderer.invoke(IpcChannels.importExistingHermesConfig) as Promise<HermesExistingConfigImportResult>,
   testHermesWindowsBridge: () =>

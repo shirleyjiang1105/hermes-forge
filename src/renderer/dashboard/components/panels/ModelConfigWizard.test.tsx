@@ -24,8 +24,8 @@ describe("ModelConfigWizard", () => {
   it("highlights the recommended fix when a connection test fails", async () => {
     testModelConnection.mockResolvedValue({
       ok: false,
-      profileId: "draft-local_openai",
-      sourceType: "local_openai",
+      profileId: "draft-openai_compatible",
+      sourceType: "openai_compatible",
       failureCategory: "network_unreachable",
       message: "连不上模型服务。",
       recommendedFix: "请确认服务已经启动，而且 Base URL 指向 /v1。",
@@ -42,8 +42,11 @@ describe("ModelConfigWizard", () => {
   it("enables saving after a successful connection test", async () => {
     testModelConnection.mockResolvedValue({
       ok: true,
-      profileId: "draft-local_openai",
-      sourceType: "local_openai",
+      profileId: "draft-openai_compatible",
+      sourceType: "openai_compatible",
+      agentRole: "primary_agent",
+      supportsTools: true,
+      contextWindow: 32000,
       message: "连接成功。",
     });
     updateModelConfig.mockResolvedValue({});
@@ -52,60 +55,63 @@ describe("ModelConfigWizard", () => {
 
     renderWizard({ onRefresh, onSaved });
 
-    expect(screen.getByRole("button", { name: /保存模型/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /保存并复检/ })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
 
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
-    const saveButton = screen.getByRole("button", { name: /保存模型/ });
+    const saveButton = screen.getByRole("button", { name: /保存并复检/ });
     expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
     await waitFor(() => {
-      expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({ defaultProfileId: "wizard-local_openai" }));
+      expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({ defaultProfileId: "wizard-openai_compatible" }));
     });
   });
 
   it("shows multiple saved profiles and keeps same-source additions unique", async () => {
     testModelConnection.mockResolvedValue({
       ok: true,
-      profileId: "draft-local_openai",
-      sourceType: "local_openai",
+      profileId: "draft-openai_compatible",
+      sourceType: "openai_compatible",
+      agentRole: "primary_agent",
+      supportsTools: true,
+      contextWindow: 32000,
       message: "连接成功。",
     });
     updateModelConfig.mockResolvedValue({});
 
     renderWizard({
       models: {
-        defaultProfileId: "wizard-local_openai",
+        defaultProfileId: "wizard-openai_compatible",
         providerProfiles: [],
         modelProfiles: [
-          { id: "wizard-local_openai", name: "本地 OpenAI-Compatible · qwen", provider: "custom", model: "qwen", baseUrl: "http://127.0.0.1:1234/v1" },
-          { id: "wizard-openrouter", name: "OpenRouter · anthropic/claude-sonnet-4-5", provider: "openrouter", model: "anthropic/claude-sonnet-4-5", baseUrl: "https://openrouter.ai/api/v1" },
+          { id: "wizard-openai_compatible", name: "OpenAI-compatible · qwen", provider: "custom", sourceType: "openai_compatible", model: "qwen", baseUrl: "http://127.0.0.1:8080/v1", agentRole: "primary_agent" },
+          { id: "wizard-openrouter_api_key", name: "OpenRouter · anthropic/claude-sonnet-4-5", provider: "openrouter", sourceType: "openrouter_api_key", model: "anthropic/claude-sonnet-4-5", baseUrl: "https://openrouter.ai/api/v1", agentRole: "primary_agent" },
         ],
       },
     });
 
-    expect(screen.getByText("本地 OpenAI-Compatible · qwen")).toBeInTheDocument();
+    expect(screen.getByText("OpenAI-compatible · qwen")).toBeInTheDocument();
     expect(screen.getByText("OpenRouter · anthropic/claude-sonnet-4-5")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "添加模型" }));
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "qwen3-coder-plus" } });
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getAllByRole("button", { name: /新增模型/ }).at(-1)!);
+    fireEvent.click(screen.getAllByRole("button", { name: /新增并复检/ }).at(-1)!);
 
     await waitFor(() => {
       expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({
         modelProfiles: expect.arrayContaining([
-          expect.objectContaining({ id: "wizard-local_openai", model: "qwen" }),
-          expect.objectContaining({ id: "wizard-openrouter", model: "anthropic/claude-sonnet-4-5" }),
-          expect.objectContaining({ id: "wizard-local_openai-2", model: "qwen3-coder-plus" }),
+          expect.objectContaining({ id: "wizard-openai_compatible", model: "qwen" }),
+          expect.objectContaining({ id: "wizard-openrouter_api_key", model: "anthropic/claude-sonnet-4-5" }),
+          expect.objectContaining({ id: "wizard-openai_compatible-2", model: "qwen3-coder-plus" }),
         ]),
       }));
     });
   });
 
-  it("applies mainstream vendor presets into connection fields", () => {
+  it("applies API key family presets into connection fields", () => {
     renderWizard({
       models: {
         defaultProfileId: undefined,
@@ -114,15 +120,15 @@ describe("ModelConfigWizard", () => {
       },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型通道" }));
-    fireEvent.click(screen.getByRole("button", { name: /阿里云百炼 \/ Qwen/ }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 provider family" }));
+    fireEvent.click(screen.getByRole("button", { name: /Gemini API Key/ }));
 
     expect(screen.getByText("模型名称 / Model ID")).toBeInTheDocument();
-    expect(screen.getByLabelText("添加模型名称")).toHaveValue("qwen3-coder-plus");
-    expect(screen.getByDisplayValue("https://dashscope.aliyuncs.com/compatible-mode/v1")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("https://generativelanguage.googleapis.com/v1beta")).toBeInTheDocument();
   });
 
-  it("applies Volcengine Coding Plan preset", () => {
+  it("applies custom endpoint family preset", () => {
     renderWizard({
       models: {
         defaultProfileId: undefined,
@@ -131,11 +137,11 @@ describe("ModelConfigWizard", () => {
       },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "选择模型通道" }));
-    fireEvent.click(screen.getByRole("button", { name: /火山方舟 Coding Plan/ }));
+    fireEvent.click(screen.getByRole("button", { name: "选择 provider family" }));
+    fireEvent.click(screen.getByRole("button", { name: /Ollama/ }));
 
-    expect(screen.getByLabelText("添加模型名称")).toHaveValue("ark-code-latest");
-    expect(screen.getByDisplayValue("https://ark.cn-beijing.volces.com/api/coding/v3")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("http://127.0.0.1:11434/v1")).toBeInTheDocument();
+    expect(screen.getByPlaceholderText(/填写 Ollama 模型名/)).toBeInTheDocument();
   });
 });
 
@@ -145,7 +151,7 @@ function renderWizard(overrides: { models?: Parameters<typeof ModelConfigWizard>
       models={overrides.models ?? {
         defaultProfileId: undefined,
         providerProfiles: [],
-        modelProfiles: [{ id: "wizard-local_openai", provider: "custom", model: "qwen", baseUrl: "http://127.0.0.1:1234/v1" }],
+        modelProfiles: [{ id: "wizard-openai_compatible", provider: "custom", sourceType: "openai_compatible", model: "qwen", baseUrl: "http://127.0.0.1:8080/v1", agentRole: "primary_agent" }],
       }}
       secrets={[]}
       onRefresh={overrides.onRefresh ?? vi.fn().mockResolvedValue(undefined)}

@@ -16,6 +16,11 @@ import type {
   SetupSummary,
 } from "../shared/types";
 import { missingSecretMessage, normalizeOpenAiCompatibleBaseUrl, requiresStoredSecret } from "../shared/model-config";
+import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
+import { wslDistroArgs } from "../runtime/runtime-probe-service";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import type { RuntimeProbeResult } from "../runtime/runtime-types";
+import type { InstallOrchestrator } from "../install/install-orchestrator";
 
 const DEFAULT_HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.git";
 const DEFAULT_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -34,12 +39,16 @@ export class SetupService {
     private readonly hermes: EngineAdapter,
     private readonly configStore: RuntimeConfigStore,
     private readonly secretVault: SecretVault,
+    private readonly runtimeProbeService?: RuntimeProbeService,
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
+    private readonly installOrchestrator?: InstallOrchestrator,
   ) {}
 
   async getSummary(workspacePath?: string): Promise<SetupSummary> {
     const config = await this.configStore.read();
+    const runtimeProbe = await this.runtimeProbeService?.probe({ workspacePath }).catch(() => undefined);
     const checks: SetupCheck[] = [
-      await this.checkCommand("git", ["--version"], "git", "Git", {
+      runtimeProbe ? this.gitCheckFromProbe(runtimeProbe) : await this.checkCommand("git", ["--version"], "git", "Git", {
         statusOnFailure: "missing",
         description: "Hermes 首次自动安装需要 Git 拉取核心仓库；已安装 Hermes 的用户不一定受影响。",
         recommendedAction: "点击一键安装 Git，或手动安装 Git for Windows 后重启客户端。",
@@ -48,7 +57,7 @@ export class SetupService {
         blocking: false,
       }),
       await this.checkCommand("node", ["--version"], "node", "Node.js"),
-      await this.checkCommand("python", ["--version"], "python", "Python", {
+      runtimeProbe ? this.pythonCheckFromProbe(runtimeProbe) : await this.checkCommand("python", ["--version"], "python", "Python", {
         statusOnFailure: "missing",
         description: "Hermes CLI、微信连接器和部分本地桥接能力依赖 Python 运行环境。",
         recommendedAction: "点击一键安装 Python 3.12，或手动安装后确保 python 命令在 PATH 中可用。",
@@ -56,16 +65,17 @@ export class SetupService {
         autoFixId: "python",
         blocking: false,
       }),
-      await this.checkWinget(),
-      await this.checkHermes(),
-      await this.checkPythonPackage("hermes-pyyaml", "Hermes 配置依赖", "yaml", "PyYAML", {
+      runtimeProbe ? this.wingetCheckFromProbe(runtimeProbe) : await this.checkWinget(),
+      ...(runtimeProbe?.runtimeMode === "wsl" ? [this.wslCheckFromProbe(runtimeProbe)] : []),
+      runtimeProbe ? this.hermesCheckFromProbe(runtimeProbe) : await this.checkHermes(),
+      await this.checkPythonPackageWithRuntime(runtimeProbe, "hermes-pyyaml", "Hermes 配置依赖", "yaml", "PyYAML", {
         description: "Hermes CLI 读取 config.yaml 时需要 PyYAML；缺失时会出现 No module named 'yaml'。",
         recommendedAction: "点击修复 Hermes 依赖，或手动执行 python -m pip install --upgrade PyYAML。",
         fixAction: "install_hermes_dependency",
         autoFixId: "hermes_pyyaml",
         blocking: true,
       }),
-      await this.checkPythonPackage("weixin-aiohttp", "微信连接依赖", "aiohttp", "aiohttp"),
+      await this.checkPythonPackageWithRuntime(runtimeProbe, "weixin-aiohttp", "微信连接依赖", "aiohttp", "aiohttp"),
       await this.checkModelConfig(config),
       await this.checkWritable("user-data", "用户数据目录", this.appPaths.baseDir()),
     ];
@@ -87,6 +97,87 @@ export class SetupService {
       check.blocking !== false && (check.status === "missing" || check.status === "failed"),
     );
     return { ready: blocking.length === 0, blocking, checks: mergedChecks };
+  }
+
+  private gitCheckFromProbe(probe: RuntimeProbeResult): SetupCheck {
+    return {
+      id: "git",
+      label: "Git",
+      status: probe.gitAvailable ? "ok" : "missing",
+      message: probe.commands.git.message,
+      description: "Hermes 首次自动安装需要 Git 拉取核心仓库；该结果来自统一 RuntimeProbe。",
+      recommendedAction: probe.gitAvailable ? undefined : "点击一键安装 Git，或手动安装 Git for Windows 后重启客户端。",
+      fixAction: probe.gitAvailable ? undefined : "install_git",
+      canAutoFix: probe.gitAvailable ? undefined : true,
+      autoFixId: probe.gitAvailable ? undefined : "git",
+      blocking: false,
+    };
+  }
+
+  private pythonCheckFromProbe(probe: RuntimeProbeResult): SetupCheck {
+    const available = probe.runtimeMode === "wsl" ? Boolean(probe.wslPythonAvailable) : probe.pythonAvailable;
+    return {
+      id: "python",
+      label: probe.runtimeMode === "wsl" ? "WSL Python" : "Python",
+      status: available ? "ok" : "missing",
+      message: probe.runtimeMode === "wsl" ? probe.commands.wsl.message : probe.commands.python.message,
+      description: "Hermes CLI、微信连接器和部分本地桥接能力依赖 Python；该结果来自统一 RuntimeProbe。",
+      recommendedAction: available ? undefined : "请安装 Python，或在设置中填写当前 runtime 可用的 Hermes Python 命令。",
+      fixAction: available ? undefined : "install_python",
+      canAutoFix: available || probe.runtimeMode === "wsl" ? undefined : true,
+      autoFixId: available || probe.runtimeMode === "wsl" ? undefined : "python",
+      blocking: false,
+    };
+  }
+
+  private wingetCheckFromProbe(probe: RuntimeProbeResult): SetupCheck {
+    return {
+      id: "winget",
+      label: "Windows 包管理器",
+      status: probe.wingetAvailable || process.platform !== "win32" ? "ok" : "warning",
+      message: probe.commands.winget.message,
+      description: "Git/Python 的一键修复依赖 winget；该结果来自统一 RuntimeProbe。",
+      recommendedAction: probe.wingetAvailable ? undefined : "请在 Microsoft Store 更新“应用安装程序”，或手动安装 Git/Python。",
+      blocking: false,
+    };
+  }
+
+  private wslCheckFromProbe(probe: RuntimeProbeResult): SetupCheck {
+    const ok = probe.wslAvailable && probe.distroExists !== false && probe.distroReachable !== false;
+    return {
+      id: "wsl",
+      label: "WSL Runtime",
+      status: ok ? "ok" : "missing",
+      message: probe.commands.wsl.message,
+      description: "当前 Hermes runtime 处于 WSL 模式；该结果来自统一 RuntimeProbe。",
+      recommendedAction: ok ? undefined : "请启用 WSL、安装目标发行版，或切回 Windows runtime。",
+      fixAction: ok ? undefined : "open_settings",
+      blocking: !ok,
+    };
+  }
+
+  private hermesCheckFromProbe(probe: RuntimeProbeResult): SetupCheck {
+    if (!probe.hermesRootExists || !probe.hermesCliExists) {
+      const issue = probe.issues.find((item) => item.code === "hermes_root_missing" || item.code === "hermes_cli_missing");
+      return {
+        id: "hermes",
+        label: "Hermes",
+        status: "missing",
+        message: [issue?.summary ?? "Hermes 未完全就绪。", issue?.detail].filter(Boolean).join(" "),
+        description: "核心 Agent 未就绪时，桌面端可以打开配置页，但无法可靠执行真实任务。该结果来自统一 RuntimeProbe。",
+        recommendedAction: issue?.fixHint ?? "优先点击自动安装 Hermes；如果已经手动安装，请在常规设置里指定 Hermes 根目录。",
+        fixAction: "install_hermes",
+        blocking: true,
+      };
+    }
+    return {
+      id: "hermes",
+      label: "Hermes",
+      status: "ok",
+      message: `Hermes CLI 已解析：${probe.paths.profileHermesPath.path}`,
+      description: "Hermes root/CLI 结果来自统一 RuntimeProbe。",
+      blocking: false,
+    };
   }
 
   private buildSuggestions(checks: SetupCheck[]) {
@@ -115,20 +206,20 @@ export class SetupService {
   }
 
   async updateHermes(): Promise<EngineMaintenanceResult> {
+    if (this.installOrchestrator) {
+      return this.installOrchestrator.update();
+    }
     const log: string[] = [];
     const startedAt = new Date().toISOString();
     const hermesRoot = await this.configStore.getEnginePath("hermes");
-    const hermesCli = path.join(hermesRoot, "hermes");
-    log.push(`$ python ${hermesCli} update`);
-    const result = await runCommand("python", [hermesCli, "update"], {
-      cwd: hermesRoot,
+    const launch = await this.hermesMaintenanceLaunch(hermesRoot, ["update"]);
+    log.push(`$ ${launch.command} ${JSON.stringify(launch.args)}`);
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
       timeoutMs: DEFAULT_INSTALL_TIMEOUT_MS,
-      env: {
-        PYTHONUTF8: "1",
-        PYTHONIOENCODING: "utf-8",
-        PYTHONPATH: `${hermesRoot}${path.delimiter}${process.env.PYTHONPATH ?? ""}`,
-        NO_COLOR: "1",
-      },
+      env: launch.env,
+      commandId: "setup.hermes.update",
+      runtimeKind: launch.runtimeKind,
     });
     if (result.stdout.trim()) log.push(result.stdout.trim());
     if (result.stderr.trim()) log.push(result.stderr.trim());
@@ -141,7 +232,50 @@ export class SetupService {
     return { ok, engineId: "hermes", message, log, logPath };
   }
 
+  private async hermesMaintenanceLaunch(hermesRoot: string, args: string[]) {
+    if (this.runtimeAdapterFactory) {
+      const config = await this.configStore.read();
+      const runtime = {
+        mode: config.hermesRuntime?.mode ?? "windows",
+        distro: config.hermesRuntime?.distro?.trim() || undefined,
+        pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
+        windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+      } satisfies NonNullable<RuntimeConfig["hermesRuntime"]>;
+      const adapter = this.runtimeAdapterFactory(runtime);
+      const runtimeRoot = adapter.toRuntimePath(hermesRoot);
+      return await adapter.buildHermesLaunch({
+        runtime,
+        rootPath: runtimeRoot,
+        pythonArgs: [runtime.mode === "wsl" ? `${runtimeRoot.replace(/\/+$/, "")}/hermes` : path.join(hermesRoot, "hermes"), ...args],
+        cwd: hermesRoot,
+        env: {
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8",
+          PYTHONPATH: runtimeRoot,
+          NO_COLOR: "1",
+        },
+      });
+    }
+    // Legacy fallback: retained for standalone tests and until the full installer is moved behind runtime services.
+    const hermesCli = path.join(hermesRoot, "hermes");
+    return {
+      command: "python",
+      args: [hermesCli, ...args],
+      cwd: hermesRoot,
+      env: {
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+        PYTHONPATH: `${hermesRoot}${path.delimiter}${process.env.PYTHONPATH ?? ""}`,
+        NO_COLOR: "1",
+      },
+      runtimeKind: "windows" as const,
+    };
+  }
+
   async installHermes(publish?: InstallPublisher, options: HermesInstallOptions = {}): Promise<HermesInstallResult> {
+    if (this.installOrchestrator) {
+      return this.installOrchestrator.install(publish, options);
+    }
     if (!this.installInFlight) {
       this.installInFlight = this.performInstallHermes(publish, options).finally(() => {
         this.installInFlight = undefined;
@@ -151,6 +285,9 @@ export class SetupService {
   }
 
   async repairDependency(id: SetupDependencyRepairId): Promise<SetupDependencyRepairResult> {
+    if (this.installOrchestrator) {
+      return this.installOrchestrator.repairDependency(id);
+    }
     switch (id) {
       case "git":
         return await this.repairWithWinget(id, "Git", "Git.Git");
@@ -559,6 +696,12 @@ export class SetupService {
   }
 
   private async ensureGitAvailable(log: string[], emit: (stage: HermesInstallEvent["stage"], progress: number, message: string, detail?: string) => void) {
+    const probe = await this.runtimeProbeService?.probe().catch(() => undefined);
+    if (probe?.gitAvailable) {
+      log.push(`RuntimeProbe Git: ${probe.commands.git.message}`);
+      return { ok: true, message: "Git 可用。" };
+    }
+    // Legacy fallback: install flow still supports standalone construction and uses direct command checks until the full installer is moved behind runtime services.
     const git = await this.runLogged("git", ["--version"], process.cwd(), log, 15_000);
     if (git.exitCode === 0) {
       return { ok: true, message: "Git 可用。" };
@@ -586,6 +729,17 @@ export class SetupService {
   }
 
   private async ensurePythonAvailable(log: string[], emit: (stage: HermesInstallEvent["stage"], progress: number, message: string, detail?: string) => void): Promise<{ ok: true; python: PythonLauncher; message: string } | { ok: false; message: string; python?: undefined }> {
+    const probe = await this.runtimeProbeService?.probe().catch(() => undefined);
+    if (probe?.runtimeMode === "windows" && probe.commands.python.available && probe.commands.python.command) {
+      const python = {
+        command: probe.commands.python.command,
+        argsPrefix: probe.commands.python.args ?? [],
+        label: probe.commands.python.label ?? probe.commands.python.command,
+      };
+      log.push(`RuntimeProbe Python: ${probe.commands.python.message}`);
+      return { ok: true, python, message: `${python.label} 可用。` };
+    }
+    // Legacy fallback: WSL managed installation is intentionally out of scope for this pass, so the existing Windows installer path keeps its direct Python detection.
     const detected = await this.detectPythonLauncher(log);
     if (detected) {
       return { ok: true, python: detected, message: `${detected.label} 可用。` };
@@ -762,6 +916,63 @@ export class SetupService {
       description: "Git/Python 的一键修复依赖 winget；没有 winget 时仍可手动安装依赖。",
       recommendedAction: ok ? undefined : "请在 Microsoft Store 更新“应用安装程序”，或手动安装 Git/Python。",
       blocking: false,
+    };
+  }
+
+  private async checkPythonPackageWithRuntime(
+    probe: RuntimeProbeResult | undefined,
+    id: string,
+    label: string,
+    moduleName: string,
+    packageName: string,
+    options: Partial<Pick<SetupCheck, "description" | "recommendedAction" | "fixAction" | "autoFixId" | "blocking">> = {},
+  ): Promise<SetupCheck> {
+    if (!probe) {
+      // Legacy fallback: kept for short-term compatibility in tests and non-wired construction paths.
+      return this.checkPythonPackage(id, label, moduleName, packageName, options);
+    }
+    const script = `import ${moduleName}; print("${packageName} ok")`;
+    const command = probe.runtimeMode === "wsl" ? "wsl.exe" : probe.commands.python.command;
+    const args = probe.runtimeMode === "wsl"
+      ? [...wslDistroArgs({ distro: probe.distroName }), probe.commands.wsl.pythonCommand ?? "python3", "-c", script]
+      : [...(probe.commands.python.args ?? []), "-c", script];
+    if (!command) {
+      return {
+        id,
+        label,
+        status: "warning",
+        message: `${label} 无法检测：runtime 未解析出 Python 命令。`,
+        description: options.description ?? "该依赖检测复用统一 RuntimeProbe 的 Python 解释器结论。",
+        recommendedAction: options.recommendedAction ?? "请先修复当前 runtime 的 Python 配置。",
+        fixAction: options.fixAction,
+        blocking: options.blocking ?? false,
+      };
+    }
+    const result = await runCommand(command, args, {
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      env: {
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+        NO_COLOR: "1",
+      },
+      commandId: `setup.package.${id}`,
+      runtimeKind: probe.runtimeMode,
+    });
+    const ok = result.exitCode === 0;
+    return {
+      id,
+      label,
+      status: ok ? "ok" : "warning",
+      message: ok
+        ? (result.stdout || result.stderr).trim() || `${label} 可用。`
+        : `${label} 缺失或不可用：${result.stderr || result.stdout || "Python 无法导入该模块"}`,
+      description: options.description ?? "微信二维码登录与本地网关的部分异步 HTTP 能力依赖该 Python 包。",
+      recommendedAction: ok ? undefined : options.recommendedAction ?? `点击修复依赖，或手动执行 ${probe.commands.python.label ?? "python"} -m pip install ${packageName}。`,
+      fixAction: ok ? undefined : options.fixAction ?? "install_weixin_dependency",
+      canAutoFix: ok ? undefined : true,
+      autoFixId: ok ? undefined : options.autoFixId ?? "weixin_aiohttp",
+      blocking: options.blocking ?? false,
     };
   }
 

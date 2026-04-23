@@ -24,7 +24,9 @@
     "src/auth",
     "src/updater",
     "src/process",
-    "src/file-manager"
+    "src/file-manager",
+    "src/runtime",
+    "src/install"
   ],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

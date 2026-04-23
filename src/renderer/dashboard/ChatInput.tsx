@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
 import { useAppStore } from "../store";
 import { cn } from "./DashboardPrimitives";
+import { buildPreflightState } from "./permissionModel";
 
 type FixTarget = "model" | "hermes" | "health" | "diagnostics" | "workspace";
 
@@ -32,6 +33,12 @@ export function ChatInput(props: {
   const [isImportingAttachment, setIsImportingAttachment] = useState(false);
   const recognitionRef = useRef<SpeechRecognition | null>(null);
   const modelMenuRef = useRef<HTMLDivElement | null>(null);
+  const preflight = buildPreflightState({
+    runtimeConfig: store.runtimeConfig,
+    events: store.events,
+    locked: props.locked,
+    overview: store.permissionOverview,
+  });
   const permissions = store.runtimeConfig?.enginePermissions?.hermes;
   const permissionsLabel = permissions
     ? `读${permissions.workspaceRead === false ? "关" : "开"} 写${permissions.fileWrite === false ? "关" : "开"} 命令${permissions.commandRun === false ? "关" : "开"}`
@@ -181,6 +188,10 @@ export function ChatInput(props: {
   function handleSubmit() {
     if (store.userInput.trim().startsWith("/")) {
       void dispatchSlashCommand(store.userInput.trim());
+      return;
+    }
+    if (preflight.blocked) {
+      store.error(preflight.summary, preflight.block?.fixHint ?? preflight.detail);
       return;
     }
     if (!props.canStart || submittingRef.current) return;
@@ -481,6 +492,8 @@ export function ChatInput(props: {
           </div>
         ) : null}
 
+        <PreflightStrip preflight={preflight} />
+
         <div
           className={cn(
             "hermes-composer-card relative overflow-hidden rounded-[28px] border border-[var(--hermes-card-border)] bg-white shadow-[0_20px_60px_rgba(15,23,42,0.08)] focus-within:hermes-purple-focus",
@@ -631,7 +644,7 @@ export function ChatInput(props: {
                   aria-label="发送"
                   title={props.sendBlockReason ?? "发送"}
                   onClick={handleSubmit}
-                  disabled={!props.canStart}
+                  disabled={!props.canStart || preflight.blocked}
                   type="button"
                 >
                   <Send size={15} />
@@ -701,6 +714,63 @@ function MenuItem(props: { icon: typeof Plus; label: string; disabled?: boolean;
       {props.label}
     </button>
   );
+}
+
+function PreflightStrip(props: { preflight: ReturnType<typeof buildPreflightState> }) {
+  const toneClass = props.preflight.tone === "green"
+    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+    : props.preflight.tone === "yellow"
+      ? "border-amber-200 bg-amber-50 text-amber-800"
+      : "border-rose-200 bg-rose-50 text-rose-800";
+  const dotClass = props.preflight.tone === "green"
+    ? "bg-emerald-500"
+    : props.preflight.tone === "yellow"
+      ? "bg-amber-500"
+      : "bg-rose-500";
+  const chips = preflightChips(props.preflight).slice(0, 2);
+  return (
+    <div className={cn("mb-2 rounded-2xl border px-3 py-2 text-[11px]", toneClass)}>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span className="inline-flex items-center gap-1.5 font-semibold">
+          <span className={cn("h-2 w-2 rounded-full", dotClass)} />
+          {props.preflight.summary}
+        </span>
+        {chips.map((chip) => (
+          <span
+            key={chip}
+            className="rounded-full bg-white/70 px-2 py-0.5 text-[11px] font-medium text-current ring-1 ring-black/5"
+          >
+            {chip}
+          </span>
+        ))}
+      </div>
+      {props.preflight.block ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer font-semibold">阻断详情</summary>
+          <p className="mt-1 leading-5">{props.preflight.block.detail}</p>
+          <p className="mt-1 font-medium">{props.preflight.block.fixHint}</p>
+        </details>
+      ) : null}
+    </div>
+  );
+}
+
+function preflightChips(preflight: ReturnType<typeof buildPreflightState>) {
+  const sessionChip = preflight.sessionMode === "resumed" || preflight.sessionMode === "continued"
+    ? "延续上次会话"
+    : preflight.sessionMode === "degraded"
+      ? "会话恢复受限"
+      : "新一轮会话";
+
+  const policyChip = preflight.permissionPolicy === "passthrough"
+    ? "项目操作更宽松"
+    : preflight.permissionPolicy === "restricted_workspace"
+      ? "工作区强限制"
+      : preflight.bridgeEnabled
+        ? "Windows 能力受保护"
+        : "Windows 联动已关闭";
+
+  return [sessionChip, policyChip];
 }
 
 function toFileUrl(filePath: string) {

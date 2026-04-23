@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, ChevronDown, Cloud, KeyRound, Loader2, Network, PlugZap, Server } from "lucide-react";
-import type { LocalModelDiscoveryResult, ModelConnectionTestResult } from "../../../../shared/types";
+import { AlertCircle, CheckCircle2, ChevronDown, Cloud, KeyRound, Loader2, Network, PlugZap, Server, ShieldCheck, Sparkles } from "lucide-react";
+import type { LocalModelDiscoveryResult, ModelCapabilityRole, ModelConnectionTestResult, ModelSourceType } from "../../../../shared/types";
 import { cn } from "../../DashboardPrimitives";
 
 type ModelSummary = {
@@ -15,164 +15,244 @@ type ModelSummary = {
 type OverviewModels = {
   defaultProfileId?: string;
   providerProfiles: Array<{ id: string; provider: string; label: string; apiKeySecretRef?: string }>;
-  modelProfiles: Array<{ id: string; name?: string; provider: string; model: string; baseUrl?: string; secretRef?: string }>;
+  modelProfiles: Array<{
+    id: string;
+    name?: string;
+    provider: string;
+    model: string;
+    baseUrl?: string;
+    secretRef?: string;
+    sourceType?: ModelSourceType;
+    authMode?: string;
+    agentRole?: ModelCapabilityRole;
+    supportsTools?: boolean;
+    supportsVision?: boolean;
+    maxTokens?: number;
+    lastHealthSummary?: string;
+    lastHealthStatus?: string;
+  }>;
   summary?: ModelSummary;
 };
 
 type SecretMeta = { ref: string; exists: boolean };
-type SourceType =
-  | "local_openai"
-  | "openrouter"
-  | "openai"
-  | "deepseek"
-  | "qwen"
-  | "kimi"
-  | "volcengine"
-  | "volcengine_coding"
-  | "tencent_hunyuan"
-  | "minimax"
-  | "zhipu"
-  | "custom_gateway";
 
 type ProviderPreset = {
-  id: SourceType;
+  id: ModelSourceType;
   label: string;
-  badge: string;
-  baseUrl: string;
-  defaultModel: string;
+  family: "API Key 型" | "OAuth / 本地凭据型" | "Custom Endpoint 型";
+  authHint: string;
+  baseUrl?: string;
+  defaultModel?: string;
   modelPlaceholder: string;
   keyMode: "required" | "optional";
   icon: typeof Server;
+  providerMode: "select" | "manual";
+  modelOptions?: string[];
+  description: string;
+  authModeToStore: "api_key" | "oauth" | "local_credentials" | "external_process" | "optional_api_key";
 };
 
 const PROVIDERS: ProviderPreset[] = [
   {
-    id: "local_openai",
-    label: "本地 OpenAI-Compatible",
-    badge: "Local",
-    baseUrl: "http://127.0.0.1:1234/v1",
-    defaultModel: "",
-    modelPlaceholder: "qwen2.5-coder 或本地已加载模型",
-    keyMode: "optional",
-    icon: Server,
-  },
-  {
-    id: "openrouter",
+    id: "openrouter_api_key",
     label: "OpenRouter",
-    badge: "Cloud",
+    family: "API Key 型",
+    authHint: "需要 API Key",
     baseUrl: "https://openrouter.ai/api/v1",
     defaultModel: "anthropic/claude-sonnet-4-5",
-    modelPlaceholder: "anthropic/claude-sonnet-4-5 或 openai/gpt-5",
+    modelOptions: ["anthropic/claude-sonnet-4-5", "openai/gpt-5", "google/gemini-2.5-pro"],
+    modelPlaceholder: "选择或填写 OpenRouter 模型 ID",
     keyMode: "required",
     icon: Network,
+    providerMode: "select",
+    description: "统一接多个云模型，适合主模型。",
+    authModeToStore: "api_key",
   },
   {
-    id: "openai",
-    label: "OpenAI",
-    badge: "Cloud",
-    baseUrl: "https://api.openai.com/v1",
-    defaultModel: "gpt-5.4",
-    modelPlaceholder: "gpt-5.4 或 gpt-4.1",
+    id: "anthropic_api_key",
+    label: "Anthropic API Key",
+    family: "API Key 型",
+    authHint: "需要 API Key",
+    baseUrl: "https://api.anthropic.com",
+    defaultModel: "claude-sonnet-4-5",
+    modelOptions: ["claude-sonnet-4-5", "claude-opus-4"],
+    modelPlaceholder: "选择或填写 Anthropic 模型 ID",
     keyMode: "required",
     icon: Cloud,
+    providerMode: "select",
+    description: "Anthropic 官方 API。",
+    authModeToStore: "api_key",
   },
   {
-    id: "deepseek",
-    label: "DeepSeek",
-    badge: "国内",
+    id: "gemini_api_key",
+    label: "Gemini API Key",
+    family: "API Key 型",
+    authHint: "需要 API Key",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta",
+    defaultModel: "gemini-2.5-pro",
+    modelOptions: ["gemini-2.5-pro", "gemini-2.5-flash"],
+    modelPlaceholder: "选择或填写 Gemini 模型 ID",
+    keyMode: "required",
+    icon: Cloud,
+    providerMode: "select",
+    description: "Google AI Studio / Gemini API。",
+    authModeToStore: "api_key",
+  },
+  {
+    id: "deepseek_api_key",
+    label: "DeepSeek API Key",
+    family: "API Key 型",
+    authHint: "需要 API Key",
     baseUrl: "https://api.deepseek.com/v1",
     defaultModel: "deepseek-chat",
-    modelPlaceholder: "deepseek-chat 或 deepseek-reasoner",
+    modelOptions: ["deepseek-chat", "deepseek-reasoner"],
+    modelPlaceholder: "选择或填写 DeepSeek 模型 ID",
     keyMode: "required",
     icon: Network,
+    providerMode: "select",
+    description: "DeepSeek 官方 API。",
+    authModeToStore: "api_key",
   },
   {
-    id: "qwen",
-    label: "阿里云百炼 / Qwen",
-    badge: "国内",
-    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
-    defaultModel: "qwen3-coder-plus",
-    modelPlaceholder: "qwen3-coder-plus 或 qwen-max",
+    id: "huggingface_api_key",
+    label: "Hugging Face API Key",
+    family: "API Key 型",
+    authHint: "需要 HF_TOKEN",
+    baseUrl: "https://router.huggingface.co/v1",
+    modelPlaceholder: "填写 Hugging Face 模型 ID",
     keyMode: "required",
     icon: Cloud,
+    providerMode: "manual",
+    description: "Hugging Face Router。",
+    authModeToStore: "api_key",
   },
   {
-    id: "kimi",
-    label: "Moonshot / Kimi",
-    badge: "国内",
-    baseUrl: "https://api.moonshot.ai/v1",
-    defaultModel: "kimi-k2.5",
-    modelPlaceholder: "kimi-k2.5",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "volcengine",
-    label: "火山方舟 / 豆包",
-    badge: "国内",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    defaultModel: "doubao-seed-1-6-251015",
-    modelPlaceholder: "doubao-seed-1-6-251015 或你的方舟模型 ID",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "volcengine_coding",
-    label: "火山方舟 Coding Plan",
-    badge: "Coding Plan",
-    baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
-    defaultModel: "ark-code-latest",
-    modelPlaceholder: "ark-code-latest 或 Coding Plan 可用模型",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "tencent_hunyuan",
-    label: "腾讯混元",
-    badge: "国内",
-    baseUrl: "https://api.hunyuan.cloud.tencent.com/v1",
-    defaultModel: "hunyuan-turbos-latest",
-    modelPlaceholder: "hunyuan-turbos-latest",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "minimax",
-    label: "MiniMax",
-    badge: "国内",
-    baseUrl: "https://api.minimax.io/v1",
-    defaultModel: "MiniMax-M2.7",
-    modelPlaceholder: "MiniMax-M2.7 或 MiniMax-M2.5",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "zhipu",
-    label: "智谱 GLM",
-    badge: "国内",
-    baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    defaultModel: "glm-4.5",
-    modelPlaceholder: "glm-4.5 或 glm-4.5-flash",
-    keyMode: "required",
-    icon: Cloud,
-  },
-  {
-    id: "custom_gateway",
-    label: "自定义兼容网关",
-    badge: "Gateway",
-    baseUrl: "https://your-gateway.example.com/v1",
-    defaultModel: "",
-    modelPlaceholder: "你的网关模型 ID",
+    id: "gemini_oauth",
+    label: "Gemini OAuth",
+    family: "OAuth / 本地凭据型",
+    authHint: "依赖本机 OAuth",
+    defaultModel: "gemini-2.5-pro",
+    modelOptions: ["gemini-2.5-pro", "gemini-2.5-flash"],
+    modelPlaceholder: "选择模型",
     keyMode: "optional",
     icon: PlugZap,
+    providerMode: "select",
+    description: "依赖本机已有 Gemini OAuth，不按 API Key 处理。",
+    authModeToStore: "oauth",
+  },
+  {
+    id: "anthropic_local_credentials",
+    label: "Anthropic 本地凭据",
+    family: "OAuth / 本地凭据型",
+    authHint: "依赖本机凭据",
+    defaultModel: "claude-sonnet-4-5",
+    modelOptions: ["claude-sonnet-4-5", "claude-opus-4"],
+    modelPlaceholder: "选择模型",
+    keyMode: "optional",
+    icon: PlugZap,
+    providerMode: "select",
+    description: "依赖本机已有 Anthropic / Claude 凭据。",
+    authModeToStore: "local_credentials",
+  },
+  {
+    id: "github_copilot",
+    label: "GitHub Copilot / Models",
+    family: "OAuth / 本地凭据型",
+    authHint: "依赖本机 GitHub token",
+    baseUrl: "https://models.github.ai/inference/v1",
+    modelPlaceholder: "填写 GitHub Models 模型 ID",
+    keyMode: "optional",
+    icon: PlugZap,
+    providerMode: "manual",
+    description: "优先检查本机 GH_TOKEN / COPILOT_GITHUB_TOKEN。",
+    authModeToStore: "local_credentials",
+  },
+  {
+    id: "github_copilot_acp",
+    label: "GitHub Copilot ACP",
+    family: "OAuth / 本地凭据型",
+    authHint: "依赖 ACP 外部进程",
+    modelPlaceholder: "填写 ACP 暴露的模型 ID",
+    keyMode: "optional",
+    icon: PlugZap,
+    providerMode: "manual",
+    description: "不再按普通 API Key provider 处理。",
+    authModeToStore: "external_process",
+  },
+  {
+    id: "ollama",
+    label: "Ollama",
+    family: "Custom Endpoint 型",
+    authHint: "API Key 可空",
+    baseUrl: "http://127.0.0.1:11434/v1",
+    modelPlaceholder: "填写 Ollama 模型名",
+    keyMode: "optional",
+    icon: Server,
+    providerMode: "manual",
+    description: "会检查 localhost 在 WSL 中是否可达。",
+    authModeToStore: "optional_api_key",
+  },
+  {
+    id: "vllm",
+    label: "vLLM",
+    family: "Custom Endpoint 型",
+    authHint: "API Key 可空",
+    baseUrl: "http://127.0.0.1:8000/v1",
+    modelPlaceholder: "填写 vLLM 模型 ID",
+    keyMode: "optional",
+    icon: Server,
+    providerMode: "manual",
+    description: "会检查 context length 与 tool calling。",
+    authModeToStore: "optional_api_key",
+  },
+  {
+    id: "sglang",
+    label: "SGLang",
+    family: "Custom Endpoint 型",
+    authHint: "API Key 可空",
+    baseUrl: "http://127.0.0.1:30000/v1",
+    modelPlaceholder: "填写 SGLang 模型 ID",
+    keyMode: "optional",
+    icon: Server,
+    providerMode: "manual",
+    description: "会检查 context length 与 tool calling。",
+    authModeToStore: "optional_api_key",
+  },
+  {
+    id: "lm_studio",
+    label: "LM Studio",
+    family: "Custom Endpoint 型",
+    authHint: "API Key 可空",
+    baseUrl: "http://127.0.0.1:1234/v1",
+    modelPlaceholder: "填写 LM Studio 已加载模型",
+    keyMode: "optional",
+    icon: Server,
+    providerMode: "manual",
+    description: "支持自动探测。",
+    authModeToStore: "optional_api_key",
+  },
+  {
+    id: "openai_compatible",
+    label: "OpenAI-compatible",
+    family: "Custom Endpoint 型",
+    authHint: "兼容 /v1/chat/completions",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    modelPlaceholder: "填写兼容网关模型 ID",
+    keyMode: "optional",
+    icon: PlugZap,
+    providerMode: "manual",
+    description: "适合自建网关、LiteLLM、One API、New API。",
+    authModeToStore: "optional_api_key",
   },
 ];
 
-const PROVIDER_GROUPS: Array<{ label: string; ids: SourceType[] }> = [
-  { label: "推荐预设", ids: ["qwen", "kimi", "deepseek", "volcengine_coding", "openrouter", "openai"] },
-  { label: "国内厂商", ids: ["volcengine", "tencent_hunyuan", "minimax", "zhipu"] },
-  { label: "本地与自定义", ids: ["local_openai", "custom_gateway"] },
+const PROVIDER_GROUPS: Array<{ label: string; ids: ModelSourceType[] }> = [
+  { label: "API Key 型", ids: ["openrouter_api_key", "anthropic_api_key", "gemini_api_key", "deepseek_api_key", "huggingface_api_key"] },
+  { label: "OAuth / 本地凭据型", ids: ["gemini_oauth", "anthropic_local_credentials", "github_copilot", "github_copilot_acp"] },
+  { label: "Custom Endpoint 型", ids: ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible"] },
 ];
+
+const MIN_AGENT_CONTEXT = 16000;
 
 export function ModelConfigWizard(props: {
   models: OverviewModels;
@@ -183,10 +263,11 @@ export function ModelConfigWizard(props: {
   const currentProfile = props.models.modelProfiles.find((item) => item.id === props.models.defaultProfileId) ?? props.models.modelProfiles[0];
   const initialDraft = draftStateForProfile(props.models, currentProfile?.id);
   const [editingProfileId, setEditingProfileId] = useState<string | undefined>(currentProfile?.id);
-  const [sourceType, setSourceType] = useState<SourceType>(initialDraft.sourceType);
+  const [sourceType, setSourceType] = useState<ModelSourceType>(initialDraft.sourceType);
   const [baseUrl, setBaseUrl] = useState(initialDraft.baseUrl);
   const [model, setModel] = useState(initialDraft.model);
   const [secretRef, setSecretRef] = useState(initialDraft.secretRef);
+  const [maxTokens, setMaxTokens] = useState(initialDraft.maxTokens ? String(initialDraft.maxTokens) : "");
   const [apiKey, setApiKey] = useState("");
   const [testResult, setTestResult] = useState<ModelConnectionTestResult | undefined>();
   const [discovery, setDiscovery] = useState<LocalModelDiscoveryResult | undefined>();
@@ -204,6 +285,7 @@ export function ModelConfigWizard(props: {
     setBaseUrl(next.baseUrl);
     setModel(next.model);
     setSecretRef(next.secretRef);
+    setMaxTokens(next.maxTokens ? String(next.maxTokens) : "");
     setApiKey("");
     setTestResult(undefined);
     setDiscovery(undefined);
@@ -216,18 +298,24 @@ export function ModelConfigWizard(props: {
   const hasStoredSecret = props.secrets.some((item) => item.ref === effectiveSecretRef && item.exists);
   const testOk = Boolean(testResult?.ok);
   const canUseSavedSecret = hasStoredSecret || Boolean(apiKey.trim()) || !sourceNeedsKey(sourceType);
+  const shouldAutoDiscover = ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible"].includes(sourceType);
 
   const modelOptions = useMemo(
-    () => (testResult?.availableModels?.length ? testResult.availableModels : discovery?.recommendedModel ? [discovery.recommendedModel] : []),
-    [discovery?.recommendedModel, testResult?.availableModels],
+    () => {
+      const discovered = testResult?.availableModels?.length ? testResult.availableModels : discovery?.recommendedModel ? [discovery.recommendedModel] : [];
+      const preset = provider.modelOptions ?? [];
+      return Array.from(new Set([...preset, ...discovered].filter(Boolean)));
+    },
+    [discovery?.recommendedModel, provider.modelOptions, testResult?.availableModels],
   );
 
-  function updateSource(nextSource: SourceType) {
+  function updateSource(nextSource: ModelSourceType) {
     const next = draftStateForNewProfile(nextSource);
     setSourceType(nextSource);
     setBaseUrl(next.baseUrl);
     setModel(next.model);
     setSecretRef(next.secretRef);
+    setMaxTokens(next.maxTokens ? String(next.maxTokens) : "");
     setApiKey("");
     setDiscovery(undefined);
     setTestResult(undefined);
@@ -235,13 +323,14 @@ export function ModelConfigWizard(props: {
     setProviderMenuOpen(false);
   }
 
-  function createNewProfile(nextSource: SourceType = sourceType) {
+  function createNewProfile(nextSource: ModelSourceType = sourceType) {
     const next = draftStateForNewProfile(nextSource);
     setEditingProfileId(undefined);
     setSourceType(next.sourceType);
     setBaseUrl(next.baseUrl);
     setModel(next.model);
     setSecretRef(next.secretRef);
+    setMaxTokens(next.maxTokens ? String(next.maxTokens) : "");
     setApiKey("");
     setDiscovery(undefined);
     setTestResult(undefined);
@@ -256,6 +345,7 @@ export function ModelConfigWizard(props: {
     setBaseUrl(next.baseUrl);
     setModel(next.model);
     setSecretRef(next.secretRef);
+    setMaxTokens(next.maxTokens ? String(next.maxTokens) : "");
     setApiKey("");
     setDiscovery(undefined);
     setTestResult(undefined);
@@ -296,10 +386,11 @@ export function ModelConfigWizard(props: {
     try {
       const ref = await ensureSecretIfNeeded(sourceType);
       const result = await window.workbenchClient.testModelConnection({
-        sourceType: connectionSourceType(sourceType),
+        sourceType,
         model: model.trim(),
         baseUrl: baseUrl.trim(),
         secretRef: ref,
+        maxTokens: maxTokens.trim() ? Number(maxTokens.trim()) : undefined,
       });
       setTestResult(result);
     } finally {
@@ -311,32 +402,68 @@ export function ModelConfigWizard(props: {
     setBusyAction("save");
     try {
       const ref = await ensureSecretIfNeeded(sourceType);
+      const health = await window.workbenchClient.testModelConnection({
+        sourceType,
+        model: model.trim(),
+        baseUrl: baseUrl.trim(),
+        secretRef: ref,
+        maxTokens: maxTokens.trim() ? Number(maxTokens.trim()) : undefined,
+      });
+      setTestResult(health);
       const profileId = editingProfileId ?? buildProfileId(sourceType, props.models.modelProfiles);
       const nextProfile = {
         id: profileId,
         name: friendlyProfileName(sourceType, model.trim()),
-        provider: sourceType === "openai" || sourceType === "openrouter" ? sourceType : "custom",
+        provider: providerIdForSource(sourceType),
+        sourceType,
+        authMode: provider.authModeToStore,
         model: model.trim(),
         ...(baseUrl.trim() ? { baseUrl: baseUrl.trim() } : {}),
         ...(ref ? { secretRef: ref } : {}),
+        ...(maxTokens.trim() ? { maxTokens: Number(maxTokens.trim()) } : {}),
+        ...(health.agentRole ? { agentRole: health.agentRole } : {}),
+        ...(typeof health.supportsTools === "boolean" ? { supportsTools: health.supportsTools } : {}),
+        ...(typeof health.supportsVision === "boolean" ? { supportsVision: health.supportsVision } : {}),
+        ...(typeof health.contextWindow === "number" ? { maxTokens: health.contextWindow } : {}),
+        lastHealthCheckAt: new Date().toISOString(),
+        lastHealthStatus: health.ok ? "ready" : "warning",
+        lastHealthSummary: health.message,
       };
       const nextProfiles = [
         ...props.models.modelProfiles.filter((item) => item.id !== profileId),
         nextProfile,
       ];
+      const nextDefaultProfileId = health.agentRole === "primary_agent"
+        ? (props.models.defaultProfileId ?? profileId)
+        : props.models.defaultProfileId;
       await window.workbenchClient.updateModelConfig({
-        defaultProfileId: props.models.defaultProfileId ?? profileId,
+        defaultProfileId: nextDefaultProfileId,
         modelProfiles: nextProfiles,
       });
       await props.onRefresh();
       setEditingProfileId(profileId);
-      props.onSaved(props.models.defaultProfileId ? "模型已保存" : "模型已保存，并设为默认");
+      props.onSaved(health.agentRole === "primary_agent"
+        ? (props.models.defaultProfileId ? "模型已保存" : "模型已保存，并设为默认")
+        : "模型已保存为辅助/待确认来源，未自动设为默认");
     } finally {
       setBusyAction(undefined);
     }
   }
 
   async function setDefaultProfile(profileId: string) {
+    const profile = props.models.modelProfiles.find((item) => item.id === profileId);
+    if (profile?.agentRole && profile.agentRole !== "primary_agent") {
+      setTestResult({
+        ok: false,
+        profileId: profile.id,
+        sourceType: profile.sourceType ?? inferSourceType(profile.provider, profile.baseUrl),
+        message: "这个模型当前只适合作为辅助模型，不能直接切换成 Hermes 主模型。",
+        agentRole: profile.agentRole,
+        failureCategory: "tool_calling_unavailable",
+        recommendedFix: "请先把它重新测试到主模型标准，或改选支持工具调用和更高上下文的模型。",
+      });
+      return;
+    }
     await window.workbenchClient.updateModelConfig({
       defaultProfileId: profileId,
       modelProfiles: props.models.modelProfiles,
@@ -355,18 +482,21 @@ export function ModelConfigWizard(props: {
     if (editingProfileId === profileId) {
       const fallback = nextProfiles.find((item) => item.id === props.models.defaultProfileId) ?? nextProfiles[0];
       if (fallback) editProfile(fallback.id);
-      else createNewProfile("local_openai");
+      else createNewProfile("openai_compatible");
     }
     props.onSaved("模型已删除");
   }
 
-  async function ensureSecretIfNeeded(targetSource: SourceType) {
+  async function ensureSecretIfNeeded(targetSource: ModelSourceType) {
     const trimmedInput = apiKey.trim();
     const nextRef = secretRef.trim() || defaultSecretRefForSource(targetSource);
     if (trimmedInput) {
       await window.workbenchClient.saveSecret({ ref: nextRef, plainText: trimmedInput });
       setSecretRef(nextRef);
       return nextRef;
+    }
+    if (!sourceNeedsKey(targetSource) && !hasStoredSecret) {
+      return undefined;
     }
     return nextRef || undefined;
   }
@@ -377,17 +507,25 @@ export function ModelConfigWizard(props: {
         <div className="border-b border-slate-100 bg-slate-50/60 px-6 py-10 text-center">
           <div className="mx-auto inline-flex items-center gap-3">
             <span className="text-[28px] font-semibold text-blue-500">1.</span>
-            <h3 className="text-[26px] font-semibold tracking-tight text-slate-950">模型 (Models)</h3>
+            <h3 className="text-[26px] font-semibold tracking-tight text-slate-950">模型接入</h3>
           </div>
-          <p className="mt-5 text-[15px] text-slate-600">添加至少 1 个模型，Hermes Forge 才能正常工作</p>
+          <p className="mt-5 text-[15px] text-slate-600">先选 provider family，再选或填写模型；保存后会自动做 health check。</p>
         </div>
 
         <div className="px-7 py-8">
+          <div className="mb-6 grid gap-3 rounded-2xl border border-slate-200/70 bg-slate-50 p-4">
+            <div className="flex items-center gap-2">
+              <Sparkles size={15} className="text-slate-500" />
+              <p className="text-[13px] font-semibold text-slate-900">新增 provider / 认证</p>
+            </div>
+            <p className="text-[12px] leading-6 text-slate-500">这里用来新增来源、填 API Key、接 OAuth/本地凭据、测试连通性。底部“已保存模型”区域只负责切换默认模型。</p>
+          </div>
+
           <div className="grid gap-3">
             <div className="relative">
               <button
                 aria-expanded={providerMenuOpen}
-                aria-label="选择模型通道"
+                aria-label="选择 provider family"
                 className="flex min-h-14 w-full items-center justify-between gap-3 border border-slate-200 bg-white px-4 text-left transition hover:bg-slate-50 focus:border-blue-400 focus:outline-none focus:ring-2 focus:ring-blue-100"
                 onClick={() => setProviderMenuOpen((value) => !value)}
                 type="button"
@@ -398,7 +536,7 @@ export function ModelConfigWizard(props: {
                   </span>
                   <span className="min-w-0">
                     <span className="block truncate text-[15px] font-semibold text-slate-950">{provider.label}</span>
-                    <span className="mt-0.5 block text-[11px] text-slate-400">{provider.badge} · {provider.keyMode === "required" ? "需要 API Key" : "API Key 可选"}</span>
+                    <span className="mt-0.5 block text-[11px] text-slate-400">{provider.family} · {provider.authHint}</span>
                   </span>
                 </span>
                 <ChevronDown size={18} className={cn("shrink-0 text-slate-400 transition-transform", providerMenuOpen && "rotate-180")} />
@@ -431,7 +569,7 @@ export function ModelConfigWizard(props: {
                               <span className="min-w-0 flex-1">
                                 <span className="block truncate text-[13px] font-semibold">{item.label}</span>
                                 <span className={cn("mt-0.5 block text-[11px]", selected ? "text-white/65" : "text-slate-400")}>
-                                  {item.badge} · {item.defaultModel || "手动填写模型"}
+                                  {item.family} · {item.description}
                                 </span>
                               </span>
                               <StatusBadge label={configured.isDefault ? "默认" : configured.label} tone={selected ? "selected" : configured.tone} />
@@ -448,29 +586,57 @@ export function ModelConfigWizard(props: {
             <div className="border border-slate-200 bg-white">
               <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2">
                 <span className="text-[12px] font-medium text-slate-500">模型名称 / Model ID</span>
-                <span className="text-[11px] text-slate-400">可选择，也可直接输入添加</span>
+                <span className="text-[11px] text-slate-400">{provider.providerMode === "select" ? "建议先从列表选，再按需手填" : "优先从测试结果选择，也可手填"}</span>
               </div>
-              <input
-                aria-label="添加模型名称"
-                list="hermes-model-options"
-                value={model}
-                onChange={(event) => updateModel(event.target.value)}
-                className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
-                placeholder={provider.modelPlaceholder}
-              />
-              <datalist id="hermes-model-options">
-                {modelOptions.map((item) => <option key={item} value={item} />)}
-              </datalist>
+              {provider.providerMode === "select" && modelOptions.length ? (
+                <select
+                  aria-label="添加模型名称"
+                  value={model}
+                  onChange={(event) => updateModel(event.target.value)}
+                  className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
+                >
+                  {modelOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                </select>
+              ) : (
+                <>
+                  <input
+                    aria-label="添加模型名称"
+                    list="hermes-model-options"
+                    value={model}
+                    onChange={(event) => updateModel(event.target.value)}
+                    className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
+                    placeholder={provider.modelPlaceholder}
+                  />
+                  <datalist id="hermes-model-options">
+                    {modelOptions.map((item) => <option key={item} value={item} />)}
+                  </datalist>
+                </>
+              )}
             </div>
 
-              <button
-                className="h-12 w-full border border-slate-200 bg-white px-4 text-[15px] font-semibold text-slate-950 transition hover:bg-slate-50"
-                onClick={() => createNewProfile(sourceType)}
-                type="button"
-              >
-                新增模型草稿
-              </button>
-            </div>
+            {provider.family === "Custom Endpoint 型" ? (
+              <label className="block text-[12px] font-medium text-slate-500">
+                <span className="mb-1.5 block">上下文长度 / Context Length</span>
+                <input
+                  value={maxTokens}
+                  onChange={(event) => {
+                    setMaxTokens(event.target.value.replace(/[^\d]/g, ""));
+                    setTestResult(undefined);
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-[13px] text-slate-800 outline-none transition focus:border-slate-300 focus:bg-white focus:ring-2 focus:ring-slate-900/10"
+                  placeholder={`至少 ${MIN_AGENT_CONTEXT}；低于此值只建议作为辅助模型`}
+                />
+              </label>
+            ) : null}
+
+            <button
+              className="h-12 w-full border border-slate-200 bg-white px-4 text-[15px] font-semibold text-slate-950 transition hover:bg-slate-50"
+              onClick={() => createNewProfile(sourceType)}
+              type="button"
+            >
+              新增模型草稿
+            </button>
+          </div>
 
           <p className="mt-5 text-[14px] leading-7 text-slate-500">
             {providerIntro(sourceType)}
@@ -483,12 +649,12 @@ export function ModelConfigWizard(props: {
         <div className="border-t border-slate-100 px-7 py-8">
           <div className="mb-4 flex items-center justify-between gap-3">
             <div>
-              <p className="text-[14px] text-slate-500">已保存模型</p>
-              <p className="mt-1 text-[12px] text-slate-400">支持查看、编辑、删除，并显式切换默认模型。</p>
+              <p className="text-[14px] text-slate-500">已配置模型 / 切换默认模型</p>
+              <p className="mt-1 text-[12px] text-slate-400">这里和“新增 provider / 认证”分开；主模型切换只在这里做。</p>
             </div>
             <button
               className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 hover:bg-slate-50"
-              onClick={() => createNewProfile("local_openai")}
+              onClick={() => createNewProfile("openai_compatible")}
               type="button"
             >
               添加模型
@@ -508,9 +674,11 @@ export function ModelConfigWizard(props: {
                           <p className="truncate text-[14px] font-semibold text-slate-900">{profile.name ?? profile.model}</p>
                           {isDefault ? <StatusBadge label="默认" tone="default" /> : null}
                           <StatusBadge label={providerFor(profileSource).label} tone="muted" />
+                          {profile.agentRole ? <StatusBadge label={roleLabel(profile.agentRole)} tone={profile.agentRole === "primary_agent" ? "success" : "warning"} /> : null}
                         </div>
                         <p className="mt-1 break-all font-mono text-[12px] text-slate-500">{profile.model}</p>
                         <p className="mt-1 text-[11px] text-slate-400">{profile.baseUrl ?? providerFor(profileSource).baseUrl}</p>
+                        {profile.lastHealthSummary ? <p className="mt-2 text-[11px] text-slate-500">{profile.lastHealthSummary}</p> : null}
                       </div>
                       <div className="flex flex-wrap gap-2">
                         {!isDefault ? (
@@ -548,7 +716,7 @@ export function ModelConfigWizard(props: {
         <div className="mb-3 flex items-center justify-between gap-3">
           <div>
             <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">Connection</p>
-            <h3 className="mt-1 text-[15px] font-semibold text-slate-900">连接参数</h3>
+            <h3 className="mt-1 text-[15px] font-semibold text-slate-900">接入与 Health Check</h3>
           </div>
           <StatusBadge label={testOk ? "测试通过" : "等待测试"} tone={testOk ? "success" : "muted"} />
         </div>
@@ -560,13 +728,13 @@ export function ModelConfigWizard(props: {
               value={baseUrl}
               onChange={(event) => updateBaseUrl(event.target.value)}
               className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 font-mono text-[13px] text-slate-800 outline-none transition focus:border-slate-300 focus:bg-white focus:ring-2 focus:ring-slate-900/10"
-              placeholder={provider.baseUrl}
+              placeholder={provider.baseUrl ?? "某些 OAuth / 本地凭据来源不必手填"}
             />
           </label>
 
           <label className="block text-[12px] font-medium text-slate-500">
             <span className="mb-1.5 flex items-center justify-between gap-2">
-              <span>API Key {provider.keyMode === "optional" ? "（可选）" : ""}</span>
+              <span>{provider.family === "OAuth / 本地凭据型" ? "凭据 / Token（可选）" : `API Key ${provider.keyMode === "optional" ? "（可选）" : ""}`}</span>
               <span className={cn("inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-semibold", hasStoredSecret ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-500")}>
                 <KeyRound size={11} />
                 {hasStoredSecret ? "已保存" : "未保存"}
@@ -576,13 +744,13 @@ export function ModelConfigWizard(props: {
               value={apiKey}
               onChange={(event) => updateApiKey(event.target.value)}
               className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:border-slate-300 focus:bg-white focus:ring-2 focus:ring-slate-900/10"
-              placeholder={provider.keyMode === "required" ? "粘贴 API Key" : "本地接口无鉴权可留空"}
+              placeholder={provider.family === "OAuth / 本地凭据型" ? "本机已有凭据可留空；若你有 token，也可填" : provider.keyMode === "required" ? "粘贴 API Key" : "本地接口无鉴权可留空"}
               type="password"
             />
           </label>
 
           <div className="flex flex-wrap gap-2">
-            {sourceType === "local_openai" ? (
+            {shouldAutoDiscover ? (
               <button
                 className="inline-flex items-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-[12px] font-semibold text-blue-700 hover:bg-blue-100 disabled:opacity-60"
                 disabled={busyAction === "discover"}
@@ -603,18 +771,34 @@ export function ModelConfigWizard(props: {
           </div>
 
           {showAdvanced ? (
-            <label className="block rounded-2xl border border-slate-200 bg-slate-50 p-3 text-[12px] font-medium text-slate-500">
-              <span className="mb-1.5 block">Secret Ref</span>
-              <input
-                value={secretRef}
-                onChange={(event) => {
-                  setSecretRef(event.target.value);
-                  setTestResult(undefined);
-                }}
-                className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 font-mono text-[13px] text-slate-800 outline-none"
-                placeholder={defaultSecretRefForSource(sourceType)}
-              />
-            </label>
+            <div className="grid gap-3 rounded-2xl border border-slate-200 bg-slate-50 p-3 text-[12px] font-medium text-slate-500">
+              <label className="block">
+                <span className="mb-1.5 block">Secret Ref</span>
+                <input
+                  value={secretRef}
+                  onChange={(event) => {
+                    setSecretRef(event.target.value);
+                    setTestResult(undefined);
+                  }}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 font-mono text-[13px] text-slate-800 outline-none"
+                  placeholder={defaultSecretRefForSource(sourceType)}
+                />
+              </label>
+              {provider.family === "Custom Endpoint 型" ? (
+                <label className="block">
+                  <span className="mb-1.5 block">自报上下文长度</span>
+                  <input
+                    value={maxTokens}
+                    onChange={(event) => {
+                      setMaxTokens(event.target.value.replace(/[^\d]/g, ""));
+                      setTestResult(undefined);
+                    }}
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 font-mono text-[13px] text-slate-800 outline-none"
+                    placeholder={`推荐至少 ${MIN_AGENT_CONTEXT}`}
+                  />
+                </label>
+              ) : null}
+            </div>
           ) : null}
         </div>
 
@@ -647,6 +831,25 @@ export function ModelConfigWizard(props: {
               {testResult.ok ? "测试通过" : "测试失败"}
             </div>
             <p className="mt-2 whitespace-pre-wrap leading-6">{testResult.message}</p>
+            <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+              {testResult.providerFamily ? <StatusBadge label={testResult.providerFamily} tone="muted" /> : null}
+              {testResult.authMode ? <StatusBadge label={`auth:${testResult.authMode}`} tone="muted" /> : null}
+              {testResult.agentRole ? <StatusBadge label={roleLabel(testResult.agentRole)} tone={testResult.agentRole === "primary_agent" ? "success" : "warning"} /> : null}
+              {typeof testResult.contextWindow === "number" ? <StatusBadge label={`ctx:${testResult.contextWindow}`} tone={testResult.contextWindow >= MIN_AGENT_CONTEXT ? "success" : "warning"} /> : null}
+              {typeof testResult.supportsTools === "boolean" ? <StatusBadge label={testResult.supportsTools ? "tool calling 可用" : "tool calling 未通过"} tone={testResult.supportsTools ? "success" : "warning"} /> : null}
+              {typeof testResult.wslReachable === "boolean" ? <StatusBadge label={testResult.wslReachable ? "WSL 可达" : "WSL 不可达"} tone={testResult.wslReachable ? "success" : "warning"} /> : null}
+            </div>
+            {testResult.healthChecks?.length ? (
+              <div className="mt-3 space-y-2">
+                {testResult.healthChecks.map((item) => (
+                  <div key={item.id} className="rounded-xl bg-white/70 px-3 py-2 text-[11px]">
+                    <p className="font-semibold text-slate-700">{healthStepLabel(item.id)} · {item.ok ? "通过" : "失败"}</p>
+                    <p className="mt-1 text-slate-600">{item.message}</p>
+                    {item.detail ? <p className="mt-1 text-slate-500">{item.detail}</p> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
             {testResult.recommendedFix ? (
               <div className="mt-2 rounded-xl bg-white/70 px-3 py-2 font-medium">
                 建议动作：{testResult.recommendedFix}
@@ -655,14 +858,14 @@ export function ModelConfigWizard(props: {
           </div>
         ) : (
           <div className="mb-3 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-[12px] text-slate-500">
-            先测试连接。测试通过后，保存按钮才会启用。
+            先测试连接。测试会检查 auth、模型发现、最小 chat、agent 能力，以及 WSL 到模型服务的可达性。
           </div>
         )}
 
         <div className="flex flex-wrap justify-end gap-2">
           <button
             className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-            disabled={busyAction === "test" || !baseUrl.trim() || !model.trim() || !canUseSavedSecret}
+            disabled={busyAction === "test" || (provider.family !== "OAuth / 本地凭据型" && !baseUrl.trim()) || !model.trim() || !canUseSavedSecret}
             onClick={() => void testConnection()}
             type="button"
           >
@@ -679,7 +882,7 @@ export function ModelConfigWizard(props: {
           >
             <span className="inline-flex items-center gap-2">
               {busyAction === "save" ? <Loader2 size={14} className="animate-spin" /> : null}
-              {busyAction === "save" ? "保存中..." : editingProfileId ? "保存模型" : "新增模型"}
+              {busyAction === "save" ? "保存中..." : editingProfileId ? "保存并复检" : "新增并复检"}
             </span>
           </button>
         </div>
@@ -697,23 +900,9 @@ function SummaryTile(props: { label: string; value: string }) {
   );
 }
 
-function providerIntro(sourceType: SourceType) {
-  if (sourceType === "local_openai") {
-    return "本地 OpenAI-Compatible 适合 LM Studio、vLLM、Ollama 中转或 New API 等本机服务。";
-  }
-  if (sourceType === "openrouter") {
-    return "OpenRouter 适合统一接入多个云模型，建议只填写你常用的模型 ID。";
-  }
-  if (sourceType === "openai") {
-    return "OpenAI 通道需要 API Key 和模型 ID，Base URL 默认使用官方 /v1 地址。";
-  }
-  if (sourceType === "volcengine") {
-    return "火山方舟支持 OpenAI-compatible 调用，适合接入豆包等方舟模型。";
-  }
-  if (sourceType === "volcengine_coding") {
-    return "火山方舟 Coding Plan 适合代码类任务，已预置 Coding Plan 专用接口地址。";
-  }
-  return "自定义兼容网关适合公司内网、LiteLLM、One API、New API 或其他 OpenAI-compatible 服务。";
+function providerIntro(sourceType: ModelSourceType) {
+  const provider = providerFor(sourceType);
+  return `${provider.description} 保存时会自动重跑 health check，并区分“可接入 provider”“可作主模型”“仅辅助模型”。`;
 }
 
 function StatusBadge(props: { label: string; tone: "success" | "warning" | "muted" | "default" | "selected" }) {
@@ -733,67 +922,70 @@ function StatusBadge(props: { label: string; tone: "success" | "warning" | "mute
 function draftStateForProfile(models: OverviewModels, profileId?: string) {
   const current = profileId ? models.modelProfiles.find((item) => item.id === profileId) : undefined;
   if (!current) {
-    return draftStateForNewProfile("local_openai");
+    return draftStateForNewProfile("openai_compatible");
   }
-  const sourceType = inferSourceType(current.provider, current.baseUrl);
+  const sourceType = current.sourceType ?? inferSourceType(current.provider, current.baseUrl);
   const preset = providerFor(sourceType);
   return {
     sourceType,
-    baseUrl: current.baseUrl ?? preset.baseUrl,
+    baseUrl: current.baseUrl ?? preset.baseUrl ?? "",
     model: current.model ?? "",
     secretRef: current.secretRef ?? defaultSecretRefForSource(sourceType),
+    maxTokens: current.maxTokens,
   };
 }
 
-function draftStateForNewProfile(sourceType: SourceType) {
+function draftStateForNewProfile(sourceType: ModelSourceType) {
   const preset = providerFor(sourceType);
   return {
     sourceType,
-    baseUrl: preset.baseUrl,
-    model: preset.defaultModel,
+    baseUrl: preset.baseUrl ?? "",
+    model: preset.defaultModel ?? "",
     secretRef: defaultSecretRefForSource(sourceType),
+    maxTokens: undefined,
   };
 }
 
-function getSourceCardStatus(models: OverviewModels, secrets: SecretMeta[], sourceType: SourceType) {
-  const current = models.modelProfiles.find((item) => inferSourceType(item.provider, item.baseUrl) === sourceType);
+function getSourceCardStatus(models: OverviewModels, secrets: SecretMeta[], sourceType: ModelSourceType) {
+  const current = models.modelProfiles.find((item) => (item.sourceType ?? inferSourceType(item.provider, item.baseUrl)) === sourceType);
   const isDefault = current?.id === models.defaultProfileId;
   if (!current) {
     return { label: "未配置", tone: "muted" as const, isDefault };
   }
   const modelReady = Boolean(current.model?.trim());
-  const baseUrlReady = Boolean(current.baseUrl?.trim());
+  const baseUrlReady = providerFor(sourceType).family === "OAuth / 本地凭据型" ? true : Boolean(current.baseUrl?.trim());
   const secretReady = !sourceNeedsKey(sourceType) || secrets.some((item) => item.ref === (current.secretRef || defaultSecretRefForSource(sourceType)) && item.exists);
   if (!modelReady) return { label: "缺模型", tone: "warning" as const, isDefault };
   if (!baseUrlReady) return { label: "缺地址", tone: "warning" as const, isDefault };
   if (!secretReady) return { label: "缺 Key", tone: "warning" as const, isDefault };
+  if (current.agentRole && current.agentRole !== "primary_agent") return { label: "辅助模型", tone: "warning" as const, isDefault };
   return { label: "已配置", tone: "success" as const, isDefault };
 }
 
-function providerFor(sourceType: SourceType) {
+function providerFor(sourceType: ModelSourceType) {
   return PROVIDERS.find((item) => item.id === sourceType) ?? PROVIDERS[0];
 }
 
-function inferSourceType(provider: string, baseUrl?: string): SourceType {
-  if (provider === "openrouter") return "openrouter";
-  if (provider === "openai") return "openai";
+function inferSourceType(provider: string, baseUrl?: string): ModelSourceType {
+  if (provider === "openrouter") return "openrouter_api_key";
+  if (provider === "anthropic") return "anthropic_api_key";
+  if (provider === "gemini") return "gemini_api_key";
+  if (provider === "deepseek") return "deepseek_api_key";
+  if (provider === "huggingface") return "huggingface_api_key";
+  if (provider === "copilot") return "github_copilot";
+  if (provider === "copilot_acp") return "github_copilot_acp";
   if (provider === "custom") {
     const text = (baseUrl ?? "").toLowerCase();
-    if (text.includes("127.0.0.1") || text.includes("localhost")) return "local_openai";
-    if (text.includes("deepseek.com")) return "deepseek";
-    if (text.includes("dashscope")) return "qwen";
-    if (text.includes("moonshot")) return "kimi";
-    if (text.includes("ark.cn-beijing.volces.com/api/coding")) return "volcengine_coding";
-    if (text.includes("ark.cn-beijing.volces.com")) return "volcengine";
-    if (text.includes("hunyuan.cloud.tencent.com")) return "tencent_hunyuan";
-    if (text.includes("minimax.io")) return "minimax";
-    if (text.includes("bigmodel.cn")) return "zhipu";
-    return "custom_gateway";
+    if (text.includes(":11434")) return "ollama";
+    if (text.includes(":1234")) return "lm_studio";
+    if (text.includes(":8000")) return "vllm";
+    if (text.includes(":30000")) return "sglang";
+    return "openai_compatible";
   }
-  return "local_openai";
+  return "openai_compatible";
 }
 
-function buildProfileId(sourceType: SourceType, existingProfiles: OverviewModels["modelProfiles"]) {
+function buildProfileId(sourceType: ModelSourceType, existingProfiles: OverviewModels["modelProfiles"]) {
   const base = `wizard-${sourceType}`;
   if (!existingProfiles.some((item) => item.id === base)) {
     return base;
@@ -807,31 +999,59 @@ function buildProfileId(sourceType: SourceType, existingProfiles: OverviewModels
   return `${base}-${Date.now().toString(36)}`;
 }
 
-function friendlyProfileName(sourceType: SourceType, model: string) {
+function friendlyProfileName(sourceType: ModelSourceType, model: string) {
   const provider = providerFor(sourceType);
   return model ? `${provider.label} · ${model}` : provider.label;
 }
 
-function defaultSecretRefForSource(sourceType: SourceType) {
-  if (sourceType === "openai") return "provider.openai.apiKey";
-  if (sourceType === "openrouter") return "provider.openrouter.apiKey";
-  if (sourceType === "deepseek") return "provider.deepseek.apiKey";
-  if (sourceType === "qwen") return "provider.qwen.apiKey";
-  if (sourceType === "kimi") return "provider.kimi.apiKey";
-  if (sourceType === "volcengine") return "provider.volcengine.apiKey";
-  if (sourceType === "volcengine_coding") return "provider.volcengine-coding.apiKey";
-  if (sourceType === "tencent_hunyuan") return "provider.tencent-hunyuan.apiKey";
-  if (sourceType === "minimax") return "provider.minimax.apiKey";
-  if (sourceType === "zhipu") return "provider.zhipu.apiKey";
-  if (sourceType === "local_openai") return "provider.local.apiKey";
-  return "provider.custom.apiKey";
+function defaultSecretRefForSource(sourceType: ModelSourceType) {
+  switch (sourceType) {
+    case "openrouter_api_key": return "provider.openrouter.apiKey";
+    case "anthropic_api_key": return "provider.anthropic.apiKey";
+    case "gemini_api_key": return "provider.gemini.apiKey";
+    case "deepseek_api_key": return "provider.deepseek.apiKey";
+    case "huggingface_api_key": return "provider.huggingface.apiKey";
+    case "github_copilot": return "provider.copilot.token";
+    case "github_copilot_acp": return "provider.copilot-acp.token";
+    case "gemini_oauth": return "provider.gemini.oauth";
+    case "anthropic_local_credentials": return "provider.anthropic.local";
+    case "ollama": return "provider.ollama.apiKey";
+    case "vllm": return "provider.vllm.apiKey";
+    case "sglang": return "provider.sglang.apiKey";
+    case "lm_studio": return "provider.lmstudio.apiKey";
+    default: return "provider.custom.apiKey";
+  }
 }
 
-function sourceNeedsKey(sourceType: SourceType) {
+function sourceNeedsKey(sourceType: ModelSourceType) {
   return providerFor(sourceType).keyMode === "required";
 }
 
-function connectionSourceType(sourceType: SourceType): "local_openai" | "openrouter" | "openai" | "custom_gateway" {
-  if (sourceType === "local_openai" || sourceType === "openrouter" || sourceType === "openai") return sourceType;
-  return "custom_gateway";
+function providerIdForSource(sourceType: ModelSourceType) {
+  switch (sourceType) {
+    case "openrouter_api_key": return "openrouter" as const;
+    case "anthropic_api_key":
+    case "anthropic_local_credentials": return "anthropic" as const;
+    case "gemini_api_key":
+    case "gemini_oauth": return "gemini" as const;
+    case "deepseek_api_key": return "deepseek" as const;
+    case "huggingface_api_key": return "huggingface" as const;
+    case "github_copilot": return "copilot" as const;
+    case "github_copilot_acp": return "copilot_acp" as const;
+    default: return "custom" as const;
+  }
+}
+
+function roleLabel(role: ModelCapabilityRole) {
+  if (role === "primary_agent") return "可作主模型";
+  if (role === "auxiliary_model") return "辅助模型";
+  return "仅接入 provider";
+}
+
+function healthStepLabel(stepId: NonNullable<ModelConnectionTestResult["healthChecks"]>[number]["id"]) {
+  if (stepId === "auth") return "鉴权";
+  if (stepId === "models") return "模型发现";
+  if (stepId === "chat") return "最小 Chat";
+  if (stepId === "agent_capability") return "Agent 能力";
+  return "WSL 可达性";
 }

@@ -17,9 +17,10 @@ import {
 } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import type { EngineEvent, ModelProfile, RuntimeConfig, SessionAgentInsightUsage, TaskEventEnvelope, TaskRunProjection } from "../../../shared/types";
+import type { EngineEvent, ModelProfile, PermissionOverview, RuntimeConfig, SessionAgentInsightUsage, TaskEventEnvelope, TaskRunProjection } from "../../../shared/types";
 import { useAppStore } from "../../store";
 import { cn } from "../DashboardPrimitives";
+import { extractPermissionDiagnostics, enforcementMatrix } from "../permissionModel";
 
 type FixTarget = "model" | "hermes" | "health" | "diagnostics" | "workspace";
 type ProgressTone = "complete" | "waiting" | "failed";
@@ -46,6 +47,7 @@ export function AgentRunPanel(props: { open?: boolean; onClose?: () => void; onO
       ? modelProfile.temperature
       : 0.7;
   const activeEvents = useMemo(() => activeSessionEvents(store), [store.activeSessionId, store.events]);
+  const permissionDiagnostics = useMemo(() => extractPermissionDiagnostics(activeEvents), [activeEvents]);
   const usage = activeEvents.some((event) => event.event.type === "usage")
     ? summarizeUsage(activeEvents, contextWindow)
     : usageFromInsight(insight?.usage, contextWindow);
@@ -243,6 +245,10 @@ export function AgentRunPanel(props: { open?: boolean; onClose?: () => void; onO
           )}
         </PanelCard>
 
+        <PanelCard title="权限诊断">
+          <PermissionDiagnosticsView diagnostics={permissionDiagnostics} runtimeConfig={store.runtimeConfig} overview={store.permissionOverview} />
+        </PanelCard>
+
         <PanelCard title="快捷设置">
           <div className="space-y-3">
             <SettingToggle
@@ -343,6 +349,98 @@ function usageFromInsight(usage: SessionAgentInsightUsage | undefined, contextWi
     latestOutput: usage?.latestOutputTokens ?? 0,
     contextPercent: contextWindow ? Math.min(100, Math.round((((usage?.latestInputTokens ?? 0) + (usage?.latestOutputTokens ?? 0)) / contextWindow) * 100)) : 0,
   };
+}
+
+function PermissionDiagnosticsView(props: { diagnostics: ReturnType<typeof extractPermissionDiagnostics>; runtimeConfig?: RuntimeConfig; overview?: PermissionOverview }) {
+  if (props.overview) {
+    const hard = overviewRows(props.overview.enforcement.hardEnforceable);
+    const soft = overviewRows(props.overview.enforcement.softGuarded);
+    const missing = overviewRows(props.overview.enforcement.notEnforceableYet);
+    return (
+      <div className="space-y-3">
+        <div className="grid grid-cols-2 gap-2 text-[12px]">
+          <TokenMetric label="Policy" value={props.overview.permissionPolicy} />
+          <TokenMetric label="CLI mode" value={props.overview.cliPermissionMode} />
+          <TokenMetric label="Transport" value={props.overview.transport ?? props.diagnostics.transport ?? "none"} />
+          <TokenMetric label="Session" value={props.overview.sessionMode ?? props.diagnostics.sessionMode ?? "fresh/resume"} />
+        </div>
+        {props.overview.blockReason ? (
+          <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] text-rose-800">
+            <p className="font-semibold">{props.overview.blockReason.code}</p>
+            <p className="mt-1 leading-5">{props.overview.blockReason.detail}</p>
+          </div>
+        ) : null}
+        {props.overview.capabilityProbe ? (
+          <details className="rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
+            <summary className="cursor-pointer font-semibold">Capability probe summary</summary>
+            <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
+              {JSON.stringify(props.overview.capabilityProbe, null, 2)}
+            </pre>
+          </details>
+        ) : null}
+        <BoundaryGroup title="Hard-enforceable" rows={hard} tone="green" />
+        <BoundaryGroup title="Soft-guarded" rows={soft} tone="amber" />
+        <BoundaryGroup title="Not-enforceable-yet" rows={missing} tone="rose" />
+      </div>
+    );
+  }
+  const runtime = props.runtimeConfig?.hermesRuntime;
+  const fallbackRows = enforcementMatrix(runtime);
+  const hard = props.diagnostics.hardEnforceable ?? Object.fromEntries(fallbackRows.filter((row) => row.category === "hard-enforceable").map((row) => [row.label, row.detail]));
+  const soft = props.diagnostics.softGuarded ?? Object.fromEntries(fallbackRows.filter((row) => row.category === "soft-guarded").map((row) => [row.label, row.detail]));
+  const missing = props.diagnostics.notEnforceableYet ?? Object.fromEntries(fallbackRows.filter((row) => row.category === "not-enforceable-yet").map((row) => [row.label, row.detail]));
+  return (
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 gap-2 text-[12px]">
+        <TokenMetric label="Policy" value={props.diagnostics.permissionPolicy ?? runtime?.permissionPolicy ?? "bridge_guarded"} />
+        <TokenMetric label="CLI mode" value={props.diagnostics.cliPermissionMode ?? runtime?.cliPermissionMode ?? "guarded"} />
+        <TokenMetric label="Transport" value={props.diagnostics.transport ?? (runtime?.mode === "wsl" ? "native-arg-env" : "windows-headless")} />
+        <TokenMetric label="Session" value={props.diagnostics.sessionMode ?? "fresh/resume"} />
+      </div>
+      {props.diagnostics.policyBlock ? (
+        <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] text-rose-800">
+          <p className="font-semibold">{props.diagnostics.policyBlock.code}</p>
+          <p className="mt-1 leading-5">{props.diagnostics.policyBlock.detail}</p>
+        </div>
+      ) : null}
+      {props.diagnostics.capabilityProbe ? (
+        <details className="rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
+          <summary className="cursor-pointer font-semibold">Capability probe summary</summary>
+          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
+            {JSON.stringify(props.diagnostics.capabilityProbe, null, 2)}
+          </pre>
+        </details>
+      ) : null}
+      <BoundaryGroup title="Hard-enforceable" rows={hard} tone="green" />
+      <BoundaryGroup title="Soft-guarded" rows={soft} tone="amber" />
+      <BoundaryGroup title="Not-enforceable-yet" rows={missing} tone="rose" />
+    </div>
+  );
+}
+
+function overviewRows(items: string[]) {
+  return Object.fromEntries(items.map((item) => {
+    const [key, ...rest] = item.split(":");
+    return [key.trim() || item.slice(0, 24), rest.join(":").trim() || item];
+  }));
+}
+
+function BoundaryGroup(props: { title: string; rows: Record<string, string>; tone: "green" | "amber" | "rose" }) {
+  const tone = props.tone === "green" ? "text-emerald-600" : props.tone === "amber" ? "text-amber-600" : "text-rose-600";
+  const entries = Object.entries(props.rows);
+  return (
+    <div>
+      <p className={cn("mb-1 text-[12px] font-semibold", tone)}>{props.title}</p>
+      <div className="space-y-1">
+        {entries.map(([key, value]) => (
+          <div key={key} className="rounded-lg bg-slate-50 px-3 py-2">
+            <p className="text-[12px] font-semibold text-slate-700">{key}</p>
+            <p className="mt-0.5 text-[11px] leading-4 text-slate-500">{value}</p>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
 }
 
 function buildToolCapabilities(toolEvents: TaskRunProjection["toolEvents"], activeEvents: TaskEventEnvelope[], hasContext: boolean) {

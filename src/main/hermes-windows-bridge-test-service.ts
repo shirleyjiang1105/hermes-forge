@@ -10,6 +10,8 @@ import {
 } from "../shared/types";
 import type { WindowsControlBridge } from "./windows-control-bridge";
 import type { WindowsToolExecutor } from "./windows-tool-executor";
+import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
+import type { RuntimeIssue, RuntimeProbeResult } from "../runtime/runtime-types";
 
 const DEFAULT_RUNTIME: HermesRuntimeConfig = { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" };
 const WSL_TIMEOUT_MS = 8000;
@@ -25,6 +27,7 @@ export class HermesWindowsBridgeTestService {
     private readonly appFetch: Fetcher = fetch,
     private readonly run: CommandRunner = runCommand,
     private readonly windowsToolExecutor?: WindowsToolExecutor,
+    private readonly runtimeProbeService?: RuntimeProbeService,
   ) {}
 
   async test(): Promise<HermesWindowsBridgeTestResult> {
@@ -32,6 +35,7 @@ export class HermesWindowsBridgeTestService {
     const config = await this.readConfig();
     const runtime = config.hermesRuntime ?? DEFAULT_RUNTIME;
     const permissions = resolveEnginePermissions(config, "hermes");
+    const runtimeProbe = await this.runtimeProbeService?.probe({ runtime }).catch(() => undefined);
     const steps: BridgeTestStep[] = [];
 
     const localAccess = this.bridge.accessForHost("127.0.0.1");
@@ -85,16 +89,7 @@ export class HermesWindowsBridgeTestService {
     }
 
     const wslArgs = wslDistroArgs(runtime);
-    const available = await timedStep("wsl-available", "WSL 可用性", async () => {
-      const result = await this.run("wsl.exe", [...wslArgs, "sh", "-lc", "uname -a"], {
-        cwd: process.cwd(),
-        timeoutMs: WSL_TIMEOUT_MS,
-      });
-      if (result.exitCode !== 0) {
-        return failed("WSL 不可用或发行版名称不正确。请检查 WSL 是否启用，以及 distro 名称是否正确。", commandDetail(result));
-      }
-      return passed("WSL 命令可执行。", result.stdout.trim().slice(0, 300));
-    });
+    const available = runtimeProbe ? this.wslPreconditionStep(runtimeProbe) : await this.legacyWslAvailableStep(wslArgs);
     steps.push(available);
 
     if (available.status === "failed") {
@@ -121,7 +116,7 @@ export class HermesWindowsBridgeTestService {
       return buildBridgeTestResult(runtime.mode, localAccess.url, steps);
     }
 
-    const hostStepResult = await this.resolveWslHost(wslArgs);
+    const hostStepResult = runtimeProbe ? this.resolveWslHostFromProbe(runtimeProbe) : await this.resolveWslHost(wslArgs);
     steps.push(hostStepResult.step);
     const wslAccess = this.bridge.accessForHost(hostStepResult.host);
     if (!wslAccess) {
@@ -234,6 +229,57 @@ export class HermesWindowsBridgeTestService {
     });
   }
 
+  private wslPreconditionStep(probe: RuntimeProbeResult): BridgeTestStep {
+    const issue = this.wslPreconditionIssue(probe);
+    if (issue) {
+      return makeStep({
+        id: "wsl-available",
+        label: "WSL Runtime 前置条件",
+        status: "failed",
+        message: issue.summary,
+        detail: [issue.detail, issue.fixHint, issue.debugContext ? JSON.stringify(issue.debugContext) : ""].filter(Boolean).join("\n"),
+      });
+    }
+    return makeStep({
+      id: "wsl-available",
+      label: "WSL Runtime 前置条件",
+      status: "passed",
+      message: probe.commands.wsl.message,
+      detail: JSON.stringify({
+        code: "ok",
+        distroName: probe.distroName,
+        wslPythonAvailable: probe.wslPythonAvailable,
+        overallStatus: probe.overallStatus,
+      }),
+    });
+  }
+
+  private wslPreconditionIssue(probe: RuntimeProbeResult): RuntimeIssue | undefined {
+    return probe.issues.find((issue) =>
+      issue.severity === "error" && [
+        "wsl_missing",
+        "wsl_unreachable",
+        "wsl_distro_missing",
+        "wsl_distro_unreachable",
+        "wsl_python_missing",
+      ].includes(issue.code),
+    );
+  }
+
+  private async legacyWslAvailableStep(wslArgs: string[]) {
+    // Legacy fallback: retained only for tests/standalone construction paths without RuntimeProbeService.
+    return timedStep("wsl-available", "WSL 可用性", async () => {
+      const result = await this.run("wsl.exe", [...wslArgs, "sh", "-lc", "uname -a"], {
+        cwd: process.cwd(),
+        timeoutMs: WSL_TIMEOUT_MS,
+      });
+      if (result.exitCode !== 0) {
+        return failed("WSL 不可用或发行版名称不正确。请检查 WSL 是否启用，以及 distro 名称是否正确。", commandDetail(result));
+      }
+      return passed("WSL 命令可执行。", result.stdout.trim().slice(0, 300));
+    });
+  }
+
   private async resolveWslHost(wslArgs: string[]) {
     const step = await timedStep("wsl-host-resolved", "WSL 内 Windows Host 解析", async () => {
       const result = await this.run("wsl.exe", [...wslArgs, "ip", "route", "show", "default"], {
@@ -247,6 +293,23 @@ export class HermesWindowsBridgeTestService {
       return passed("未能从 WSL 默认路由解析 Windows host，已 fallback 到 127.0.0.1。", commandDetail(result));
     });
     const host = parseHostFromStep(step) ?? "127.0.0.1";
+    return { host, step };
+  }
+
+  private resolveWslHostFromProbe(probe: RuntimeProbeResult) {
+    const host = probe.commands.wsl.hostIp ?? probe.bridgeHost ?? "127.0.0.1";
+    const step = makeStep({
+      id: "wsl-host-resolved",
+      label: "WSL 内 Windows Host 解析",
+      status: host ? "passed" : "failed",
+      message: host ? `已解析 Windows host：${host}` : "RuntimeProbe 未能解析 Windows host。",
+      detail: JSON.stringify({
+        code: host ? "ok" : "bridge_unreachable",
+        bridgeHost: probe.bridgeHost,
+        wslHostIp: probe.commands.wsl.hostIp,
+        fixHint: host ? undefined : "请检查 WSL 默认路由和 Windows 防火墙。",
+      }),
+    });
     return { host, step };
   }
 

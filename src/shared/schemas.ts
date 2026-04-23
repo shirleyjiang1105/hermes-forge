@@ -59,7 +59,25 @@ export const secretSaveInputSchema = z.object({
   plainText: z.string().min(1).max(20000),
 });
 
-export const providerIdSchema = z.enum(["openai", "anthropic", "openrouter", "local", "custom"]);
+export const providerIdSchema = z.enum(["openai", "anthropic", "openrouter", "gemini", "deepseek", "huggingface", "copilot", "copilot_acp", "local", "custom"]);
+
+export const modelSourceTypeSchema = z.enum([
+  "openrouter_api_key",
+  "anthropic_api_key",
+  "gemini_api_key",
+  "deepseek_api_key",
+  "huggingface_api_key",
+  "gemini_oauth",
+  "anthropic_local_credentials",
+  "github_copilot",
+  "github_copilot_acp",
+  "ollama",
+  "vllm",
+  "sglang",
+  "lm_studio",
+  "openai_compatible",
+  "legacy",
+]);
 
 export const modelProfileSchema = z.object({
   id: z.string().trim().min(1).max(120),
@@ -70,6 +88,14 @@ export const modelProfileSchema = z.object({
   secretRef: z.string().trim().max(200).optional(),
   temperature: z.number().min(0).max(2).optional(),
   maxTokens: z.number().int().positive().max(1000000).optional(),
+  sourceType: modelSourceTypeSchema.optional(),
+  authMode: z.enum(["api_key", "oauth", "local_credentials", "external_process", "optional_api_key"]).optional(),
+  agentRole: z.enum(["provider_only", "auxiliary_model", "primary_agent"]).optional(),
+  supportsTools: z.boolean().optional(),
+  supportsVision: z.boolean().optional(),
+  lastHealthCheckAt: z.string().trim().max(80).optional(),
+  lastHealthStatus: z.enum(["ready", "warning", "failed"]).optional(),
+  lastHealthSummary: z.string().trim().max(1000).optional(),
 });
 
 export const modelOptionSchema = z.object({
@@ -107,7 +133,16 @@ export const hermesRuntimeSchema = z.object({
   mode: z.enum(["windows", "wsl"]).default("windows"),
   distro: z.string().trim().max(120).optional(),
   pythonCommand: z.string().trim().min(1).max(120).default("python3"),
+  managedRoot: z.string().trim().max(1000).optional(),
   windowsAgentMode: z.enum(["hermes_native", "host_tool_loop", "disabled"]).default("hermes_native"),
+  cliPermissionMode: z.enum(["yolo", "safe", "guarded"]).default("guarded"),
+  permissionPolicy: z.enum(["passthrough", "bridge_guarded", "restricted_workspace"]).default("bridge_guarded"),
+  installSource: z.object({
+    repoUrl: z.string().trim().url(),
+    branch: z.string().trim().max(200).optional(),
+    commit: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/).optional(),
+    sourceLabel: z.enum(["official", "fork", "pinned"]).default("official"),
+  }).optional(),
 });
 
 export const runtimeConfigSchema = z.object({
@@ -118,7 +153,7 @@ export const runtimeConfigSchema = z.object({
   enginePaths: z.record(z.string(), z.string().trim().min(1).max(1000)).optional(),
   startupWarmupMode: z.enum(["off", "cheap", "real_probe"]).default("cheap"),
   enginePermissions: z.record(z.string(), enginePermissionPolicySchema.partial()).optional(),
-  hermesRuntime: hermesRuntimeSchema.default({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" }),
+  hermesRuntime: hermesRuntimeSchema.default({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" }),
 }).transform((config) => ({
   ...config,
   updateSources: pickHermesRecord(config.updateSources),

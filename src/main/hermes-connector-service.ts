@@ -3,6 +3,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppPaths } from "./app-paths";
 import { runCommand } from "../process/command-runner";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
+import { summarizePreflightFailure } from "../runtime/runtime-preflight";
 import type { SecretVault } from "../auth/secret-vault";
 import type {
   HermesConnectorConfig,
@@ -17,6 +20,7 @@ import type {
   WeixinDependencyInstallResult,
   WeixinQrLoginResult,
   WeixinQrLoginStatus,
+  RuntimeConfig,
 } from "../shared/types";
 
 type StoredPlatformConfig = {
@@ -49,6 +53,20 @@ type GatewayStateSnapshot = {
   updatedAt?: string;
   message?: string;
 };
+
+type ConnectorRuntimeContext =
+  | {
+      ok: true;
+      root: string;
+      runtime: NonNullable<RuntimeConfig["hermesRuntime"]>;
+      adapter: ReturnType<RuntimeAdapterFactory>;
+      label: string;
+    }
+  | {
+      ok: false;
+      message: string;
+      debugContext?: Record<string, unknown>;
+    };
 
 const MANAGED_START = "# >>> Hermes Desktop Connectors >>>";
 const MANAGED_END = "# <<< Hermes Desktop Connectors <<<";
@@ -190,6 +208,9 @@ export class HermesConnectorService {
     private readonly secretVault: SecretVault,
     private readonly resolveHermesRoot: () => Promise<string>,
     private readonly resolveConfiguredPythonCommand?: () => Promise<string | undefined>,
+    private readonly runtimeProbeService?: RuntimeProbeService,
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
+    private readonly readRuntimeConfig?: () => Promise<RuntimeConfig>,
   ) {}
 
   async list(): Promise<HermesConnectorListResult> {
@@ -353,14 +374,17 @@ export class HermesConnectorService {
       };
     }
     const root = await this.resolveHermesRoot();
-    const python = await this.resolvePythonCommand(root);
+    const runtime = await this.runtimeContext(root);
     this.gatewayAutoStartState = "starting";
     this.gatewayAutoStartMessage = "正在启动 Gateway...";
     await this.clearGatewayRuntimeMarkers();
     const hermesEnv = await this.readEnvValues();
-    const child = spawn(python.command, [...python.args, path.join(root, "hermes"), "gateway", "run", "--replace"], {
-      cwd: root,
-      env: buildGatewayEnv(process.env, hermesEnv),
+    const launch = runtime.ok
+      ? await this.gatewayLaunchFromRuntime(runtime, hermesEnv)
+      : await this.legacyGatewayLaunch(root, hermesEnv, runtime.message);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       windowsHide: true,
       shell: false,
     });
@@ -370,7 +394,7 @@ export class HermesConnectorService {
     this.gatewayError = "";
     this.gatewayExitMessage = "";
     this.gatewayBackoffUntil = undefined;
-    this.gatewayOutput = `Using Python: ${python.label}`;
+    this.gatewayOutput = `Using runtime: ${launch.label}`;
     child.stdout.on("data", (chunk: Buffer) => {
       this.gatewayOutput = trimLog(`${this.gatewayOutput}${chunk.toString("utf8")}`);
     });
@@ -473,8 +497,10 @@ export class HermesConnectorService {
       return { ok: true, status: this.getWeixinQrStatus(), message: "微信扫码登录已在进行中。" };
     }
     const root = await this.resolveHermesRoot();
-    const python = await this.resolvePythonCommand(root);
-    const dependencyStatus = await this.preflightWeixinDependencies(root, python);
+    const runtime = await this.runtimeContext(root);
+    const dependencyStatus = runtime.ok
+      ? await this.preflightWeixinDependenciesWithRuntime(runtime)
+      : await this.preflightWeixinDependencies(root, await this.resolvePythonCommand(root));
     if (dependencyStatus) {
       this.weixinQrStatus = dependencyStatus;
       return { ok: false, status: this.getWeixinQrStatus(), message: dependencyStatus.message };
@@ -584,15 +610,24 @@ export class HermesConnectorService {
       attempt: (this.weixinQrStatus.attempt ?? 0) + 1,
       recoveryAction: undefined,
       recoveryCommand: undefined,
-      runtimePythonLabel: python.label,
+      runtimePythonLabel: runtime.ok ? runtime.label : undefined,
       failureKind: undefined,
       recommendedFix: undefined,
     };
     const runId = ++this.weixinQrRunCounter;
     this.activeWeixinQrRunId = runId;
-    const child = spawn(python.command, [...python.args, "-c", script], {
-      cwd: root,
-      env: { ...process.env, ...PYTHON_ENV, PYTHONPATH: root },
+    const launch = runtime.ok
+      ? await runtime.adapter.buildPythonLaunch({
+        runtime: runtime.runtime,
+        rootPath: runtime.adapter.toRuntimePath(root),
+        pythonArgs: ["-c", script],
+        cwd: root,
+        env: { ...process.env, ...PYTHON_ENV, PYTHONPATH: runtime.adapter.toRuntimePath(root) },
+      })
+      : await this.legacyPythonLaunch(root, ["-c", script]);
+    const child = spawn(launch.command, launch.args, {
+      cwd: launch.cwd,
+      env: launch.env,
       windowsHide: true,
       shell: false,
     });
@@ -630,9 +665,12 @@ export class HermesConnectorService {
 
   async installWeixinDependency(): Promise<WeixinDependencyInstallResult> {
     const root = await this.resolveHermesRoot();
-    const python = await this.resolvePythonCommand(root);
-    const dependencyStatus = await this.preflightWeixinDependencies(root, python);
-    const command = `${python.label} -m pip install aiohttp`;
+    const runtime = await this.runtimeContext(root);
+    const python = runtime.ok ? undefined : await this.resolvePythonCommand(root);
+    const dependencyStatus = runtime.ok
+      ? await this.preflightWeixinDependenciesWithRuntime(runtime)
+      : await this.preflightWeixinDependencies(root, python!);
+    const command = runtime.ok ? `${runtime.label} -m pip install aiohttp` : `${python!.label} -m pip install aiohttp`;
     if (!dependencyStatus) {
       const status = this.getWeixinQrStatus();
       return {
@@ -645,10 +683,21 @@ export class HermesConnectorService {
       };
     }
 
-    const result = await runCommand(python.command, [...python.args, "-m", "pip", "install", "aiohttp"], {
-      cwd: root,
+    const launch = runtime.ok
+      ? await runtime.adapter.buildPythonLaunch({
+        runtime: runtime.runtime,
+        rootPath: runtime.adapter.toRuntimePath(root),
+        pythonArgs: ["-m", "pip", "install", "aiohttp"],
+        cwd: root,
+        env: { ...PYTHON_ENV, PYTHONPATH: runtime.adapter.toRuntimePath(root) },
+      })
+      : await this.legacyPythonLaunch(root, ["-m", "pip", "install", "aiohttp"], python!.command, python!.args);
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
       timeoutMs: 120000,
-      env: { ...PYTHON_ENV, PYTHONPATH: root },
+      env: launch.env,
+      commandId: "connector.weixin.install-aiohttp",
+      runtimeKind: runtime.ok ? runtime.runtime.mode : "windows",
     });
     const stdout = trimLog(result.stdout || "");
     const stderr = trimLog(result.stderr || "");
@@ -677,7 +726,9 @@ export class HermesConnectorService {
       };
     }
 
-    const afterInstallStatus = await this.preflightWeixinDependencies(root, python);
+    const afterInstallStatus = runtime.ok
+      ? await this.preflightWeixinDependenciesWithRuntime(runtime)
+      : await this.preflightWeixinDependencies(root, python!);
     if (afterInstallStatus) {
       this.weixinQrStatus = afterInstallStatus;
       return {
@@ -815,6 +866,7 @@ export class HermesConnectorService {
   }
 
   private async preflightWeixinDependencies(root: string, python: PythonCommand): Promise<WeixinQrLoginStatus | undefined> {
+    // Legacy fallback: dependency probing uses the same result parser as runtime-backed probing.
     const result = await runCommand(
       python.command,
       [...python.args, "-c", "import importlib.util, json; print(json.dumps({'aiohttp': bool(importlib.util.find_spec('aiohttp')), 'cryptography': bool(importlib.util.find_spec('cryptography'))}))"],
@@ -822,8 +874,17 @@ export class HermesConnectorService {
         cwd: root,
         timeoutMs: 10000,
         env: { ...PYTHON_ENV, PYTHONPATH: root },
+        commandId: "connector.weixin.preflight-dependencies.legacy",
+        runtimeKind: "windows",
       },
     );
+    return this.weixinDependencyStatusFromResult(result, python.label);
+  }
+
+  private weixinDependencyStatusFromResult(
+    result: Awaited<ReturnType<typeof runCommand>>,
+    runtimePythonLabel?: string,
+  ): WeixinQrLoginStatus | undefined {
     if (result.exitCode !== 0) {
       return {
         running: false,
@@ -832,17 +893,17 @@ export class HermesConnectorService {
         success: false,
         message: "无法检查微信扫码运行环境，请确认 Hermes Python 可正常执行。",
         failureCode: "python_preflight_failed",
-        runtimePythonLabel: python.label,
+        runtimePythonLabel,
         failureKind: "manual_fix",
         recommendedFix: "请先在设置里确认 Hermes Python 命令可执行，再重新尝试扫码。",
       };
     }
     const payload = JSON.parse(result.stdout.trim() || "{}") as { aiohttp?: boolean; cryptography?: boolean };
     if (!payload.aiohttp) {
-      return decorateWeixinFailure("missing_aiohttp", "缺少 aiohttp，微信扫码运行环境不完整。", python.label);
+      return decorateWeixinFailure("missing_aiohttp", "缺少 aiohttp，微信扫码运行环境不完整。", runtimePythonLabel);
     }
     if (!payload.cryptography) {
-      return decorateWeixinFailure("missing_crypto", "缺少 cryptography，微信扫码环境还不完整。", python.label);
+      return decorateWeixinFailure("missing_crypto", "缺少 cryptography，微信扫码环境还不完整。", runtimePythonLabel);
     }
     return undefined;
   }
@@ -1056,6 +1117,118 @@ export class HermesConnectorService {
     return [...new Set(missing)];
   }
 
+  private async runtimeContext(root: string): Promise<ConnectorRuntimeContext> {
+    if (!this.runtimeAdapterFactory || !this.readRuntimeConfig) {
+      // Legacy fallback: older tests and standalone construction paths still rely on resolvePythonCommand().
+      return {
+        ok: false,
+        message: "RuntimeAdapter 未注入，连接器将回退 legacy Python 解析。",
+      };
+    }
+    const config = await this.readRuntimeConfig();
+    const runtime = {
+      mode: config.hermesRuntime?.mode ?? "windows",
+      distro: config.hermesRuntime?.distro?.trim() || undefined,
+      pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
+      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+    } satisfies NonNullable<RuntimeConfig["hermesRuntime"]>;
+    const adapter = this.runtimeAdapterFactory(runtime);
+    const preflight = await adapter.preflight();
+    if (!preflight.ok) {
+      const failure = summarizePreflightFailure(preflight);
+      return {
+        ok: false,
+        message: failure.message,
+        debugContext: { preflight },
+      };
+    }
+    const probe = await this.runtimeProbeService?.probe({ runtime }).catch(() => undefined);
+    return {
+      ok: true,
+      root,
+      runtime,
+      adapter,
+      label: probe?.runtimeMode === "wsl"
+        ? `WSL ${probe.distroName ?? "default"} ${probe.commands.wsl.pythonCommand ?? runtime.pythonCommand ?? "python3"}`
+        : probe?.commands.python.label ?? runtime.pythonCommand ?? "python",
+    };
+  }
+
+  private async gatewayLaunchFromRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>, hermesEnv: Record<string, string>) {
+    const runtimeRoot = runtime.adapter.toRuntimePath(runtime.root);
+    const cliPath = runtime.runtime.mode === "wsl" ? `${runtimeRoot.replace(/\/+$/, "")}/hermes` : path.join(runtime.root, "hermes");
+    const launch = await runtime.adapter.buildHermesLaunch({
+      runtime: runtime.runtime,
+      rootPath: runtimeRoot,
+      pythonArgs: [cliPath, "gateway", "run", "--replace"],
+      cwd: runtime.root,
+      env: buildGatewayEnv(process.env, hermesEnv, runtimeRoot),
+    });
+    return {
+      command: launch.command,
+      args: launch.args,
+      cwd: launch.cwd,
+      env: launch.env,
+      label: launch.diagnostics.label,
+    };
+  }
+
+  private async legacyGatewayLaunch(root: string, hermesEnv: Record<string, string>, reason: string) {
+    // Legacy fallback: retained until all tests/standalone construction paths inject RuntimeAdapterFactory.
+    const python = await this.resolvePythonCommand(root);
+    return {
+      command: python.command,
+      args: [...python.args, path.join(root, "hermes"), "gateway", "run", "--replace"],
+      cwd: root,
+      env: buildGatewayEnv(process.env, hermesEnv, root),
+      label: `${python.label} (legacy fallback: ${reason})`,
+    };
+  }
+
+  private async legacyPythonLaunch(root: string, pythonArgs: string[], command?: string, argsPrefix: string[] = []) {
+    // Legacy fallback: retained until all connector callers are constructed with RuntimeAdapterFactory.
+    const python = command ? { command, args: argsPrefix, label: [command, ...argsPrefix].join(" ") } : await this.resolvePythonCommand(root);
+    return {
+      command: python.command,
+      args: [...python.args, ...pythonArgs],
+      cwd: root,
+      env: { ...process.env, ...PYTHON_ENV, PYTHONPATH: root },
+      label: `${python.label} legacy`,
+    };
+  }
+
+  private async legacyGatewayStatusLaunch(root: string) {
+    // Legacy fallback: retained for construction paths without RuntimeAdapterFactory.
+    const python = await this.resolvePythonCommand(root);
+    return {
+      command: python.command,
+      args: [...python.args, path.join(root, "hermes"), "gateway", "status"],
+      cwd: root,
+      env: PYTHON_ENV,
+    };
+  }
+
+  private async preflightWeixinDependenciesWithRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>): Promise<WeixinQrLoginStatus | undefined> {
+    const script = "import importlib.util, json; print(json.dumps({'aiohttp': bool(importlib.util.find_spec('aiohttp')), 'cryptography': bool(importlib.util.find_spec('cryptography'))}))";
+    const root = runtime.root;
+    const runtimeRoot = runtime.adapter.toRuntimePath(root);
+    const launch = await runtime.adapter.buildPythonLaunch({
+      runtime: runtime.runtime,
+      rootPath: runtimeRoot,
+      pythonArgs: ["-c", script],
+      cwd: root,
+      env: { ...PYTHON_ENV, PYTHONPATH: runtimeRoot },
+    });
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
+      timeoutMs: 10000,
+      env: launch.env,
+      commandId: "connector.weixin.preflight-dependencies",
+      runtimeKind: runtime.runtime.mode,
+    });
+    return this.weixinDependencyStatusFromResult(result, runtime.label);
+  }
+
   private async envLinesFor(platform: HermesConnectorPlatform, config: StoredPlatformConfig) {
     const lines: string[] = [];
     for (const field of platform.fields) {
@@ -1131,11 +1304,22 @@ export class HermesConnectorService {
 
   private async gatewayCliStatus() {
     const root = await this.resolveHermesRoot();
-    const python = await this.resolvePythonCommand(root);
-    const result = await runCommand(python.command, [...python.args, path.join(root, "hermes"), "gateway", "status"], {
-      cwd: root,
+    const runtime = await this.runtimeContext(root);
+    const launch = runtime.ok
+      ? await runtime.adapter.buildHermesLaunch({
+        runtime: runtime.runtime,
+        rootPath: runtime.adapter.toRuntimePath(root),
+        pythonArgs: [runtime.runtime.mode === "wsl" ? `${runtime.adapter.toRuntimePath(root).replace(/\/+$/, "")}/hermes` : path.join(root, "hermes"), "gateway", "status"],
+        cwd: root,
+        env: { ...PYTHON_ENV, PYTHONPATH: runtime.adapter.toRuntimePath(root) },
+      })
+      : await this.legacyGatewayStatusLaunch(root);
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
       timeoutMs: 10000,
-      env: PYTHON_ENV,
+      env: launch.env,
+      commandId: "connector.gateway.status",
+      runtimeKind: runtime.ok ? runtime.runtime.mode : "windows",
     });
     return {
       stdout: result.stdout,
@@ -1289,11 +1473,12 @@ function unquoteEnv(value: string) {
   return value;
 }
 
-function buildGatewayEnv(baseEnv: NodeJS.ProcessEnv, hermesEnv: Record<string, string>): NodeJS.ProcessEnv {
+function buildGatewayEnv(baseEnv: NodeJS.ProcessEnv, hermesEnv: Record<string, string>, runtimeRoot?: string): NodeJS.ProcessEnv {
   return {
     ...baseEnv,
     ...hermesEnv,
     ...PYTHON_ENV,
+    ...(runtimeRoot ? { PYTHONPATH: runtimeRoot } : {}),
   };
 }
 

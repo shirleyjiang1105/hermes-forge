@@ -73,6 +73,32 @@ export class RuntimeEnvResolver {
       env.AI_API_KEY = secret;
       env.AI_BASE_URL = env.OPENAI_BASE_URL;
       env.AI_PROVIDER = "openrouter";
+    } else if (profile.provider === "gemini") {
+      env.GOOGLE_API_KEY = secret;
+      env.GEMINI_API_KEY = secret;
+      env.AI_API_KEY = secret;
+      env.AI_PROVIDER = "gemini";
+    } else if (profile.provider === "deepseek") {
+      env.DEEPSEEK_API_KEY = secret;
+      env.OPENAI_API_KEY = secret;
+      env.AI_API_KEY = secret;
+      env.AI_PROVIDER = "deepseek";
+      env.OPENAI_BASE_URL = profile.baseUrl ?? "https://api.deepseek.com/v1";
+      env.AI_BASE_URL = env.OPENAI_BASE_URL;
+    } else if (profile.provider === "huggingface") {
+      env.HF_TOKEN = secret;
+      env.AI_API_KEY = secret;
+      env.AI_PROVIDER = "huggingface";
+      env.OPENAI_API_KEY = secret;
+      env.OPENAI_BASE_URL = profile.baseUrl ?? "https://router.huggingface.co/v1";
+      env.AI_BASE_URL = env.OPENAI_BASE_URL;
+    } else if (profile.provider === "copilot") {
+      env.COPILOT_GITHUB_TOKEN = secret;
+      env.AI_API_KEY = secret;
+      env.AI_PROVIDER = "copilot";
+    } else if (profile.provider === "copilot_acp") {
+      env.AI_API_KEY = secret;
+      env.AI_PROVIDER = "copilot-acp";
     } else if (profile.provider === "openai") {
       env.OPENAI_API_KEY = secret;
     } else if (profile.provider === "anthropic") {

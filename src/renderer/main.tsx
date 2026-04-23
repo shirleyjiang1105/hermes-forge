@@ -23,6 +23,7 @@ import { WelcomePage } from "./dashboard/WelcomePage";
 import { ToastContainer } from "./dashboard/ToastNotification";
 import { PageLoader } from "./dashboard/LoadingIndicator";
 import { ModelConfigWizard } from "./dashboard/components/panels/ModelConfigWizard";
+import { ManagedWslInstallerPanel } from "./dashboard/components/panels/ManagedWslInstallerPanel";
 import { ConfigCenterLayout, type ConfigSectionId } from "./dashboard/components/settings/ConfigCenterLayout";
 import { ToggleSwitch } from "./dashboard/components/settings/ToggleSwitch";
 import { useAppStore, type RecentWorkspace } from "./store";
@@ -434,6 +435,15 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
             </div>
           </SettingsPanelCard>
 
+          {(overview?.runtimeConfig as RuntimeConfig | undefined)?.hermesRuntime?.mode === "wsl" ? (
+            <ManagedWslInstallerPanel
+              title="Managed WSL 安装器"
+              onAfterAction={props.onRefresh}
+              onExportDiagnostics={props.onExportDiagnostics}
+              onNotice={(message, detail) => showSaveNotice(detail ? `${message}：${detail}` : message)}
+            />
+          ) : null}
+
           <SettingsPanelCard title="详细检查">
             <div className="space-y-3">
               {(overview?.health?.checks ?? []).map((check, index) => (
@@ -605,6 +615,7 @@ function App() {
     if (overview?.runtimeConfig) {
       store.setRuntimeConfig(overview.runtimeConfig);
     }
+    void window.workbenchClient.getPermissionOverview?.().then((permissionOverview) => store.setPermissionOverview(permissionOverview)).catch(() => undefined);
     return overview;
   }
 
@@ -825,11 +836,18 @@ function App() {
           workbenchClient.getRuntimeConfig(),
           { defaultModelProfileId: undefined, modelProfiles: [], updateSources: {}, enginePermissions: {} } satisfies RuntimeConfig,
           { errorMessage: "获取运行时配置失败" }
-        ).then((config) => {
-          store.setRuntimeConfig(config);
-        }),
-        
-        // Hermes状态和设置摘要
+          ).then((config) => {
+            store.setRuntimeConfig(config);
+          }),
+          safePromiseWithFallback(
+            workbenchClient.getPermissionOverview(),
+            undefined,
+            { errorMessage: "获取权限概览失败" }
+          ).then((overview) => {
+            store.setPermissionOverview(overview);
+          }),
+          
+          // Hermes状态和设置摘要
         refreshHermesStatus(),
         refreshSetupSummary(),
       ]).then(() => {

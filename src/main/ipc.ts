@@ -29,7 +29,16 @@ import type { EngineProbeService } from "../probes/engine-probe-service";
 import type { SetupService } from "../setup/setup-service";
 import type { ClientAutoUpdateService } from "../updater/client-auto-update-service";
 import type { UpdateService } from "../updater/update-service";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import type { ManagedWslInstallerService } from "../install/managed-wsl-installer-service";
 import { importExistingHermesConfig } from "./hermes-existing-config-import";
+import { buildPermissionOverview } from "./permission-overview-service";
+import {
+  discoverCustomEndpointSources,
+  draftToModelProfile as draftToModelProfileFromConnection,
+  inferSourceType as inferConnectionSourceType,
+  testModelConnection,
+} from "./model-connection-service";
 import { IpcChannels } from "../shared/ipc";
 import {
   runtimeConfigSchema,
@@ -45,6 +54,10 @@ import type {
   HermesStatusSummary,
   LocalModelDiscoveryResult,
   ModelConnectionTestResult,
+  ManagedWslInstallerIpcResult,
+  ManagedWslInstallerPhase,
+  ManagedWslInstallerReport,
+  ManagedWslInstallerStatus,
   ModelProfile,
   RuntimeConfig,
   SessionAttachment,
@@ -97,12 +110,29 @@ const connectorSaveInputSchema = z.object({
 });
 
 const modelConnectionDraftSchema = z.object({
-  sourceType: z.enum(["local_openai", "openrouter", "openai", "custom_gateway", "legacy"]),
+  sourceType: z.enum([
+    "openrouter_api_key",
+    "anthropic_api_key",
+    "gemini_api_key",
+    "deepseek_api_key",
+    "huggingface_api_key",
+    "gemini_oauth",
+    "anthropic_local_credentials",
+    "github_copilot",
+    "github_copilot_acp",
+    "ollama",
+    "vllm",
+    "sglang",
+    "lm_studio",
+    "openai_compatible",
+    "legacy",
+  ]),
   profileId: z.string().max(120).optional(),
-  provider: z.enum(["openai", "anthropic", "openrouter", "local", "custom"]).optional(),
+  provider: z.enum(["openai", "anthropic", "openrouter", "gemini", "deepseek", "huggingface", "copilot", "copilot_acp", "local", "custom"]).optional(),
   baseUrl: z.string().trim().max(2000).optional(),
   model: z.string().trim().max(200).optional(),
   secretRef: z.string().trim().max(200).optional(),
+  maxTokens: z.number().int().positive().max(1000000).optional(),
 });
 
 export type IpcServices = {
@@ -130,10 +160,64 @@ export type IpcServices = {
   hermesWindowsBridgeTestService: HermesWindowsBridgeTestService;
   hermesSystemAuditService: HermesSystemAuditService;
   approvalService: ApprovalService;
+  runtimeAdapterFactory: RuntimeAdapterFactory;
+  managedWslInstallerService: ManagedWslInstallerService;
   clientInfo: () => ClientInfo;
 };
 
 export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcServices) {
+  function installerResult(action: ManagedWslInstallerIpcResult["action"], report?: ManagedWslInstallerReport): ManagedWslInstallerIpcResult {
+    if (report) {
+      return {
+        ok: report.status !== "failed" && report.status !== "blocked",
+        action,
+        phase: report.phase,
+        step: report.step,
+        status: report.status,
+        code: report.code,
+        summary: report.summary,
+        detail: report.detail,
+        fixHint: report.fixHint,
+        debugContext: report.debugContext,
+        report,
+      };
+    }
+    return {
+      ok: false,
+      action,
+      phase: "doctor",
+      step: "report-unavailable",
+      status: "failed",
+      code: "manual_action_required",
+      summary: "当前没有可用的 Managed WSL 安装报告。",
+      fixHint: "请先执行计划或安装动作，再查看最后报告。",
+    };
+  }
+
+  function installerError(
+    action: ManagedWslInstallerIpcResult["action"],
+    error: unknown,
+    report?: ManagedWslInstallerReport,
+  ): ManagedWslInstallerIpcResult {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      action,
+      phase: report?.phase ?? "doctor",
+      step: report?.step ?? "ipc-error",
+      status: "failed",
+      code: report?.code ?? "manual_action_required",
+      summary: report?.summary ?? "Managed WSL 安装器调用失败。",
+      detail: report?.detail ?? message,
+      fixHint: report?.fixHint ?? "请查看 installer report 或导出 diagnostics 继续排查。",
+      debugContext: {
+        ...(report?.debugContext ?? {}),
+        errorMessage: message,
+      },
+      report,
+    };
+  }
+
   async function writeRuntimeConfigWithModelSync(nextConfig: RuntimeConfig, forceModelSync = false) {
     const previous = await services.configStore.read();
     const saved = await services.configStore.write(nextConfig);
@@ -161,7 +245,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     if (shouldEnable) {
       await services.windowsControlBridge.start();
     }
-    const host = runtime.mode === "wsl" ? "127.0.0.1" : "127.0.0.1";
+    const host = await services.runtimeAdapterFactory(runtime).getBridgeAccessHost();
     return syncHermesWindowsMcpConfig({
       runtime,
       hermesHome: services.appPaths.hermesDir(),
@@ -453,7 +537,59 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.repairSetupDependency, (_event, id: unknown) =>
     services.setupService.repairDependency(setupDependencyRepairIdSchema.parse(id)),
   );
+  ipcMain.handle(IpcChannels.installerPlan, async (): Promise<ManagedWslInstallerIpcResult> => {
+    try {
+      return installerResult("plan", await services.managedWslInstallerService.planInstall());
+    } catch (error) {
+      return installerError("plan", error, services.managedWslInstallerService.getLastInstallReport());
+    }
+  });
+  ipcMain.handle(IpcChannels.installerDryRunRepair, async (): Promise<ManagedWslInstallerIpcResult> => {
+    try {
+      return installerResult("dry_run_repair", await services.managedWslInstallerService.dryRunRepair());
+    } catch (error) {
+      return installerError("dry_run_repair", error, services.managedWslInstallerService.getLastInstallReport());
+    }
+  });
+  ipcMain.handle(IpcChannels.installerExecuteRepair, async (): Promise<ManagedWslInstallerIpcResult> => {
+    try {
+      return installerResult("execute_repair", await services.managedWslInstallerService.executeRepair());
+    } catch (error) {
+      return installerError("execute_repair", error, services.managedWslInstallerService.getLastInstallReport());
+    }
+  });
+  ipcMain.handle(IpcChannels.installerInstall, async (): Promise<ManagedWslInstallerIpcResult> => {
+    try {
+      return installerResult("install", await services.managedWslInstallerService.install());
+    } catch (error) {
+      return installerError("install", error, services.managedWslInstallerService.getLastInstallReport());
+    }
+  });
+  ipcMain.handle(IpcChannels.installerGetLastReport, async (): Promise<ManagedWslInstallerIpcResult> => {
+    try {
+      return installerResult("get_last_report", services.managedWslInstallerService.getLastInstallReport());
+    } catch (error) {
+      return installerError("get_last_report", error, services.managedWslInstallerService.getLastInstallReport());
+    }
+  });
   ipcMain.handle(IpcChannels.getRuntimeConfig, () => services.configStore.read());
+  ipcMain.handle(IpcChannels.getPermissionOverview, async () => {
+    const config = await services.configStore.read();
+    await syncCurrentWindowsBridgeConfig(config).catch((error) => {
+      console.warn("[Hermes Forge] Failed to refresh Windows bridge config for permission overview:", error);
+    });
+    return buildPermissionOverview({
+      config,
+      bridge: services.windowsControlBridge.status(),
+      appPaths: services.appPaths,
+      resolveHermesRoot: async () => {
+        return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
+          ? config.hermesRuntime.managedRoot.trim()
+          : services.configStore.getEnginePath("hermes");
+      },
+      runtimeAdapterFactory: services.runtimeAdapterFactory,
+    });
+  });
   ipcMain.handle(IpcChannels.importExistingHermesConfig, () =>
     importExistingHermesConfig({
       configStore: services.configStore,
@@ -526,6 +662,14 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         distro: z.string().trim().max(120).optional(),
         pythonCommand: z.string().trim().min(1).max(120).optional(),
         windowsAgentMode: z.enum(["hermes_native", "host_tool_loop", "disabled"]).optional(),
+        cliPermissionMode: z.enum(["yolo", "safe", "guarded"]).optional(),
+        permissionPolicy: z.enum(["passthrough", "bridge_guarded", "restricted_workspace"]).optional(),
+        installSource: z.object({
+          repoUrl: z.string().trim().url(),
+          branch: z.string().trim().max(200).optional(),
+          commit: z.string().trim().regex(/^[0-9a-fA-F]{7,40}$/).optional(),
+          sourceLabel: z.enum(["official", "fork", "pinned"]).default("official"),
+        }).optional(),
       }).optional(),
     }).parse(input);
     const config = await services.configStore.read();
@@ -549,6 +693,17 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         pythonCommand: parsed.runtime?.pythonCommand?.trim() || config.hermesRuntime?.pythonCommand || "python3",
         distro: parsed.runtime?.distro?.trim() || undefined,
         windowsAgentMode: parsed.runtime?.windowsAgentMode ?? config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+        cliPermissionMode: parsed.runtime?.cliPermissionMode ?? config.hermesRuntime?.cliPermissionMode ?? "guarded",
+        permissionPolicy: parsed.runtime?.permissionPolicy ?? config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
+        installSource: parsed.runtime?.installSource
+          ? {
+            ...(config.hermesRuntime?.installSource ?? {}),
+            ...parsed.runtime.installSource,
+            sourceLabel: parsed.runtime.installSource.sourceLabel
+              ?? config.hermesRuntime?.installSource?.sourceLabel
+              ?? "official",
+          }
+          : config.hermesRuntime?.installSource,
       },
     });
   });
@@ -570,30 +725,38 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     writeRuntimeConfigWithModelSync(runtimeConfigSchema.parse(config)),
   );
   ipcMain.handle(IpcChannels.discoverLocalModelSources, async (): Promise<LocalModelDiscoveryResult> => {
-    return discoverLocalModelSources();
+    return discoverCustomEndpointSources();
   });
 
   ipcMain.handle(IpcChannels.testModelConnection, async (_event, input?: string | Record<string, unknown>): Promise<ModelConnectionTestResult> => {
     const config = await services.configStore.read();
     const draft = typeof input === "string" || typeof input === "undefined" ? undefined : modelConnectionDraftSchema.parse(input);
-    const profile = draft
-      ? draftToModelProfile(draft)
-      : config.modelProfiles.find((item) => item.id === input) ??
-        config.modelProfiles.find((item) => item.id === config.defaultModelProfileId) ??
-        config.modelProfiles[0];
+    const selectedProfile = draft
+      ? draftToModelProfileFromConnection(draft)
+      : config.modelProfiles.find((item) => item.id === input)
+        ?? config.modelProfiles.find((item) => item.id === config.defaultModelProfileId)
+        ?? config.modelProfiles[0];
 
-    if (!profile) return { ok: false, message: "尚未配置模型。请先选择来源并完成测试。" };
-    if (!profile.model.trim()) {
-      return {
-        ok: false,
-        profileId: profile.id,
-        sourceType: sourceTypeFromProfile(profile),
-        message: "模型名还没填，请先选择或输入模型。",
-        failureCategory: "model_not_found",
-        recommendedFix: "先完成模型名填写，再点击测试连接。",
-      };
-    }
-    return validateModelProfile(profile, services.secretVault);
+    if (!selectedProfile) return { ok: false, message: "尚未配置模型。请先选择 provider family 并完成测试。" };
+    return testModelConnection({
+      draft: draft ?? {
+        sourceType: selectedProfile.sourceType ?? inferConnectionSourceType(selectedProfile.provider, selectedProfile.baseUrl),
+        profileId: selectedProfile.id,
+        provider: selectedProfile.provider,
+        baseUrl: selectedProfile.baseUrl,
+        model: selectedProfile.model,
+        secretRef: selectedProfile.secretRef,
+        maxTokens: selectedProfile.maxTokens,
+      },
+      config,
+      secretVault: services.secretVault,
+      runtimeAdapterFactory: services.runtimeAdapterFactory,
+      resolveHermesRoot: async () => {
+        return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
+          ? config.hermesRuntime.managedRoot.trim()
+          : services.configStore.getEnginePath("hermes");
+      },
+    });
   });
 
   ipcMain.handle(IpcChannels.getSetupSummary, (_event, workspacePath?: string) => services.setupService.getSummary(workspacePath));
@@ -918,28 +1081,54 @@ function normalizeProviderBaseUrl(provider: ModelProfile["provider"], baseUrl?: 
 function sourceTypeFromProfile(profile: Pick<ModelProfile, "provider" | "baseUrl">): ModelConnectionTestResult["sourceType"] {
   if (profile.provider === "custom") {
     const baseUrl = profile.baseUrl?.toLowerCase() ?? "";
-    return baseUrl.includes("127.0.0.1") || baseUrl.includes("localhost") ? "local_openai" : "custom_gateway";
+    return baseUrl.includes(":11434")
+      ? "ollama"
+      : baseUrl.includes(":1234")
+        ? "lm_studio"
+        : baseUrl.includes(":8000")
+          ? "vllm"
+          : baseUrl.includes(":30000")
+            ? "sglang"
+            : "openai_compatible";
   }
-  if (profile.provider === "openrouter") return "openrouter";
-  if (profile.provider === "openai") return "openai";
+  if (profile.provider === "openrouter") return "openrouter_api_key";
+  if (profile.provider === "openai") return "openai_compatible";
+  if (profile.provider === "anthropic") return "anthropic_api_key";
+  if (profile.provider === "gemini") return "gemini_api_key";
+  if (profile.provider === "deepseek") return "deepseek_api_key";
+  if (profile.provider === "huggingface") return "huggingface_api_key";
+  if (profile.provider === "copilot") return "github_copilot";
+  if (profile.provider === "copilot_acp") return "github_copilot_acp";
   return "legacy";
 }
 
 function draftToModelProfile(draft: z.infer<typeof modelConnectionDraftSchema>): ModelProfile {
   const provider =
-    draft.sourceType === "local_openai" || draft.sourceType === "custom_gateway"
+    ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible", "legacy"].includes(draft.sourceType)
       ? "custom"
-      : draft.sourceType === "openrouter"
+      : draft.sourceType === "openrouter_api_key"
         ? "openrouter"
-        : draft.sourceType === "openai"
-          ? "openai"
+        : draft.sourceType === "anthropic_api_key" || draft.sourceType === "anthropic_local_credentials"
+          ? "anthropic"
+          : draft.sourceType === "gemini_api_key" || draft.sourceType === "gemini_oauth"
+            ? "gemini"
+            : draft.sourceType === "deepseek_api_key"
+              ? "deepseek"
+              : draft.sourceType === "huggingface_api_key"
+                ? "huggingface"
+                : draft.sourceType === "github_copilot"
+                  ? "copilot"
+                  : draft.sourceType === "github_copilot_acp"
+                    ? "copilot_acp"
           : draft.provider ?? "custom";
   return {
     id: draft.profileId ?? `draft-${draft.sourceType}`,
     provider,
+    sourceType: draft.sourceType,
     model: draft.model?.trim() ?? "",
     baseUrl: draft.baseUrl?.trim(),
     secretRef: draft.secretRef?.trim(),
+    maxTokens: draft.maxTokens,
   };
 }
 
@@ -947,7 +1136,7 @@ async function discoverLocalModelSources(): Promise<LocalModelDiscoveryResult> {
   const candidates = ["http://127.0.0.1:1234/v1", "http://127.0.0.1:8080/v1", "http://127.0.0.1:8081/v1"];
   const results = await Promise.all(
     candidates.map(async (baseUrl) => {
-      const test = await testOpenAiCompatibleModel("discovery", baseUrl, "__discovery__", undefined, "local_openai");
+      const test = await testOpenAiCompatibleModel("discovery", baseUrl, "__discovery__", undefined, "openai_compatible");
       return {
         baseUrl,
         ok: test.ok || test.failureCategory === "model_not_found",

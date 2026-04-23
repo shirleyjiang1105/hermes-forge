@@ -36,6 +36,17 @@ describe("DiagnosticsService", () => {
           providerProfiles: [{ id: "remote-provider", provider: "openrouter", label: "Remote", apiKeySecretRef: "provider.remote.apiKey" }],
           updateSources: {},
           enginePaths: {},
+          hermesRuntime: {
+            mode: "wsl",
+            cliPermissionMode: "guarded",
+            permissionPolicy: "bridge_guarded",
+            installSource: {
+              repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
+              branch: "codex/launch-metadata-capabilities",
+              commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+              sourceLabel: "pinned",
+            },
+          },
         })),
       } as unknown as RuntimeConfigStore,
       { readRecent: vi.fn(async () => []) } as unknown as SessionLog,
@@ -59,17 +70,60 @@ describe("DiagnosticsService", () => {
       } as unknown as SnapshotManager,
       { listActive: vi.fn(() => []) } as unknown as WorkspaceLock,
       () => ({ appVersion: "test", userDataPath: baseDir, portable: false, rendererMode: "built" }),
+      undefined,
+      undefined,
+      async () => ({
+        runtime: "wsl",
+        permissionPolicy: "bridge_guarded",
+        cliPermissionMode: "guarded",
+        transport: "native-arg-env",
+        sessionMode: "fresh",
+        bridge: { enabled: true, running: false, capabilities: [], capabilityCount: 0, reportedByBackend: false },
+        enforcement: { hardEnforceable: ["session: ok"], softGuarded: ["bridge: ok"], notEnforceableYet: ["shell: no"] },
+        blocked: false,
+        blockReason: null,
+        capabilityProbe: { minimumSatisfied: true, cliVersion: "0.10.0", missing: [], allowedTransports: ["native-arg-env"] },
+        runtimeReady: true,
+        notes: [],
+      }),
+      async () => ({
+        status: "ready",
+        summary: "ok",
+        hermesSource: {
+          repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
+          branch: "codex/launch-metadata-capabilities",
+          commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+          sourceLabel: "pinned",
+        },
+        hermesCommit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+        hermesVersion: "0.10.0",
+      } as never),
     );
 
     const result = await service.export(baseDir);
     expect(result.ok).toBe(true);
     const report = JSON.parse(await fs.readFile(path.join(result.path, "diagnostics.json"), "utf8")) as {
       runtimeConfig: { modelProfiles: Array<{ secretRef?: string }>; providerProfiles: Array<{ apiKeySecretRef?: string }> };
+      permissionOverview?: { permissionPolicy?: string; transport?: string };
+      runtimeConfigSummary?: { permissionPolicy?: string; cliPermissionMode?: string; hermesInstallSource?: { sourceLabel?: string; commit?: string } };
+      lastInstallReport?: { summary?: string; hermesCommit?: string; hermesVersion?: string; hermesSource?: { sourceLabel?: string } };
       diagnosticErrors: Array<{ section: string; message: string }>;
     };
 
     expect(report.runtimeConfig.modelProfiles[0].secretRef).toBe("[CONFIGURED]");
     expect(report.runtimeConfig.providerProfiles[0].apiKeySecretRef).toBe("[CONFIGURED]");
+    expect(report.permissionOverview).toMatchObject({ permissionPolicy: "bridge_guarded", transport: "native-arg-env" });
+    expect(report.runtimeConfigSummary).toMatchObject({
+      permissionPolicy: "bridge_guarded",
+      cliPermissionMode: "guarded",
+      hermesInstallSource: { sourceLabel: "pinned", commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37" },
+    });
+    expect(report.lastInstallReport).toMatchObject({
+      summary: "ok",
+      hermesCommit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+      hermesVersion: "0.10.0",
+      hermesSource: { sourceLabel: "pinned" },
+    });
     expect(report.diagnosticErrors).toEqual(expect.arrayContaining([
       expect.objectContaining({ section: "engine", message: "Hermes crashed" }),
       expect.objectContaining({ section: "probes", message: "probe failed" }),

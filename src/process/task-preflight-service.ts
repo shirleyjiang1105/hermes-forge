@@ -8,6 +8,8 @@ import type { WorkspaceLock } from "./workspace-lock";
 import { resolveEnginePermissions } from "../shared/types";
 import type { AppError, StartTaskInput } from "../shared/types";
 import { missingSecretMessage, normalizeOpenAiCompatibleBaseUrl, requiresStoredSecret } from "../shared/model-config";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import { summarizePreflightFailure } from "../runtime/runtime-preflight";
 
 export class TaskPreflightService {
   private healthCache?: { checkedAt: number; health: Awaited<ReturnType<EngineAdapter["healthCheck"]>> };
@@ -18,6 +20,7 @@ export class TaskPreflightService {
     private readonly hermes: EngineAdapter,
     private readonly configStore: RuntimeConfigStore,
     private readonly secretVault: SecretVault,
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
   ) {}
 
   async assertCanStart(input: StartTaskInput, _routeEngine: "hermes", workspaceId: string) {
@@ -29,11 +32,36 @@ export class TaskPreflightService {
 
     await this.assertModel(input.modelProfileId);
     await this.assertHermesPermissions(input);
+    await this.assertRuntimePreflight(input);
     const health = await this.getCachedHealth();
     if (!health.available) {
       throw this.appError("ENGINE_NOT_READY", "Hermes 不可用", health.message, "configure_hermes");
     }
     await fs.mkdir(this.appPaths.workspaceSnapshotDir(workspaceId), { recursive: true });
+  }
+
+  private async assertRuntimePreflight(input: StartTaskInput) {
+    if (!this.runtimeAdapterFactory) return;
+    const config = await this.configStore.read();
+    const runtime = {
+      mode: config.hermesRuntime?.mode ?? "windows" as const,
+      distro: config.hermesRuntime?.distro?.trim() || undefined,
+      pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
+      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native" as const,
+    };
+    const result = await this.runtimeAdapterFactory(runtime).preflight({
+      workspacePath: input.workspacePath?.trim() || input.sessionFilesPath,
+      requireBridge: true,
+    });
+    if (!result.ok) {
+      const failure = summarizePreflightFailure(result);
+      throw this.appError(
+        failure.code === "hermes_root_missing" || failure.code === "hermes_cli_missing" ? "INSTALL_REQUIRED" : "ENGINE_NOT_READY",
+        failure.title,
+        failure.message,
+        failure.code === "hermes_root_missing" || failure.code === "hermes_cli_missing" ? "install_hermes" : "open_settings",
+      );
+    }
   }
 
   private async assertHermesPermissions(input: StartTaskInput) {

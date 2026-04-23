@@ -1,7 +1,10 @@
 import { useEffect, useState } from "react";
-import { CheckCircle2, Folder, MinusCircle, Network, RefreshCw, RotateCcw, Settings, FileCode, Save, Server, Sparkles, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Folder, MinusCircle, Network, RefreshCw, RotateCcw, Settings, FileCode, Save, Server, ShieldCheck, Sparkles, XCircle } from "lucide-react";
 import { useAppStore } from "../../../store";
-import type { BridgeTestStep, HermesInstallEvent, HermesRuntimeConfig, HermesSystemAuditResult, HermesWindowsBridgeTestResult, WindowsAgentMode, WindowsBridgeStatus } from "../../../../shared/types";
+import type { BridgeTestStep, HermesInstallEvent, HermesPermissionPolicyMode, HermesRuntimeConfig, HermesSystemAuditResult, HermesWindowsBridgeTestResult, PermissionOverview, PermissionOverviewBlockReason, WindowsAgentMode, WindowsBridgeStatus } from "../../../../shared/types";
+import { ManagedWslInstallerPanel } from "./ManagedWslInstallerPanel";
+import { POLICY_OPTIONS, bridgeCapabilityRows, enforcementMatrix, policyBlockReason } from "../../permissionModel";
+import { usePermissionOverview } from "../../../hooks/usePermissionOverview";
 
 export function SettingsPanel(props: {
   onRefresh: () => Promise<unknown>;
@@ -13,7 +16,7 @@ export function SettingsPanel(props: {
   const store = useAppStore();
   const [restarting, setRestarting] = useState(false);
   const [savingRuntime, setSavingRuntime] = useState(false);
-  const [runtime, setRuntime] = useState<HermesRuntimeConfig>({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" });
+  const [runtime, setRuntime] = useState<HermesRuntimeConfig>({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
   const [rootPath, setRootPath] = useState("");
   const [bridge, setBridge] = useState<WindowsBridgeStatus | undefined>();
   const [testingBridge, setTestingBridge] = useState(false);
@@ -24,12 +27,14 @@ export function SettingsPanel(props: {
   const [importingHermesConfig, setImportingHermesConfig] = useState(false);
   const [installEvent, setInstallEvent] = useState<HermesInstallEvent | undefined>();
   const clientInfo = store.clientInfo;
+  const managedReport = store.managedWslInstaller?.report;
+  const permissionOverview = usePermissionOverview();
 
   useEffect(() => {
     let alive = true;
     void window.workbenchClient.getConfigOverview().then((overview) => {
       if (!alive) return;
-      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" });
+      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? "");
       setBridge(overview?.hermes?.bridge);
     }).catch(() => undefined);
@@ -64,9 +69,10 @@ export function SettingsPanel(props: {
       });
       store.setRuntimeConfig(next);
       const overview = await window.workbenchClient.getConfigOverview();
-      setRuntime(overview?.hermes?.runtime ?? next.hermesRuntime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" });
+      setRuntime(overview?.hermes?.runtime ?? next.hermesRuntime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? rootPath);
       setBridge(overview?.hermes?.bridge);
+      void permissionOverview.refresh();
       await props.onRefresh();
     } finally {
       setSavingRuntime(false);
@@ -136,10 +142,11 @@ export function SettingsPanel(props: {
     try {
       const result = await window.workbenchClient.importExistingHermesConfig();
       const overview = await window.workbenchClient.getConfigOverview();
-      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" });
+      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? rootPath);
       setBridge(overview?.hermes?.bridge);
       store.setRuntimeConfig(overview?.runtimeConfig);
+      void permissionOverview.refresh();
       await props.onRefresh();
       if (result.ok) {
         const detail = result.warnings.length ? `${result.message}；${result.warnings.join("；")}` : result.message;
@@ -153,6 +160,11 @@ export function SettingsPanel(props: {
       setImportingHermesConfig(false);
     }
   }
+
+  const matrix = permissionOverview.data ? overviewMatrix(permissionOverview.data) : enforcementMatrix(runtime, bridge);
+  const policyBlock = permissionOverview.data?.blockReason ?? policyBlockReason(runtime);
+  const bridgeCapabilities = permissionOverview.data ? overviewBridgeCapabilities(permissionOverview.data) : bridgeCapabilityRows(bridge, runtime);
+  const overviewIsFallback = !permissionOverview.data;
 
   return (
     <div className="space-y-6">
@@ -198,6 +210,54 @@ export function SettingsPanel(props: {
             </select>
           </label>
           <label className="grid gap-1 text-sm">
+            <span className="text-slate-500">权限策略</span>
+            <select
+              className="rounded-lg border border-slate-200 px-3 py-2 text-slate-800"
+              value={runtime.permissionPolicy ?? "bridge_guarded"}
+              onChange={(event) => setRuntime({ ...runtime, permissionPolicy: event.target.value as HermesPermissionPolicyMode })}
+            >
+              {POLICY_OPTIONS.map((option) => (
+                <option key={option.id} value={option.id}>{option.label}</option>
+              ))}
+            </select>
+            <p className="text-xs leading-5 text-slate-500">
+              {POLICY_OPTIONS.find((option) => option.id === (runtime.permissionPolicy ?? "bridge_guarded"))?.description}
+            </p>
+            {POLICY_OPTIONS.find((option) => option.id === (runtime.permissionPolicy ?? "bridge_guarded"))?.warning ? (
+              <p className="text-xs font-medium leading-5 text-amber-700">
+                {POLICY_OPTIONS.find((option) => option.id === (runtime.permissionPolicy ?? "bridge_guarded"))?.warning}
+              </p>
+            ) : null}
+          </label>
+          <label className="grid gap-1 text-sm">
+            <span className="text-slate-500">CLI 权限模式</span>
+            <select
+              className="rounded-lg border border-slate-200 px-3 py-2 text-slate-800"
+              value={runtime.cliPermissionMode ?? "guarded"}
+              onChange={(event) => setRuntime({ ...runtime, cliPermissionMode: event.target.value as HermesRuntimeConfig["cliPermissionMode"] })}
+            >
+              <option value="guarded">guarded：使用 CLI 默认审批</option>
+              <option value="safe">safe：映射为不传 --yolo</option>
+              <option value="yolo">yolo：显式传 --yolo</option>
+            </select>
+          </label>
+          {policyBlock ? <PolicyBlockedBanner block={policyBlock} /> : null}
+          <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-slate-800">Permission Overview</span>
+              <span>policy={permissionOverview.data?.permissionPolicy ?? runtime.permissionPolicy ?? "bridge_guarded"}</span>
+              <span>cli={permissionOverview.data?.cliPermissionMode ?? runtime.cliPermissionMode ?? "guarded"}</span>
+              <span>transport={permissionOverview.data?.transport ?? (runtime.mode === "wsl" ? "native-arg-env" : "windows-headless")}</span>
+              <span>blocked={String(Boolean(policyBlock))}</span>
+              {overviewIsFallback ? <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">fallback preview</span> : null}
+              {permissionOverview.loading ? <span>refreshing...</span> : null}
+              <button className="ml-auto rounded-full bg-white px-2 py-1 font-semibold text-slate-600 ring-1 ring-slate-200" onClick={() => void permissionOverview.refresh()} type="button">
+                刷新
+              </button>
+            </div>
+            {permissionOverview.error ? <p className="mt-1 text-rose-600">{permissionOverview.error}</p> : null}
+          </div>
+          <label className="grid gap-1 text-sm">
             <span className="text-slate-500">Hermes 根路径</span>
             <input
               className="rounded-lg border border-slate-200 px-3 py-2 font-mono text-slate-800"
@@ -213,6 +273,18 @@ export function SettingsPanel(props: {
           </div>
           <ActionButton icon={RotateCcw} label="导入现有 Hermes 配置" onClick={importHermesConfig} loading={importingHermesConfig} />
           {installEvent ? <InstallProgressView event={installEvent} /> : null}
+          {runtime.mode === "wsl" ? (
+            <ManagedWslInstallerPanel
+              title="Managed WSL 安装链路"
+              onAfterAction={props.onRefresh}
+              onExportDiagnostics={props.onExportDiagnostics}
+              onNotice={(message, detail, tone) => {
+                if (tone === "error") store.error(message, detail);
+                else if (tone === "warning") store.warning(message, detail);
+                else store.success(message, detail);
+              }}
+            />
+          ) : null}
           {runtime.mode === "wsl" ? (
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="grid gap-1 text-sm">
@@ -237,7 +309,15 @@ export function SettingsPanel(props: {
           <div className="grid gap-3 sm:grid-cols-2">
             <InfoCard label="Bridge 状态" value={bridge?.running ? "已启动" : "未启动"} />
             <InfoCard label="Bridge 端口" value={bridge?.port ? String(bridge.port) : "unknown"} />
+            <InfoCard label="Hermes Source" value={runtime.installSource ? `${runtime.installSource.sourceLabel} · ${runtime.installSource.repoUrl}` : "未配置"} monospace />
+            <InfoCard label="Pinned Commit" value={runtime.installSource?.commit ?? "未固定"} monospace />
+            <InfoCard label="Managed Hermes" value={managedReport?.hermesSource?.sourceLabel === "pinned" ? "pinned managed Hermes" : managedReport?.hermesSource?.sourceLabel ?? "unknown"} />
+            <InfoCard label="Installed Version" value={managedReport?.hermesVersion ?? managedReport?.hermesCapabilityProbe?.cliVersion ?? "unknown"} monospace />
+            <InfoCard label="Installed Commit" value={managedReport?.hermesCommit ?? "unknown"} monospace />
+            <InfoCard label="Capability Gate" value={managedReport?.hermesCapabilityProbe ? (managedReport.hermesCapabilityProbe.minimumSatisfied ? "passed" : `failed · ${(managedReport.hermesCapabilityProbe.missing ?? []).join(", ") || "unknown"}`) : "unknown"} />
           </div>
+          <BridgeCapabilityPanel bridge={bridge} capabilityRows={bridgeCapabilities} />
+          <EnforcementMatrixView rows={matrix} />
           <div className="grid gap-2 sm:grid-cols-2">
             <ActionButton icon={Save} label="保存 Hermes 运行环境" onClick={saveRuntime} loading={savingRuntime} />
             <ActionButton icon={Network} label="测试 Windows Agent 能力" onClick={testBridge} loading={testingBridge} />
@@ -311,6 +391,130 @@ function InfoCard(props: { label: string; value: string; monospace?: boolean }) 
       <code className={cn("text-sm", props.monospace && "font-mono")}>{props.value}</code>
     </div>
   );
+}
+
+function PolicyBlockedBanner(props: { block: PermissionOverviewBlockReason }) {
+  return (
+    <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
+      <div className="flex items-start gap-2">
+        <AlertTriangle size={17} className="mt-0.5 shrink-0 text-rose-600" />
+        <div className="min-w-0">
+          <p className="text-sm font-semibold text-rose-800">{props.block.summary}</p>
+          <p className="mt-1 text-xs leading-5 text-rose-700">{props.block.detail}</p>
+          <p className="mt-2 text-xs font-medium leading-5 text-rose-800">修复：{props.block.fixHint}</p>
+          <details className="mt-2">
+            <summary className="cursor-pointer text-xs font-semibold text-rose-700">debugContext</summary>
+            <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-rose-950/90 p-2 text-[11px] leading-4 text-rose-50">
+              {JSON.stringify(props.block.debugContext, null, 2)}
+            </pre>
+          </details>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EnforcementMatrixView(props: { rows: ReturnType<typeof enforcementMatrix> }) {
+  const groups = [
+    { id: "hard-enforceable", label: "Hard-enforceable", tone: "emerald" },
+    { id: "soft-guarded", label: "Soft-guarded", tone: "amber" },
+    { id: "not-enforceable-yet", label: "Not-enforceable-yet", tone: "rose" },
+  ] as const;
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
+      <div className="mb-3 flex items-center gap-2">
+        <ShieldCheck size={16} className="text-slate-500" />
+        <h4 className="text-sm font-semibold text-slate-900">权限边界矩阵</h4>
+      </div>
+      <div className="grid gap-3">
+        {groups.map((group) => (
+          <div key={group.id}>
+            <p className={cn("mb-2 text-xs font-semibold", matrixTone(group.tone))}>{group.label}</p>
+            <div className="grid gap-2">
+              {props.rows.filter((row) => row.category === group.id).map((row) => (
+                <div key={row.id} className="rounded-lg bg-white px-3 py-2">
+                  <p className="text-xs font-semibold text-slate-800">{row.label}</p>
+                  <p className="mt-1 text-xs leading-5 text-slate-500">{row.detail}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BridgeCapabilityPanel(props: { bridge?: WindowsBridgeStatus; capabilityRows: ReturnType<typeof bridgeCapabilityRows> }) {
+  return (
+    <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
+      <div className="mb-3 flex items-center gap-2">
+        <Network size={16} className="text-slate-500" />
+        <h4 className="text-sm font-semibold text-slate-900">Bridge Capability</h4>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-2">
+        <InfoCard label="Bridge" value={props.capabilityRows.enabled ? (props.capabilityRows.running ? "enabled / running" : "enabled / stopped") : "disabled"} />
+        <InfoCard label="Capabilities" value={String(props.capabilityRows.capabilities.length)} />
+      </div>
+      <CapabilityList title="当前 capabilities" items={props.capabilityRows.capabilities} empty="后端未报告 capability" />
+      <CapabilityList title="受审批/Bridge 控制" items={props.capabilityRows.approvalControlled} empty="暂无可识别的审批型 capability" />
+      <CapabilityList title="已禁用" items={props.capabilityRows.disabledCapabilities} empty="未显式禁用" />
+    </div>
+  );
+}
+
+function CapabilityList(props: { title: string; items: string[]; empty: string }) {
+  return (
+    <div className="mt-3">
+      <p className="mb-2 text-xs font-semibold text-slate-600">{props.title}</p>
+      {props.items.length ? (
+        <div className="flex flex-wrap gap-1.5">
+          {props.items.map((item) => (
+            <span key={item} className="rounded-full bg-white px-2 py-1 font-mono text-[11px] text-slate-600 ring-1 ring-slate-200">{item}</span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-slate-400">{props.empty}</p>
+      )}
+    </div>
+  );
+}
+
+function overviewMatrix(overview: PermissionOverview): ReturnType<typeof enforcementMatrix> {
+  return [
+    ...overview.enforcement.hardEnforceable.map((detail, index) => ({
+      id: `overview-hard-${index}`,
+      label: boundaryLabel(detail),
+      category: "hard-enforceable" as const,
+      detail,
+    })),
+    ...overview.enforcement.softGuarded.map((detail, index) => ({
+      id: `overview-soft-${index}`,
+      label: boundaryLabel(detail),
+      category: "soft-guarded" as const,
+      detail,
+    })),
+    ...overview.enforcement.notEnforceableYet.map((detail, index) => ({
+      id: `overview-missing-${index}`,
+      label: boundaryLabel(detail),
+      category: "not-enforceable-yet" as const,
+      detail,
+    })),
+  ];
+}
+
+function overviewBridgeCapabilities(overview: PermissionOverview): ReturnType<typeof bridgeCapabilityRows> {
+  return {
+    enabled: overview.bridge.enabled,
+    running: overview.bridge.running,
+    capabilities: overview.bridge.capabilities,
+    approvalControlled: overview.bridge.capabilities.filter((capability) => /powershell|keyboard|mouse|ahk|window|screenshot|clipboard|files/i.test(capability)),
+    disabledCapabilities: overview.bridge.enabled ? (overview.bridge.reportedByBackend ? [] : ["后端未报告 capability"]) : ["all bridge capabilities"],
+  };
+}
+
+function boundaryLabel(detail: string) {
+  return detail.split(":")[0]?.trim() || detail.slice(0, 32);
 }
 
 function InstallProgressView(props: { event: HermesInstallEvent }) {
@@ -483,6 +687,12 @@ function stepBadge(status: BridgeTestStep["status"]) {
   if (status === "passed") return "bg-emerald-100 text-emerald-700";
   if (status === "failed") return "bg-rose-100 text-rose-700";
   return "bg-slate-100 text-slate-500";
+}
+
+function matrixTone(tone: "emerald" | "amber" | "rose") {
+  if (tone === "emerald") return "text-emerald-700";
+  if (tone === "amber") return "text-amber-700";
+  return "text-rose-700";
 }
 
 function cn(...classNames: Array<string | false | undefined>): string {

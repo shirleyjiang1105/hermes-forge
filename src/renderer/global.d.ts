@@ -29,9 +29,11 @@ import type {
   HermesWebUiOverview,
   HermesWebUiSettings,
   ModelConnectionTestResult,
+  ManagedWslInstallerIpcResult,
   LocalModelDiscoveryResult,
   QuickTextFileInput,
   QuickTextFileResult,
+  PermissionOverview,
   RuntimeConfig,
   SessionAgentInsight,
   SecretRefStatus,
@@ -186,8 +188,14 @@ declare global {
       updateHermes(): Promise<EngineMaintenanceResult>;
       installHermes(options?: { rootPath?: string }): Promise<HermesInstallResult>;
       repairSetupDependency(id: SetupDependencyRepairId): Promise<SetupDependencyRepairResult>;
+      installerPlan(): Promise<ManagedWslInstallerIpcResult>;
+      installerDryRunRepair(): Promise<ManagedWslInstallerIpcResult>;
+      installerExecuteRepair(): Promise<ManagedWslInstallerIpcResult>;
+      installerInstall(): Promise<ManagedWslInstallerIpcResult>;
+      installerGetLastReport(): Promise<ManagedWslInstallerIpcResult>;
       onInstallHermesEvent(callback: (event: HermesInstallEvent) => void): () => void;
       getRuntimeConfig(): Promise<RuntimeConfig>;
+      getPermissionOverview(): Promise<PermissionOverview>;
       getConfigOverview(workspacePath?: string): Promise<any>;
       importExistingHermesConfig(): Promise<HermesExistingConfigImportResult>;
       testHermesWindowsBridge(): Promise<HermesWindowsBridgeTestResult>;

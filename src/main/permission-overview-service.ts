@@ -1,0 +1,219 @@
+import path from "node:path";
+import { runCommand } from "../process/command-runner";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import type { AppPaths } from "./app-paths";
+import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason } from "../shared/permission-audit";
+import { resolveEnginePermissions } from "../shared/types";
+import type {
+  HermesCliPermissionMode,
+  HermesPermissionPolicyMode,
+  HermesRuntimeConfig,
+  PermissionOverview,
+  PermissionOverviewBlockReason,
+  RuntimeConfig,
+  WindowsBridgeStatus,
+} from "../shared/types";
+
+type CapabilityProbe = NonNullable<PermissionOverview["capabilityProbe"]> & {
+  support?: "native" | "legacy_compatible" | "degraded" | "unsupported";
+  reason?: string;
+};
+
+export async function buildPermissionOverview(input: {
+  config: RuntimeConfig;
+  bridge: WindowsBridgeStatus;
+  appPaths: AppPaths;
+  resolveHermesRoot: () => Promise<string>;
+  runtimeAdapterFactory: RuntimeAdapterFactory;
+}): Promise<PermissionOverview> {
+  const runtime = runtimeWithDefaults(input.config.hermesRuntime);
+  const permissions = resolveEnginePermissions(input.config, "hermes");
+  const bridgeEnabled = permissions.enabled && permissions.contextBridge && runtime.windowsAgentMode !== "disabled";
+  const bridgeCapabilities = input.bridge.capabilities ?? [];
+  const audit = createPermissionBoundaryAudit({ runtime, permissions, bridgeRunning: input.bridge.running });
+  const policyBlock = createPermissionPolicyBlockReason({ runtime, audit });
+  const capabilityProbe = runtime.mode === "wsl"
+    ? await probeCapabilities({
+      runtime,
+      resolveHermesRoot: input.resolveHermesRoot,
+      runtimeAdapterFactory: input.runtimeAdapterFactory,
+      appPaths: input.appPaths,
+    })
+    : null;
+  const capabilityBlock = capabilityProbe && !capabilityProbe.minimumSatisfied
+    ? capabilityBlockReason(capabilityProbe)
+    : undefined;
+  const blockReason = policyBlock ?? capabilityBlock ?? null;
+  const notes = [
+    runtime.mode !== "wsl" ? "Native Windows mode does not use WSL launch metadata transport." : undefined,
+    runtime.mode === "wsl" && !capabilityProbe ? "Capability probe unavailable." : undefined,
+    runtime.mode === "wsl" && capabilityProbe?.minimumSatisfied ? "WSL transport is native-arg-env." : undefined,
+    runtime.mode === "wsl" && capabilityProbe && !capabilityProbe.minimumSatisfied ? "WSL main path is blocked until CLI meets minimum capability gate." : undefined,
+    bridgeCapabilities.length ? undefined : "Backend did not report bridge capabilities.",
+  ].filter((item): item is string => Boolean(item));
+  return {
+    runtime: runtime.mode === "wsl" ? "wsl" : "native",
+    permissionPolicy: runtime.permissionPolicy,
+    cliPermissionMode: runtime.cliPermissionMode,
+    transport: runtime.mode === "wsl" && capabilityProbe?.minimumSatisfied ? "native-arg-env" : null,
+    sessionMode: null,
+    bridge: {
+      enabled: bridgeEnabled,
+      running: input.bridge.running,
+      capabilities: bridgeCapabilities,
+      capabilityCount: bridgeCapabilities.length,
+      reportedByBackend: bridgeCapabilities.length > 0,
+    },
+    enforcement: {
+      hardEnforceable: Object.entries(audit.hardEnforceable).map(formatBoundary),
+      softGuarded: Object.entries(audit.softGuarded).map(formatBoundary),
+      notEnforceableYet: Object.entries(audit.notEnforceableYet).map(formatBoundary),
+    },
+    blocked: Boolean(blockReason),
+    blockReason,
+    capabilityProbe: capabilityProbe ? {
+      minimumSatisfied: capabilityProbe.minimumSatisfied,
+      cliVersion: capabilityProbe.cliVersion,
+      missing: capabilityProbe.missing,
+      allowedTransports: capabilityProbe.minimumSatisfied ? ["native-arg-env"] : [],
+      support: capabilityProbe.support,
+      reason: capabilityProbe.reason,
+    } : null,
+    runtimeReady: !blockReason,
+    notes,
+  };
+}
+
+function runtimeWithDefaults(runtime: RuntimeConfig["hermesRuntime"]): HermesRuntimeConfig & {
+  mode: "windows" | "wsl";
+  pythonCommand: string;
+  windowsAgentMode: NonNullable<HermesRuntimeConfig["windowsAgentMode"]>;
+  cliPermissionMode: HermesCliPermissionMode;
+  permissionPolicy: HermesPermissionPolicyMode;
+} {
+  return {
+    mode: runtime?.mode ?? "windows",
+    distro: runtime?.distro,
+    managedRoot: runtime?.managedRoot,
+    pythonCommand: runtime?.pythonCommand ?? "python3",
+    windowsAgentMode: runtime?.windowsAgentMode ?? "hermes_native",
+    cliPermissionMode: runtime?.cliPermissionMode ?? "guarded",
+    permissionPolicy: runtime?.permissionPolicy ?? "bridge_guarded",
+  };
+}
+
+async function probeCapabilities(input: {
+  runtime: HermesRuntimeConfig;
+  resolveHermesRoot: () => Promise<string>;
+  runtimeAdapterFactory: RuntimeAdapterFactory;
+  appPaths: AppPaths;
+}): Promise<CapabilityProbe> {
+  const adapter = input.runtimeAdapterFactory(input.runtime);
+  const rootPath = adapter.toRuntimePath(await input.resolveHermesRoot());
+  const cliPath = input.runtime.mode === "wsl"
+    ? `${rootPath.replace(/\/+$/, "")}/hermes`
+    : path.join(rootPath, "hermes");
+  const env: NodeJS.ProcessEnv = {
+    PYTHONUTF8: "1",
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUNBUFFERED: "1",
+    PYTHONPATH: rootPath,
+    HERMES_HOME: adapter.toRuntimePath(input.appPaths.hermesDir()),
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+  };
+  const launch = await adapter.buildHermesLaunch({
+    runtime: input.runtime,
+    rootPath,
+    pythonArgs: [cliPath, "capabilities", "--json"],
+    cwd: rootPath,
+    env,
+  });
+  const result = await runCommand(launch.command, launch.args, {
+    cwd: launch.cwd,
+    timeoutMs: 20_000,
+    env: launch.env,
+    detached: launch.detached,
+  });
+  if (result.exitCode !== 0) {
+    return classifyCapabilities({
+      cliVersion: undefined,
+      supportsLaunchMetadataArg: false,
+      supportsLaunchMetadataEnv: false,
+      supportsResume: false,
+      reason: `capabilities --json failed with exit ${result.exitCode ?? "unknown"}: ${(result.stderr || result.stdout || "").trim() || "no output"}`,
+    });
+  }
+  try {
+    const parsed = JSON.parse(result.stdout) as {
+      cliVersion?: unknown;
+      capabilities?: {
+        supportsLaunchMetadataArg?: unknown;
+        supportsLaunchMetadataEnv?: unknown;
+        supportsResume?: unknown;
+      };
+    };
+    return classifyCapabilities({
+      cliVersion: typeof parsed.cliVersion === "string" ? parsed.cliVersion : undefined,
+      supportsLaunchMetadataArg: parsed.capabilities?.supportsLaunchMetadataArg === true,
+      supportsLaunchMetadataEnv: parsed.capabilities?.supportsLaunchMetadataEnv === true,
+      supportsResume: parsed.capabilities?.supportsResume === true,
+    });
+  } catch (error) {
+    return classifyCapabilities({
+      cliVersion: undefined,
+      supportsLaunchMetadataArg: false,
+      supportsLaunchMetadataEnv: false,
+      supportsResume: false,
+      reason: `capabilities --json parse failed: ${error instanceof Error ? error.message : String(error)}`,
+    });
+  }
+}
+
+function classifyCapabilities(input: {
+  cliVersion?: string;
+  supportsLaunchMetadataArg: boolean;
+  supportsLaunchMetadataEnv: boolean;
+  supportsResume: boolean;
+  reason?: string;
+}): CapabilityProbe {
+  const missing = [
+    input.cliVersion ? undefined : "cliVersion",
+    input.supportsLaunchMetadataArg ? undefined : "supportsLaunchMetadataArg",
+    input.supportsLaunchMetadataEnv ? undefined : "supportsLaunchMetadataEnv",
+    input.supportsResume ? undefined : "supportsResume",
+  ].filter((item): item is string => Boolean(item));
+  const minimumSatisfied = missing.length === 0;
+  return {
+    minimumSatisfied,
+    cliVersion: input.cliVersion,
+    missing,
+    allowedTransports: minimumSatisfied ? ["native-arg-env"] : [],
+    support: minimumSatisfied ? "native" : input.reason ? "legacy_compatible" : "unsupported",
+    reason: input.reason,
+  };
+}
+
+function capabilityBlockReason(probe: CapabilityProbe): PermissionOverviewBlockReason {
+  return {
+    code: probe.missing?.includes("cliVersion") ? "unsupported_cli_version" : "unsupported_cli_capability",
+    summary: "Hermes CLI 不满足 Forge WSL 最低能力门槛",
+    detail: `Forge WSL 主链路要求 capabilities --json、cliVersion、supportsLaunchMetadataArg、supportsLaunchMetadataEnv、supportsResume。缺失：${probe.missing?.join(", ") || "unknown"}。${probe.reason ? `原因：${probe.reason}` : ""}`,
+    fixHint: "请升级 WSL 内 Hermes CLI 到支持原生 launch metadata 和 resume capability 的版本。",
+    debugContext: {
+      capabilityProbe: probe,
+      allowedTransports: ["native-arg-env"],
+      minimumRequired: {
+        capabilitiesJson: true,
+        supportsLaunchMetadataArg: true,
+        supportsLaunchMetadataEnv: true,
+        supportsResume: true,
+        cliVersion: "present",
+      },
+    },
+  };
+}
+
+function formatBoundary([key, value]: [string, string]) {
+  return `${key}: ${value}`;
+}

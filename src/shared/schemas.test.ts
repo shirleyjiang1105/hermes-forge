@@ -47,16 +47,48 @@ describe("runtimeConfigSchema", () => {
       modelProfiles: [{ id: "local", provider: "local", model: "mock" }],
     });
 
-    expect(parsed.hermesRuntime).toEqual({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" });
+    expect(parsed.hermesRuntime).toEqual({
+      mode: "windows",
+      pythonCommand: "python3",
+      windowsAgentMode: "hermes_native",
+      cliPermissionMode: "guarded",
+      permissionPolicy: "bridge_guarded",
+    });
   });
 
   it("accepts WSL runtime settings", () => {
     const parsed = runtimeConfigSchema.parse({
       modelProfiles: [{ id: "local", provider: "local", model: "mock" }],
-      hermesRuntime: { mode: "wsl", distro: "Ubuntu", pythonCommand: "python3", windowsAgentMode: "host_tool_loop" },
+      hermesRuntime: {
+        mode: "wsl",
+        distro: "Ubuntu",
+        pythonCommand: "python3",
+        windowsAgentMode: "host_tool_loop",
+        cliPermissionMode: "safe",
+        permissionPolicy: "passthrough",
+        installSource: {
+          repoUrl: "https://github.com/example/hermes-agent.git",
+          branch: "main",
+          commit: "abcdef1234567",
+          sourceLabel: "pinned",
+        },
+      },
     });
 
-    expect(parsed.hermesRuntime).toEqual({ mode: "wsl", distro: "Ubuntu", pythonCommand: "python3", windowsAgentMode: "host_tool_loop" });
+    expect(parsed.hermesRuntime).toEqual({
+      mode: "wsl",
+      distro: "Ubuntu",
+      pythonCommand: "python3",
+      windowsAgentMode: "host_tool_loop",
+      cliPermissionMode: "safe",
+      permissionPolicy: "passthrough",
+      installSource: {
+        repoUrl: "https://github.com/example/hermes-agent.git",
+        branch: "main",
+        commit: "abcdef1234567",
+        sourceLabel: "pinned",
+      },
+    });
   });
 
   it("rejects invalid Hermes runtime modes", () => {

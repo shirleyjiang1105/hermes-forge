@@ -6,7 +6,15 @@ import type { AppPaths } from "../../main/app-paths";
 import { syncHermesWindowsMcpConfig } from "../../main/hermes-native-mcp-config";
 import { MemoryBudgeter } from "../../memory/memory-budgeter";
 import { HermesHeadlessWorker } from "./hermes-headless-worker";
+import {
+  createHermesLaunchMetadataSidecar,
+  type HermesLaunchMetadataDelivery,
+  type LaunchMetadataBridge,
+} from "./hermes-launch-metadata";
 import { runCommand, streamCommand } from "../../process/command-runner";
+import type { RuntimeAdapterFactory } from "../../runtime/runtime-adapter";
+import { toWslPath as runtimeToWslPath } from "../../runtime/runtime-resolver";
+import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason, type PermissionBoundaryAudit } from "../../shared/permission-audit";
 import type { EngineAdapter, HermesToolLoopMessage } from "../engine-adapter";
 import type {
   ContextBundle,
@@ -14,9 +22,11 @@ import type {
   EngineEvent,
   EngineHealth,
   EngineRunRequest,
+  HermesCliPermissionMode,
   HermesRuntimeConfig,
   EngineUpdateStatus,
   MemoryStatus,
+  PermissionOverviewBlockReason,
   RuntimeConfig,
 } from "../../shared/types";
 
@@ -26,13 +36,88 @@ const HEADLESS_RESULT_END = "__HERMES_FORGE_RESULT_END__";
 
 type HermesInvocation = {
   args: string[];
+  permissionMode?: HermesCliPermissionMode;
+  sessionPlan?: HermesCliSessionPlan;
+  env?: NodeJS.ProcessEnv;
   cleanup?: () => Promise<void>;
 };
 
 type HermesPromptPayload = {
   systemPrompt: string;
   userPrompt: string;
+  compatibilityLayer?: boolean;
+  compatibilityReason?: string;
+  queryContext?: string[];
+  launchMetadata?: HermesLaunchMetadataDelivery;
+  launchMetadataNativeSupported?: boolean;
+  launchMetadataTransport?: HermesCliMetadataTransport;
+  cliCapabilities?: HermesCliCapabilityProbe;
 };
+
+type HermesCliPermissionStrategy = {
+  mode: HermesCliPermissionMode;
+  cliArgs: string[];
+  source: "runtime-config" | "default";
+  description: string;
+};
+
+type HermesCliSessionStatus = "fresh" | "resumed" | "continued" | "degraded";
+
+type HermesCliSessionMapping = {
+  version: 1;
+  forgeSessionId: string;
+  cliSessionId?: string;
+  cliSource: string;
+  cliStateDbPath: string;
+  cliStateDbRuntimePath?: string;
+  createdAt: string;
+  updatedAt: string;
+  lastTaskRunId?: string;
+  lastWorkspacePath?: string;
+  lastStatus: HermesCliSessionStatus;
+  lastDegradationReason?: string;
+};
+
+type HermesCliSessionPlan = {
+  forgeSessionId?: string;
+  status: HermesCliSessionStatus;
+  cliSessionId?: string;
+  cliSource: string;
+  mappingPath?: string;
+  cliStateDbPath?: string;
+  cliStateDbRuntimePath?: string;
+  resumeArgs: string[];
+  degradationReason?: string;
+};
+
+type HermesCliMetadataTransport = "native-arg-env" | "blocked" | "none";
+
+type HermesCliCapabilitySupport = "native" | "legacy_compatible" | "degraded" | "unsupported";
+
+type HermesCliCapabilityProbe = {
+  probed: boolean;
+  support: HermesCliCapabilitySupport;
+  transport: HermesCliMetadataTransport;
+  cliVersion?: string;
+  supportsLaunchMetadataArg: boolean;
+  supportsLaunchMetadataEnv: boolean;
+  supportsResume: boolean;
+  minimumSatisfied: boolean;
+  missing: string[];
+  probeCommand: string;
+  reason?: string;
+};
+
+type HermesCliBlockCode = "unsupported_cli_version" | "unsupported_cli_capability" | "manual_upgrade_required";
+
+type HermesCliBlockReason = {
+  code: HermesCliBlockCode;
+  summary: string;
+  detail: string;
+  fixHint: string;
+  debugContext: Record<string, unknown>;
+};
+
 
 export class HermesCliAdapter implements EngineAdapter {
   id = "hermes" as const;
@@ -40,6 +125,8 @@ export class HermesCliAdapter implements EngineAdapter {
   capabilities = ["file_memory", "private_skills", "context_bridge", "cli"] as const;
   private windowsPython?: Promise<{ command: string; argsPrefix: string[]; lastError?: string }>;
   private windowsHeadlessWorker?: HermesHeadlessWorker;
+  private readonly liveCliSessionMappings = new Set<string>();
+  private cliCapabilityProbe?: Promise<HermesCliCapabilityProbe>;
 
   constructor(
     private readonly appPaths: AppPaths,
@@ -47,11 +134,12 @@ export class HermesCliAdapter implements EngineAdapter {
     private readonly resolveRootPath: () => Promise<string>,
     private readonly readRuntimeConfig?: () => Promise<RuntimeConfig>,
     private readonly getWindowsBridgeAccess?: (distro?: string) => Promise<{ url: string; token: string; capabilities: string } | undefined>,
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
   ) {}
 
   async healthCheck(): Promise<EngineHealth> {
     const runtime = await this.hermesRuntime();
-    const rootPath = this.normalizeRootPath(await this.rootPath(), runtime);
+    const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
     const cliPath = this.hermesCliPath(rootPath, runtime);
     if (runtime.mode !== "wsl" && !(await this.exists(cliPath))) {
       return {
@@ -88,12 +176,71 @@ export class HermesCliAdapter implements EngineAdapter {
 
   async *run(request: EngineRunRequest, signal: AbortSignal): AsyncIterable<EngineEvent> {
     const runtime = await this.hermesRuntime();
-    const rootPath = this.normalizeRootPath(await this.rootPath(), runtime);
+    const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
     const startedAt = Date.now();
+    const cliPermissionStrategy = this.resolveCliPermissionStrategy(runtime);
     yield { type: "status", level: "info", message: runtime.mode === "wsl" ? "正在通过 WSL 调用 Hermes CLI。" : "正在调用 Hermes CLI。", at: now() };
-    yield { type: "memory_access", engineId: this.id, action: "read", source: this.memoryDir(), at: now() };
+    const permissionAudit = this.permissionBoundaryAudit(runtime, request);
+    if (runtime.mode === "wsl") {
+      yield {
+        type: "diagnostic",
+        category: "hermes-permission-policy",
+        message: JSON.stringify(permissionAudit),
+        at: now(),
+      };
+      const policyBlock = this.permissionPolicyBlockReason(runtime, permissionAudit);
+      if (policyBlock) {
+        yield {
+          type: "diagnostic",
+          category: "hermes-permission-policy-blocked",
+          message: JSON.stringify(policyBlock),
+          at: now(),
+        };
+        yield {
+          type: "result",
+          success: false,
+          title: policyBlock.summary,
+          detail: `${policyBlock.detail}\n\n修复建议：${policyBlock.fixHint}`,
+          at: now(),
+        };
+        return;
+      }
+    }
+    if (runtime.mode === "wsl") {
+      yield {
+        type: "diagnostic",
+        category: "hermes-cli-permission-mode",
+        message: `WSL Hermes CLI permission mode：${cliPermissionStrategy.mode}（${cliPermissionStrategy.description}；来源：${cliPermissionStrategy.source}）。`,
+        at: now(),
+      };
+    } else if (request.permissions?.memoryRead) {
+      yield { type: "memory_access", engineId: this.id, action: "read", source: this.memoryDir(), at: now() };
+    }
 
-    const prompt = await this.buildPrompt(request, runtime);
+    const cliCapabilities = runtime.mode === "wsl"
+      ? await this.negotiateCliCapabilities(runtime, rootPath)
+      : undefined;
+    if (runtime.mode === "wsl" && cliCapabilities && !cliCapabilities.minimumSatisfied) {
+      const block = this.cliCapabilityBlockReason(cliCapabilities);
+      yield {
+        type: "diagnostic",
+        category: "hermes-cli-capability-blocked",
+        message: JSON.stringify(block),
+        at: now(),
+      };
+      yield {
+        type: "result",
+        success: false,
+        title: block.summary,
+        detail: `${block.detail}\n\n修复建议：${block.fixHint}`,
+        at: now(),
+      };
+      return;
+    }
+    const cliSessionPlan = runtime.mode === "wsl"
+      ? await this.prepareCliSessionPlan(runtime, rootPath, request, "zhenghebao-client")
+      : undefined;
+    const prompt = await this.buildPrompt(request, runtime, cliPermissionStrategy, cliSessionPlan, cliCapabilities);
     if (runtime.mode !== "wsl") {
       const finalReply = await this.runViaWindowsWorker(rootPath, runtime, prompt, request, signal);
       yield {
@@ -105,8 +252,9 @@ export class HermesCliAdapter implements EngineAdapter {
       };
       return;
     }
-    const invocation = await this.headlessInvocation(rootPath, runtime, prompt, request, "zhenghebao-client");
-    const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request);
+    const invocation = await this.conversationInvocation(rootPath, runtime, prompt, request.workspacePath, request, "zhenghebao-client", cliPermissionStrategy, cliSessionPlan);
+    yield this.cliSessionDiagnostic(invocation.sessionPlan, prompt);
+    const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request, invocation.env);
 
     let exitCode: number | null = null;
     const stdoutLines: string[] = [];
@@ -131,7 +279,9 @@ export class HermesCliAdapter implements EngineAdapter {
           }
         } else if (event.type === "stderr") {
           stderrLines.push(event.line);
-          yield { type: "stderr", line: event.line, at: now() };
+          if (!this.isTechnicalLine(event.line)) {
+            yield { type: "stderr", line: event.line, at: now() };
+          }
         } else {
           exitCode = event.exitCode;
         }
@@ -144,6 +294,21 @@ export class HermesCliAdapter implements EngineAdapter {
       throw new Error(this.cliFailureMessage(exitCode, stderrLines));
     }
 
+    const observedSessionId = this.extractSessionId([...stdoutLines, ...stderrLines]);
+    await this.updateCliSessionMapping(invocation.sessionPlan, observedSessionId, request);
+    if (runtime.mode === "wsl") {
+      yield {
+        type: "diagnostic",
+        category: "hermes-cli-session-result",
+        message: [
+          `Forge session：${invocation.sessionPlan?.forgeSessionId ?? "未绑定"}`,
+          `CLI session：${observedSessionId || invocation.sessionPlan?.cliSessionId || "未返回"}`,
+          `恢复状态：${invocation.sessionPlan?.status ?? "fresh"}`,
+          invocation.sessionPlan?.mappingPath ? `映射文件：${invocation.sessionPlan.mappingPath}` : undefined,
+        ].filter(Boolean).join(" / "),
+        at: now(),
+      };
+    }
     const finalReply = await this.cleanReply(stdoutLines, startedAt, streamReplyLines);
     yield {
       type: "result",
@@ -156,7 +321,18 @@ export class HermesCliAdapter implements EngineAdapter {
 
   async planToolStep(request: EngineRunRequest, transcript: HermesToolLoopMessage[], signal: AbortSignal): Promise<string> {
     const runtime = await this.hermesRuntime();
-    const rootPath = this.normalizeRootPath(await this.rootPath(), runtime);
+    const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
+    const cliPermissionStrategy = this.resolveCliPermissionStrategy(runtime);
+    const cliSessionPlan = runtime.mode === "wsl"
+      ? await this.prepareCliSessionPlan(runtime, rootPath, request, "zhenghebao-client-tool-loop")
+      : undefined;
+    const cliCapabilities = runtime.mode === "wsl"
+      ? await this.negotiateCliCapabilities(runtime, rootPath)
+      : undefined;
+    if (runtime.mode === "wsl" && cliCapabilities && !cliCapabilities.minimumSatisfied) {
+      const block = this.cliCapabilityBlockReason(cliCapabilities);
+      throw new Error(`${block.summary}: ${block.detail}`);
+    }
     const prompt = this.buildToolLoopPrompt(request, runtime, transcript);
     if (runtime.mode !== "wsl") {
       return await this.runViaWindowsWorker(rootPath, runtime, {
@@ -167,8 +343,8 @@ export class HermesCliAdapter implements EngineAdapter {
     const invocation = await this.conversationInvocation(rootPath, runtime, {
       systemPrompt: "你是 Hermes Windows Agent Planner。下面用户消息中包含工具规划协议，请严格按协议输出。",
       userPrompt: prompt,
-    }, request.workspacePath, request, "zhenghebao-client-tool-loop");
-    const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request);
+    }, request.workspacePath, request, "zhenghebao-client-tool-loop", cliPermissionStrategy, cliSessionPlan, cliCapabilities);
+    const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request, invocation.env);
     const lines: string[] = [];
     try {
       for await (const event of streamCommand(launch.command, launch.args, {
@@ -189,6 +365,7 @@ export class HermesCliAdapter implements EngineAdapter {
     } finally {
       await invocation.cleanup?.();
     }
+    await this.updateCliSessionMapping(invocation.sessionPlan, this.extractSessionId(lines), request);
     return this.normalizeReply(lines.join("\n")) || lines.join("\n").trim();
   }
 
@@ -233,7 +410,7 @@ export class HermesCliAdapter implements EngineAdapter {
 
   async checkUpdate(): Promise<EngineUpdateStatus> {
     const runtime = await this.hermesRuntime();
-    const rootPath = this.normalizeRootPath(await this.rootPath(), runtime);
+    const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
     const launch = await this.commandSpec(runtime, rootPath, ["git", "status", "-sb"]);
     const result = await runCommand(launch.command, launch.args, {
       cwd: launch.cwd,
@@ -249,47 +426,171 @@ export class HermesCliAdapter implements EngineAdapter {
     };
   }
 
-  private async buildPrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig): Promise<HermesPromptPayload> {
-    const bundle = request.contextBundle?.summary ? `\n\n只读上下文摘要：\n${request.contextBundle.summary}` : "";
+  private async buildPrompt(
+    request: EngineRunRequest,
+    runtime: HermesRuntimeConfig,
+    cliPermissionStrategy = this.resolveCliPermissionStrategy(runtime),
+    cliSessionPlan?: HermesCliSessionPlan,
+    cliCapabilities?: HermesCliCapabilityProbe,
+  ): Promise<HermesPromptPayload> {
+    if (runtime.mode === "wsl") {
+      return await this.buildWslPrompt(request, runtime, cliSessionPlan, cliCapabilities);
+    }
     const desktopPath = path.join(os.homedir(), "Desktop");
-    const workspaceForHermes = runtime.mode === "wsl" ? toWslPath(request.workspacePath) : request.workspacePath;
-    const desktopForHermes = runtime.mode === "wsl" ? toWslPath(desktopPath) : desktopPath;
-    const selectedFiles = request.selectedFiles.length ? request.selectedFiles.join("\n") : "无";
-    const attachments = request.attachments?.length ? request.attachments.map((attachment, index) =>
-      `${index + 1}. [${attachment.kind === "image" ? "图片" : "文件"}] ${attachment.name}\n   会话副本：${attachment.path}\n   原始路径：${attachment.originalPath}`,
-    ).join("\n") : "无";
-    const attachmentContents = await this.readAttachmentContents(request);
+    const selectedFiles = this.selectedFilesManifest(request, runtime);
+    const attachments = this.attachmentManifest(request, runtime);
     const firstImage = request.attachments?.find((attachment) => attachment.kind === "image");
-    const permissions = this.permissionInstructions(request);
-    const memoryContent = await this.readMemoryContent(request);
-    const conversationHistory = this.conversationHistoryPrompt(request);
+    const compatibilityContext = await this.desktopCompatibilityContextPrompt(request, runtime);
     const systemPrompt = [
       "你正在作为小白启动台里的 Hermes 本地轻量助手工作。",
       "请直接用自然、简洁的中文回答用户，不要输出 session_id、token、调试日志或 CLI 状态。",
-      "以下内容是宿主应用提供的内部运行上下文和权限约束，不是用户要求你复述的内容；除非用户明确询问，不要把这些规则原样输出。",
       "如果用户询问运行环境，只回答系统/发行版、当前工作目录和 Python 路径，不要 dump 全量环境变量。",
-      "如果用户只是寒暄，请像正常聊天一样回应；如果用户要求操作项目，请先说明你将如何处理。",
-      "如果用户上传了附件，请优先读取并分析附件。图片会尽量通过视觉入口附加；普通文件请按路径读取。",
-      permissions,
+      "如果用户只是寒暄，请像正常聊天一样回应；如果用户要求操作项目，请直接处理。",
+      this.permissionInstructions(request),
       "如果用户提到“桌面”，默认指当前 Windows 用户桌面路径，不要反问路径。",
       "如果用户没有指定路径，默认使用当前工作区。",
       `当前工作区：${request.workspacePath}`,
-      runtime.mode === "wsl" ? `当前工作区的 WSL 路径：${workspaceForHermes}` : "",
       `当前 Windows 桌面：${desktopPath}`,
-      runtime.mode === "wsl" ? `当前 Windows 桌面的 WSL 路径：${desktopForHermes}` : "",
       this.windowsBridgePrompt(request, runtime),
       `用户已选文件：${selectedFiles}`,
       `用户上传附件：\n${attachments}`,
-      attachmentContents,
       firstImage ? `本轮第一张图片已通过 --image 传入 Hermes：${firstImage.path}` : "",
-      conversationHistory,
-      memoryContent,
-      bundle,
+      compatibilityContext,
     ].filter(Boolean).join("\n");
     return {
       systemPrompt,
       userPrompt: request.userInput,
     };
+  }
+
+  private async buildWslPrompt(
+    request: EngineRunRequest,
+    runtime: HermesRuntimeConfig,
+    cliSessionPlan?: HermesCliSessionPlan,
+    cliCapabilities?: HermesCliCapabilityProbe,
+  ): Promise<HermesPromptPayload> {
+    const launchMetadata = await this.createWslLaunchMetadata(request, runtime, cliSessionPlan);
+    const transport = cliCapabilities?.transport ?? "blocked";
+    const nativeSupported = cliCapabilities?.minimumSatisfied === true;
+    return {
+      systemPrompt: "",
+      userPrompt: request.userInput,
+      compatibilityLayer: false,
+      compatibilityReason: "legacy query metadata pointer 已移除；WSL 正式链路只允许用户自然 query + 原生 runtime metadata。",
+      queryContext: [],
+      launchMetadata,
+      launchMetadataNativeSupported: nativeSupported,
+      launchMetadataTransport: transport,
+      cliCapabilities,
+    };
+  }
+
+  private async createWslLaunchMetadata(
+    request: EngineRunRequest,
+    runtime: HermesRuntimeConfig,
+    cliSessionPlan?: HermesCliSessionPlan,
+  ) {
+    const desktopPath = path.join(os.homedir(), "Desktop");
+    const bridge = await this.launchMetadataBridge(runtime, request);
+    return await createHermesLaunchMetadataSidecar({
+      request,
+      runtime,
+      forgeSessionId: cliSessionPlan?.forgeSessionId ?? this.hermesConversationId(request),
+      cliSession: {
+        status: cliSessionPlan?.status ?? "fresh",
+        forgeSessionId: cliSessionPlan?.forgeSessionId ?? this.hermesConversationId(request),
+        cliSessionId: cliSessionPlan?.cliSessionId,
+        degradationReason: cliSessionPlan?.degradationReason,
+      },
+      windowsDesktopPath: desktopPath,
+      bridge,
+      toRuntimePath: (inputPath) => runtime.mode === "wsl" ? toWslPath(inputPath) : inputPath,
+    }, this.launchMetadataDir());
+  }
+
+  private attachmentManifest(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
+    if (!request.attachments?.length) return "无";
+    return request.attachments.map((attachment, index) => {
+      const runtimePath = runtime.mode === "wsl" ? toWslPath(attachment.path) : attachment.path;
+      const originalRuntimePath = attachment.originalPath && runtime.mode === "wsl" ? toWslPath(attachment.originalPath) : attachment.originalPath;
+      return [
+        `${index + 1}. [${attachment.kind === "image" ? "图片" : "文件"}] ${attachment.name}`,
+        `   会话副本：${attachment.path}`,
+        runtimePath !== attachment.path ? `   会话副本 WSL 路径：${runtimePath}` : "",
+        attachment.originalPath ? `   原始路径：${attachment.originalPath}` : "",
+        originalRuntimePath && originalRuntimePath !== attachment.originalPath ? `   原始 WSL 路径：${originalRuntimePath}` : "",
+      ].filter(Boolean).join("\n");
+    }).join("\n");
+  }
+
+  private selectedFilesManifest(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
+    if (!request.selectedFiles.length) return "无";
+    return request.selectedFiles.map((filePath, index) => {
+      const runtimePath = runtime.mode === "wsl" ? toWslPath(filePath) : filePath;
+      return runtimePath === filePath
+        ? `${index + 1}. ${filePath}`
+        : `${index + 1}. ${filePath}\n   WSL 路径：${runtimePath}`;
+    }).join("\n");
+  }
+
+  private async launchMetadataBridge(runtime: HermesRuntimeConfig, request: EngineRunRequest): Promise<LaunchMetadataBridge> {
+    if (request.permissions?.contextBridge === false) {
+      return {
+        enabled: false,
+        available: false,
+        mode: runtime.windowsAgentMode,
+        capabilities: [],
+        reason: "contextBridge permission is disabled for this turn",
+      };
+    }
+    if (runtime.windowsAgentMode === "disabled") {
+      return {
+        enabled: false,
+        available: false,
+        mode: runtime.windowsAgentMode,
+        capabilities: [],
+        reason: "windowsAgentMode is disabled",
+      };
+    }
+    const bridge = await this.getWindowsBridgeAccess?.(runtime.distro);
+    return {
+      enabled: true,
+      available: Boolean(bridge),
+      mode: runtime.windowsAgentMode ?? "hermes_native",
+      capabilities: this.parseBridgeCapabilities(bridge?.capabilities),
+      reason: bridge ? undefined : "Windows Bridge access was not available",
+    };
+  }
+
+  private parseBridgeCapabilities(raw: string | undefined) {
+    if (!raw?.trim()) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === "string");
+      }
+    } catch {
+      // Fall back to comma/space separated capability strings.
+    }
+    return raw.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
+  }
+
+  private async desktopCompatibilityContextPrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
+    if (runtime.mode === "wsl") {
+      return "";
+    }
+    const bundle = request.contextBundle?.summary ? `\n\n只读上下文摘要：\n${request.contextBundle.summary}` : "";
+    const attachmentContents = await this.readAttachmentContents(request);
+    const memoryContent = await this.readMemoryContent(request);
+    const conversationHistory = this.conversationHistoryPrompt(request);
+    const parts = [
+      "Compatibility layer: Windows/headless runs still receive desktop-prepared context until that path is moved to the native CLI session model.",
+      attachmentContents,
+      conversationHistory,
+      memoryContent,
+      bundle,
+    ].filter(Boolean);
+    return parts.length ? parts.join("\n") : "";
   }
 
   private async readAttachmentContents(request: EngineRunRequest) {
@@ -400,6 +701,9 @@ export class HermesCliAdapter implements EngineAdapter {
     workspacePath: string,
     request: EngineRunRequest | undefined,
     source: string,
+    cliPermissionStrategy = this.resolveCliPermissionStrategy(runtime),
+    cliSessionPlan?: HermesCliSessionPlan,
+    cliCapabilities?: HermesCliCapabilityProbe,
   ): Promise<HermesInvocation> {
     if (runtime.mode !== "wsl") {
       return this.headlessInvocation(rootPath, runtime, prompt, request, source);
@@ -409,7 +713,9 @@ export class HermesCliAdapter implements EngineAdapter {
     const args = [
       this.hermesCliPath(rootPath, runtime),
       "chat",
-      "--yolo",
+      ...(cliSessionPlan?.resumeArgs ?? []),
+      ...cliPermissionStrategy.cliArgs,
+      ...((prompt.launchMetadataTransport ?? cliCapabilities?.transport) === "native-arg-env" && prompt.launchMetadata?.metadataRuntimePath ? ["--launch-metadata", prompt.launchMetadata.metadataRuntimePath] : []),
       ...(request ? this.imageArgs(request, runtime) : []),
       ...(request ? this.modelArgs(request) : []),
       "--query",
@@ -425,7 +731,17 @@ export class HermesCliAdapter implements EngineAdapter {
       throw new Error(`Hermes CLI 参数生成异常：检测到已废弃参数 ${unsupported}。请重新构建客户端。`);
     }
 
-    return { args };
+    return {
+      args,
+      permissionMode: cliPermissionStrategy.mode,
+      sessionPlan: cliSessionPlan,
+      env: prompt.launchMetadata?.env,
+      cleanup: async () => {
+        if (prompt.launchMetadata?.metadataPath) {
+          await fs.rm(prompt.launchMetadata.metadataPath, { force: true }).catch(() => undefined);
+        }
+      },
+    };
   }
 
   private async runViaWindowsWorker(
@@ -481,6 +797,9 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   private combinePromptForCli(prompt: HermesPromptPayload) {
+    if (!prompt.systemPrompt.trim()) {
+      return prompt.userPrompt;
+    }
     return [
       "<system_context>",
       prompt.systemPrompt,
@@ -529,6 +848,415 @@ export class HermesCliAdapter implements EngineAdapter {
       args.push("--model", model);
     }
     return args;
+  }
+
+  private resolveCliPermissionStrategy(runtime: HermesRuntimeConfig): HermesCliPermissionStrategy {
+    const configured = this.normalizeCliPermissionMode(runtime.cliPermissionMode);
+    const mode = configured ?? "guarded";
+    if (mode === "yolo") {
+      return {
+        mode,
+        cliArgs: ["--yolo"],
+        source: configured ? "runtime-config" : "default",
+        description: "显式传递 --yolo，危险命令审批由 Hermes CLI 跳过",
+      };
+    }
+    return {
+      mode,
+      cliArgs: [],
+      source: configured ? "runtime-config" : "default",
+      description: "不传 --yolo，使用 Hermes CLI 原版默认审批/保护行为",
+    };
+  }
+
+  private normalizeCliPermissionMode(mode: string | undefined): HermesCliPermissionMode | undefined {
+    if (mode === "yolo" || mode === "safe" || mode === "guarded") {
+      return mode;
+    }
+    return undefined;
+  }
+
+  private permissionBoundaryAudit(runtime: HermesRuntimeConfig, request: EngineRunRequest): PermissionBoundaryAudit {
+    return createPermissionBoundaryAudit({ runtime, permissions: request.permissions });
+  }
+
+  private permissionPolicyBlockReason(
+    runtime: HermesRuntimeConfig,
+    audit: PermissionBoundaryAudit,
+  ): PermissionOverviewBlockReason | undefined {
+    return createPermissionPolicyBlockReason({ runtime, audit });
+  }
+
+  private async negotiateCliCapabilities(runtime: HermesRuntimeConfig, rootPath: string): Promise<HermesCliCapabilityProbe> {
+    if (runtime.mode !== "wsl") {
+      return this.classifyCliCapabilities({
+        probed: false,
+        cliVersion: undefined,
+        supportsLaunchMetadataArg: false,
+        supportsLaunchMetadataEnv: false,
+        supportsResume: false,
+        probeCommand: "not-wsl",
+        reason: "native launch metadata negotiation is only used for WSL CLI runs",
+      });
+    }
+    this.cliCapabilityProbe ??= this.probeCliCapabilities(runtime, rootPath);
+    return await this.cliCapabilityProbe;
+  }
+
+  private async probeCliCapabilities(runtime: HermesRuntimeConfig, rootPath: string): Promise<HermesCliCapabilityProbe> {
+    const probeCommand = "capabilities --json";
+    const launch = await this.launchSpec(
+      runtime,
+      rootPath,
+      [this.hermesCliPath(rootPath, runtime), "capabilities", "--json"],
+      rootPath,
+      undefined,
+    );
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
+      timeoutMs: 20_000,
+      env: launch.env,
+      detached: launch.detached,
+    });
+    if (result.exitCode !== 0) {
+      return this.classifyCliCapabilities({
+        probed: false,
+        cliVersion: undefined,
+        supportsLaunchMetadataArg: false,
+        supportsLaunchMetadataEnv: false,
+        supportsResume: false,
+        probeCommand,
+        reason: `capability command failed with exit ${result.exitCode ?? "unknown"}: ${(result.stderr || result.stdout || "").trim() || "no output"}`,
+      });
+    }
+    try {
+      const parsed = JSON.parse(result.stdout) as {
+        cliVersion?: unknown;
+        capabilities?: {
+          supportsLaunchMetadataArg?: unknown;
+          supportsLaunchMetadataEnv?: unknown;
+          supportsResume?: unknown;
+        };
+      };
+      return this.classifyCliCapabilities({
+        probed: true,
+        cliVersion: typeof parsed.cliVersion === "string" ? parsed.cliVersion : undefined,
+        supportsLaunchMetadataArg: parsed.capabilities?.supportsLaunchMetadataArg === true,
+        supportsLaunchMetadataEnv: parsed.capabilities?.supportsLaunchMetadataEnv === true,
+        supportsResume: parsed.capabilities?.supportsResume === true,
+        probeCommand,
+      });
+    } catch (error) {
+      return this.classifyCliCapabilities({
+        probed: true,
+        cliVersion: undefined,
+        supportsLaunchMetadataArg: false,
+        supportsLaunchMetadataEnv: false,
+        supportsResume: false,
+        probeCommand,
+        reason: `capability JSON parse failed: ${error instanceof Error ? error.message : String(error)}`,
+      });
+    }
+  }
+
+  private classifyCliCapabilities(input: {
+    probed: boolean;
+    cliVersion?: string;
+    supportsLaunchMetadataArg: boolean;
+    supportsLaunchMetadataEnv: boolean;
+    supportsResume: boolean;
+    probeCommand: string;
+    reason?: string;
+  }): HermesCliCapabilityProbe {
+    const missing = [
+      input.cliVersion ? undefined : "cliVersion",
+      input.supportsLaunchMetadataArg ? undefined : "supportsLaunchMetadataArg",
+      input.supportsLaunchMetadataEnv ? undefined : "supportsLaunchMetadataEnv",
+      input.supportsResume ? undefined : "supportsResume",
+    ].filter((item): item is string => Boolean(item));
+    const minimumSatisfied = missing.length === 0;
+    let support: HermesCliCapabilitySupport;
+    let transport: HermesCliMetadataTransport;
+    if (minimumSatisfied) {
+      support = "native";
+      transport = "native-arg-env";
+    } else if (!input.probed) {
+      support = "legacy_compatible";
+      transport = "blocked";
+    } else if (input.supportsLaunchMetadataEnv && input.supportsResume) {
+      support = "degraded";
+      transport = "blocked";
+    } else {
+      support = "unsupported";
+      transport = "blocked";
+    }
+    return {
+      probed: input.probed,
+      support,
+      transport,
+      cliVersion: input.cliVersion,
+      supportsLaunchMetadataArg: input.supportsLaunchMetadataArg,
+      supportsLaunchMetadataEnv: input.supportsLaunchMetadataEnv,
+      supportsResume: input.supportsResume,
+      minimumSatisfied,
+      missing,
+      probeCommand: input.probeCommand,
+      reason: input.reason,
+    };
+  }
+
+  private cliCapabilityBlockReason(capabilities: HermesCliCapabilityProbe): HermesCliBlockReason {
+    const code: HermesCliBlockCode = capabilities.reason && !capabilities.probed
+      ? "manual_upgrade_required"
+      : capabilities.missing.includes("cliVersion")
+        ? "unsupported_cli_version"
+        : "unsupported_cli_capability";
+    return {
+      code,
+      summary: "Hermes CLI 不满足 Forge WSL 最低能力门槛",
+      detail: [
+        "Forge WSL 主链路现在要求 Hermes CLI 原生支持 launch metadata 和 session resume。",
+        `当前能力状态：${capabilities.support}。`,
+        capabilities.missing.length ? `缺失能力：${capabilities.missing.join(", ")}。` : "",
+        capabilities.reason ? `探测原因：${capabilities.reason}。` : "",
+      ].filter(Boolean).join(" "),
+      fixHint: "请升级 WSL 内 Hermes CLI 到支持 `hermes capabilities --json`、`--launch-metadata`、`HERMES_FORGE_LAUNCH_METADATA` 和 `--resume` 的版本后重试。",
+      debugContext: {
+        capabilityProbe: capabilities,
+        allowedTransports: ["native-arg-env"],
+        removedFallbacks: ["env-query-fallback", "env-only"],
+        minimumRequired: {
+          capabilitiesJson: true,
+          supportsLaunchMetadataArg: true,
+          supportsLaunchMetadataEnv: true,
+          supportsResume: true,
+          cliVersion: "present",
+        },
+      },
+    };
+  }
+
+  private async prepareCliSessionPlan(
+    runtime: HermesRuntimeConfig,
+    rootPath: string,
+    request: EngineRunRequest | undefined,
+    source: string,
+  ): Promise<HermesCliSessionPlan> {
+    const forgeSessionId = this.hermesConversationId(request);
+    const cliSource = source || "zhenghebao-client";
+    const stateDbPath = path.join(this.appPaths.hermesDir(), "state.db");
+    const stateDbRuntimePath = runtime.mode === "wsl" ? toWslPath(stateDbPath) : stateDbPath;
+    if (!forgeSessionId) {
+      return {
+        status: "fresh",
+        cliSource,
+        cliStateDbPath: stateDbPath,
+        cliStateDbRuntimePath: stateDbRuntimePath,
+        resumeArgs: [],
+      };
+    }
+
+    const mappingPath = this.cliSessionMappingPath(forgeSessionId);
+    const mapping = await this.readCliSessionMapping(forgeSessionId);
+    if (!mapping?.cliSessionId) {
+      return {
+        forgeSessionId,
+        status: "fresh",
+        cliSource,
+        mappingPath,
+        cliStateDbPath: stateDbPath,
+        cliStateDbRuntimePath: stateDbRuntimePath,
+        resumeArgs: [],
+      };
+    }
+
+    const validation = await this.validateCliSessionHandle(runtime, rootPath, mapping.cliSessionId, stateDbPath, stateDbRuntimePath);
+    if (!validation.ok) {
+      const reason = validation.reason;
+      await this.writeCliSessionMapping({
+        ...mapping,
+        cliSource,
+        cliStateDbPath: stateDbPath,
+        cliStateDbRuntimePath: stateDbRuntimePath,
+        updatedAt: now(),
+        lastTaskRunId: request?.sessionId,
+        lastWorkspacePath: request?.workspacePath,
+        lastStatus: "degraded",
+        lastDegradationReason: reason,
+      });
+      return {
+        forgeSessionId,
+        status: "degraded",
+        cliSessionId: mapping.cliSessionId,
+        cliSource,
+        mappingPath,
+        cliStateDbPath: stateDbPath,
+        cliStateDbRuntimePath: stateDbRuntimePath,
+        resumeArgs: [],
+        degradationReason: reason,
+      };
+    }
+
+    const status: HermesCliSessionStatus = this.liveCliSessionMappings.has(forgeSessionId) ? "continued" : "resumed";
+    return {
+      forgeSessionId,
+      status,
+      cliSessionId: mapping.cliSessionId,
+      cliSource,
+      mappingPath,
+      cliStateDbPath: stateDbPath,
+      cliStateDbRuntimePath: stateDbRuntimePath,
+      resumeArgs: ["--resume", mapping.cliSessionId],
+    };
+  }
+
+  private async validateCliSessionHandle(
+    runtime: HermesRuntimeConfig,
+    rootPath: string,
+    cliSessionId: string,
+    stateDbPath: string,
+    stateDbRuntimePath: string,
+  ): Promise<{ ok: boolean; reason?: string }> {
+    const stat = await fs.stat(stateDbPath).catch(() => undefined);
+    if (!stat?.isFile()) {
+      return { ok: false, reason: `Hermes CLI state.db 不存在：${stateDbPath}` };
+    }
+    if (runtime.mode !== "wsl") {
+      return { ok: true };
+    }
+    const script = [
+      "import sqlite3, sys",
+      "db_path, session_id = sys.argv[1], sys.argv[2]",
+      "try:",
+      "    conn = sqlite3.connect(db_path)",
+      "    row = conn.execute('SELECT id FROM sessions WHERE id = ?', (session_id,)).fetchone()",
+      "    sys.exit(0 if row else 2)",
+      "except Exception:",
+      "    sys.exit(3)",
+    ].join("\n");
+    const probe = await this.commandSpec(runtime, rootPath, [
+      runtime.pythonCommand?.trim() || "python3",
+      "-c",
+      script,
+      stateDbRuntimePath,
+      cliSessionId,
+    ]);
+    const result = await runCommand(probe.command, probe.args, {
+      cwd: probe.cwd,
+      env: probe.env,
+      timeoutMs: 10_000,
+    });
+    if (result.exitCode === 0) {
+      return { ok: true };
+    }
+    if (result.exitCode === 2) {
+      return { ok: false, reason: `Hermes CLI state.db 中找不到 session：${cliSessionId}` };
+    }
+    return {
+      ok: false,
+      reason: `Hermes CLI session 校验失败，退出码 ${result.exitCode ?? "unknown"}：${(result.stderr || result.stdout || "").trim() || "无输出"}`,
+    };
+  }
+
+  private cliSessionDiagnostic(sessionPlan: HermesCliSessionPlan | undefined, prompt: HermesPromptPayload): EngineEvent {
+    const parts = [
+      `Forge session：${sessionPlan?.forgeSessionId ?? "未绑定"}`,
+      `CLI session：${sessionPlan?.cliSessionId ?? "本轮新建/待 CLI 返回"}`,
+      `CLI state：${sessionPlan?.status ?? "fresh"}`,
+      sessionPlan?.mappingPath ? `映射文件：${sessionPlan.mappingPath}` : undefined,
+      sessionPlan?.cliStateDbPath ? `CLI state.db：${sessionPlan.cliStateDbPath}` : undefined,
+      sessionPlan?.degradationReason ? `降级原因：${sessionPlan.degradationReason}` : undefined,
+      `Compatibility layer：${prompt.compatibilityLayer ? "是" : "否"}`,
+      prompt.compatibilityReason ? `Compatibility reason：${prompt.compatibilityReason}` : undefined,
+      `Native launch metadata：${prompt.launchMetadataNativeSupported ? "supported" : "unsupported/fallback"}`,
+      `Launch metadata transport：${prompt.launchMetadataTransport ?? "none"}`,
+      "Allowed transports：native-arg-env",
+      "env-query-fallback：removed",
+      "env-only：removed",
+      prompt.cliCapabilities ? `CLI capability probe：${JSON.stringify(prompt.cliCapabilities)}` : undefined,
+      prompt.launchMetadata ? `Launch metadata contract：${JSON.stringify(prompt.launchMetadata.diagnosticSummary)}` : undefined,
+      prompt.launchMetadata ? `Metadata delivery：sidecar=${prompt.launchMetadata.metadataPath} runtime=${prompt.launchMetadata.metadataRuntimePath} env=${Object.keys(prompt.launchMetadata.env).join(",")}` : undefined,
+      `--query 剩余注入：${prompt.queryContext?.length ? prompt.queryContext.join(", ") : "无"}`,
+    ].filter(Boolean);
+    return {
+      type: "diagnostic",
+      category: "hermes-cli-session",
+      message: parts.join(" / "),
+      at: now(),
+    };
+  }
+
+  private async updateCliSessionMapping(
+    sessionPlan: HermesCliSessionPlan | undefined,
+    observedSessionId: string | undefined,
+    request: EngineRunRequest,
+  ) {
+    if (!sessionPlan?.forgeSessionId) {
+      return;
+    }
+    const cliSessionId = observedSessionId || sessionPlan.cliSessionId;
+    if (!cliSessionId) {
+      await this.writeCliSessionMapping({
+        version: 1,
+        forgeSessionId: sessionPlan.forgeSessionId,
+        cliSource: sessionPlan.cliSource,
+        cliStateDbPath: sessionPlan.cliStateDbPath ?? path.join(this.appPaths.hermesDir(), "state.db"),
+        cliStateDbRuntimePath: sessionPlan.cliStateDbRuntimePath,
+        createdAt: now(),
+        updatedAt: now(),
+        lastTaskRunId: request.sessionId,
+        lastWorkspacePath: request.workspacePath,
+        lastStatus: "degraded",
+        lastDegradationReason: "Hermes CLI 本轮没有返回 session_id，无法建立可恢复映射。",
+      });
+      return;
+    }
+    const existing = await this.readCliSessionMapping(sessionPlan.forgeSessionId);
+    await this.writeCliSessionMapping({
+      version: 1,
+      forgeSessionId: sessionPlan.forgeSessionId,
+      cliSessionId,
+      cliSource: sessionPlan.cliSource,
+      cliStateDbPath: sessionPlan.cliStateDbPath ?? existing?.cliStateDbPath ?? path.join(this.appPaths.hermesDir(), "state.db"),
+      cliStateDbRuntimePath: sessionPlan.cliStateDbRuntimePath ?? existing?.cliStateDbRuntimePath,
+      createdAt: existing?.createdAt ?? now(),
+      updatedAt: now(),
+      lastTaskRunId: request.sessionId,
+      lastWorkspacePath: request.workspacePath,
+      lastStatus: sessionPlan.status === "degraded" ? "degraded" : sessionPlan.status,
+      lastDegradationReason: sessionPlan.degradationReason,
+    });
+    this.liveCliSessionMappings.add(sessionPlan.forgeSessionId);
+  }
+
+  private async readCliSessionMapping(forgeSessionId: string): Promise<HermesCliSessionMapping | undefined> {
+    const raw = await fs.readFile(this.cliSessionMappingPath(forgeSessionId), "utf8").catch(() => "");
+    if (!raw) return undefined;
+    try {
+      const parsed = JSON.parse(raw) as Partial<HermesCliSessionMapping>;
+      if (parsed.version !== 1 || parsed.forgeSessionId !== forgeSessionId) {
+        return undefined;
+      }
+      return parsed as HermesCliSessionMapping;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private async writeCliSessionMapping(mapping: HermesCliSessionMapping) {
+    const mappingPath = this.cliSessionMappingPath(mapping.forgeSessionId);
+    await fs.mkdir(path.dirname(mappingPath), { recursive: true });
+    await fs.writeFile(mappingPath, JSON.stringify(mapping, null, 2), "utf8");
+  }
+
+  private cliSessionMappingPath(forgeSessionId: string) {
+    return path.join(this.appPaths.sessionDir(this.safeForgeSessionId(forgeSessionId)), "hermes-cli-session.json");
+  }
+
+  private safeForgeSessionId(forgeSessionId: string) {
+    return /^[A-Za-z0-9_.-]+$/.test(forgeSessionId)
+      ? forgeSessionId
+      : `session-map-${crypto.createHash("sha256").update(forgeSessionId).digest("hex").slice(0, 16)}`;
   }
 
   private cliFailureMessage(exitCode: number | null, stderrLines: string[]) {
@@ -704,7 +1432,7 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   private isEnvironmentDumpLine(text: string) {
-    return /^(?:SHELL|WSL2_GUI_APPS_ENABLED|WSL_DISTRO_NAME|NAME|PWD|LOGNAME|HOME|LANG|WSL_INTEROP|WAYLAND_DISPLAY|TERM|USER|DISPLAY|SHLVL|XDG_RUNTIME_DIR|WSLENV|PATH|OLDPWD|_|PYTHONPATH|PYTHONUTF8|PYTHONIOENCODING|HERMES_HOME|OPENAI_MODEL|HERMES_WINDOWS_[A-Z_]+)=/.test(text);
+    return /^(?:SHELL|WSL2_GUI_APPS_ENABLED|WSL_DISTRO_NAME|NAME|PWD|LOGNAME|HOME|LANG|WSL_INTEROP|WAYLAND_DISPLAY|TERM|USER|DISPLAY|SHLVL|XDG_RUNTIME_DIR|WSLENV|PATH|OLDPWD|_|PYTHONPATH|PYTHONUTF8|PYTHONIOENCODING|HERMES_HOME|OPENAI_MODEL|HERMES_WINDOWS_[A-Z_]+|HERMES_FORGE_[A-Z_]+)=/.test(text);
   }
 
   private sleep(ms: number) {
@@ -713,6 +1441,10 @@ export class HermesCliAdapter implements EngineAdapter {
 
   private memoryDir() {
     return path.join(os.homedir(), ".hermes", "memories");
+  }
+
+  private launchMetadataDir() {
+    return path.join(this.appPaths.baseDir(), "tmp", "hermes-launch-metadata");
   }
 
   private async hermesEnv(rootPath: string, runtime: HermesRuntimeConfig, request?: EngineRunRequest): Promise<NodeJS.ProcessEnv> {
@@ -759,6 +1491,9 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   private hermesProvider(provider: string) {
+    if (provider === "copilot_acp") {
+      return "copilot-acp";
+    }
     return provider === "openai" ? "openrouter" : provider;
   }
 
@@ -798,8 +1533,22 @@ export class HermesCliAdapter implements EngineAdapter {
     pythonArgs: string[],
     cwd: string,
     request?: EngineRunRequest,
+    extraEnv?: NodeJS.ProcessEnv,
   ) {
-    const env = await this.hermesEnv(rootPath, runtime, request);
+    const env = {
+      ...await this.hermesEnv(rootPath, runtime, request),
+      ...(extraEnv ?? {}),
+    };
+    const adapter = this.runtimeAdapter(runtime);
+    if (adapter) {
+      return adapter.buildHermesLaunch({
+        runtime,
+        rootPath,
+        pythonArgs,
+        cwd,
+        env,
+      });
+    }
     if (runtime.mode !== "wsl") {
       const python = await this.windowsPythonSpec(rootPath, this.hermesCliPath(rootPath, runtime), env);
       return {
@@ -839,6 +1588,10 @@ export class HermesCliAdapter implements EngineAdapter {
       cwd: process.cwd(),
       env: process.env,
     };
+  }
+
+  private runtimeAdapter(runtime: HermesRuntimeConfig) {
+    return this.runtimeAdapterFactory?.(runtime);
   }
 
   private async windowsPythonSpec(rootPath: string, cliPath: string, env: NodeJS.ProcessEnv) {
@@ -900,11 +1653,13 @@ export class HermesCliAdapter implements EngineAdapter {
       distro: config?.hermesRuntime?.distro?.trim() || undefined,
       pythonCommand: config?.hermesRuntime?.pythonCommand?.trim() || "python3",
       windowsAgentMode: config?.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+      cliPermissionMode: config?.hermesRuntime?.cliPermissionMode ?? "guarded",
+      permissionPolicy: config?.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
     };
   }
 
-  private normalizeRootPath(rootPath: string, runtime: HermesRuntimeConfig) {
-    return runtime.mode === "wsl" ? toWslPath(rootPath) : rootPath;
+  private async normalizeRootPath(rootPath: string, runtime: HermesRuntimeConfig) {
+    return this.runtimeAdapter(runtime)?.toRuntimePath(rootPath) ?? (runtime.mode === "wsl" ? toWslPath(rootPath) : rootPath);
   }
 
   private hermesCliPath(rootPath: string, runtime: HermesRuntimeConfig) {
@@ -919,6 +1674,13 @@ export class HermesCliAdapter implements EngineAdapter {
     }
     if (runtime.windowsAgentMode === "disabled") {
       return "Windows Agent 模式已关闭；本轮不要调用 Windows Control Bridge，需要 Windows 原生操作时请说明限制。";
+    }
+    if (runtime.mode === "wsl") {
+      return [
+        "Windows 原生控制由桌面端 Windows Bridge 边界管理；WSL 内 shell/file/git 交给 Hermes CLI 自己执行。",
+        "需要触达 Windows 原生文件、PowerShell、剪贴板、截屏、窗口或键鼠时，只使用 Hermes CLI 暴露的 MCP/Bridge 工具入口；宿主负责 bridge token、capabilities 与 Windows 原生审批。",
+        "不要把提示词规则当成权限控制；如果 Bridge 工具不可用，请说明当前 Windows 原生能力不可达。",
+      ].join("\n");
     }
     return [
       "Windows 原生控制：优先使用你自己的 Hermes 工具/终端能力规划任务；当需要真正触达原生 Windows（文件、PowerShell、剪贴板、截屏、窗口、键鼠）时，调用 Windows Control Bridge 执行，不要尝试直接在 WSL 中控制 Windows GUI，也不要依赖 /mnt/c 挂载。",
@@ -946,22 +1708,7 @@ export class HermesCliAdapter implements EngineAdapter {
 }
 
 export function toWslPath(inputPath: string) {
-  const normalized = inputPath.trim();
-  if (!normalized) return normalized;
-  if (/^\/(?:home|mnt|tmp|var|usr|opt|etc)\b/i.test(normalized)) {
-    return normalized;
-  }
-  const uncMatch = normalized.match(/^\\\\wsl\$\\[^\\]+\\(.+)$/i);
-  if (uncMatch?.[1]) {
-    return `/${uncMatch[1].replace(/\\/g, "/")}`;
-  }
-  const driveMatch = normalized.match(/^([A-Za-z]):[\\/](.*)$/);
-  if (driveMatch?.[1]) {
-    const drive = driveMatch[1].toLowerCase();
-    const rest = (driveMatch[2] ?? "").replace(/\\/g, "/");
-    return `/mnt/${drive}/${rest}`;
-  }
-  return normalized.replace(/\\/g, "/");
+  return runtimeToWslPath(inputPath);
 }
 
 function sanitizeStringEnv(env: NodeJS.ProcessEnv) {

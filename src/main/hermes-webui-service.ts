@@ -4,6 +4,7 @@ import path from "node:path";
 import { shell } from "electron";
 import type { AppPaths } from "./app-paths";
 import { runCommand } from "../process/command-runner";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import { validateSkillId, validateProfileName, validateCronSchedule } from "../security";
 import type {
   FilePreviewResult,
@@ -18,6 +19,7 @@ import type {
   SlashCommand,
   ThemePreference,
   WorkspaceSpace,
+  RuntimeConfig,
 } from "../shared/types";
 
 const DEFAULT_SETTINGS: HermesWebUiSettings = {
@@ -43,6 +45,8 @@ export class HermesWebUiService {
   constructor(
     private readonly appPaths: AppPaths,
     private readonly resolveHermesRoot: () => Promise<string>,
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
+    private readonly readRuntimeConfig?: () => Promise<RuntimeConfig>,
   ) {}
 
   async overview(): Promise<HermesWebUiOverview> {
@@ -445,13 +449,57 @@ export class HermesWebUiService {
 
   private async runHermes(args: string[]) {
     const root = await this.resolveHermesRoot();
-    const cliPath = path.join(root, "hermes");
-    const result = await runCommand("python", [cliPath, ...args], {
-      cwd: root,
+    const runtime = await this.currentRuntime();
+    const adapter = runtime ? this.runtimeAdapterFactory!(runtime) : undefined;
+    const runtimeRoot = adapter?.toRuntimePath(root);
+    const launch = runtime && adapter && runtimeRoot
+      ? await adapter.buildHermesLaunch({
+        runtime,
+        rootPath: runtimeRoot,
+        pythonArgs: [
+          runtime.mode === "wsl"
+            ? `${runtimeRoot.replace(/\/+$/, "")}/hermes`
+            : path.join(root, "hermes"),
+          ...args,
+        ],
+        cwd: root,
+        env: {
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8",
+          PYTHONPATH: runtimeRoot,
+        },
+      })
+      : await this.legacyHermesLaunch(root, args);
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
       timeoutMs: 30000,
-      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONPATH: root },
+      env: launch.env,
+      commandId: "webui.hermes",
+      runtimeKind: runtime?.mode ?? "windows",
     });
     return { ok: result.exitCode === 0, message: result.stdout || result.stderr, exitCode: result.exitCode };
+  }
+
+  private async currentRuntime() {
+    if (!this.runtimeAdapterFactory || !this.readRuntimeConfig) return undefined;
+    const config = await this.readRuntimeConfig();
+    return {
+      mode: config.hermesRuntime?.mode ?? "windows",
+      distro: config.hermesRuntime?.distro?.trim() || undefined,
+      pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
+      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+    } satisfies NonNullable<RuntimeConfig["hermesRuntime"]>;
+  }
+
+  private async legacyHermesLaunch(root: string, args: string[]) {
+    // Legacy fallback: kept for tests/standalone construction paths until all WebUI callers inject RuntimeAdapterFactory.
+    const cliPath = path.join(root, "hermes");
+    return {
+      command: "python",
+      args: [cliPath, ...args],
+      cwd: root,
+      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONPATH: root },
+    };
   }
 
   private async tryRunHermes(args: string[]) {

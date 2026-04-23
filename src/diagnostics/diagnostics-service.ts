@@ -9,6 +9,9 @@ import type { SetupService } from "../setup/setup-service";
 import type { SnapshotManager } from "../process/snapshot-manager";
 import type { WorkspaceLock } from "../process/workspace-lock";
 import type { ClientInfo, DiagnosticExportResult } from "../shared/types";
+import type { ManagedWslInstallerReport, PermissionOverview } from "../shared/types";
+import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
+import type { WslDoctorReportService } from "../install/wsl-doctor-report-service";
 
 export class DiagnosticsService {
   constructor(
@@ -21,6 +24,10 @@ export class DiagnosticsService {
     private readonly snapshotManager: SnapshotManager,
     private readonly workspaceLock: WorkspaceLock,
     private readonly clientInfo: () => ClientInfo,
+    private readonly runtimeProbeService?: RuntimeProbeService,
+    private readonly wslDoctorReportService?: WslDoctorReportService,
+    private readonly permissionOverviewProvider?: () => Promise<PermissionOverview>,
+    private readonly lastInstallReportProvider?: () => Promise<ManagedWslInstallerReport | undefined>,
   ) {}
 
   async export(workspacePath?: string): Promise<DiagnosticExportResult> {
@@ -60,25 +67,42 @@ export class DiagnosticsService {
     const events = workspaceId ? await capture("recentEvents", () => this.sessionLog.readRecent(workspaceId, 80), []) : [];
     const locks = await capture("locks", async () => this.workspaceLock.listActive(workspaceId), []);
     const probes = await capture("probes", () => this.engineProbeService.probeHermes(workspacePath), undefined);
+    const runtimeProbe = await capture("runtimeProbe", () => this.runtimeProbeService?.probe({ workspacePath }) ?? Promise.resolve(undefined), undefined);
+    const wslDoctor = await capture("wslDoctor", () => this.wslDoctorReportService?.build(workspacePath) ?? Promise.resolve(undefined), undefined);
+    const permissionOverview = await capture("permissionOverview", () => this.permissionOverviewProvider?.() ?? Promise.resolve(undefined), undefined);
+    const lastInstallReport = await capture("lastInstallReport", () => this.lastInstallReportProvider?.() ?? Promise.resolve(undefined), undefined);
     const installLogs = await capture("installLogs", () => this.listInstallLogs(), []);
     const setup = await capture("setup", () => this.setupService.getSummary(workspacePath), { ready: false, blocking: [], checks: [] });
+    const sessionMappings = await capture("sessionMappings", () => this.listSessionMappings(), []);
+    const taskDiagnostics = workspaceId ? await capture("taskDiagnostics", () => this.sessionLog.summarizeRecentRuns(workspaceId, 400), []) : [];
 
     const report = {
       createdAt,
       clientInfo: this.clientInfo(),
       setup,
+      runtimeConfigSummary: this.runtimeConfigSummary(config),
       runtimeConfig: safeConfig,
       engine,
       probes,
+      runtimeProbe,
+      permissionOverview,
+      wslDoctor,
+      lastInstallReport,
       memory,
       snapshots,
       locks,
       installLogs,
+      taskDiagnostics,
+      sessionMappings,
       recentEvents: events,
       diagnosticErrors,
     };
 
     await fs.writeFile(path.join(dir, "diagnostics.json"), JSON.stringify(report, null, 2), "utf8");
+    if (wslDoctor) {
+      await fs.writeFile(path.join(dir, "wsl-doctor.json"), JSON.stringify(wslDoctor, null, 2), "utf8");
+      await fs.writeFile(path.join(dir, "WSL_DOCTOR_SUMMARY.txt"), wslDoctor.summaryText, "utf8");
+    }
     await fs.writeFile(path.join(dir, "README.txt"), [
       "诊断报告已脱敏，不包含 API Key 明文。",
       diagnosticErrors.length ? `部分诊断项读取失败，详见 diagnostics.json 的 diagnosticErrors 字段。失败项：${diagnosticErrors.map((item) => item.section).join(", ")}` : "所有诊断项已尽量读取完成。",
@@ -97,5 +121,47 @@ export class DiagnosticsService {
     const dir = path.join(this.appPaths.baseDir(), "diagnostics", "install-logs");
     const files = await fs.readdir(dir).catch(() => []);
     return files.filter((file) => file.endsWith(".log")).slice(-12);
+  }
+
+  private runtimeConfigSummary(config: Awaited<ReturnType<RuntimeConfigStore["read"]>>) {
+    return {
+      defaultModelProfileId: config.defaultModelProfileId,
+      modelProfileCount: config.modelProfiles.length,
+      providerProfileCount: config.providerProfiles?.length ?? 0,
+      runtimeMode: config.hermesRuntime?.mode ?? "windows",
+      permissionPolicy: config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
+      cliPermissionMode: config.hermesRuntime?.cliPermissionMode ?? "guarded",
+      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+      hermesInstallSource: config.hermesRuntime?.installSource,
+    };
+  }
+
+  private async listSessionMappings() {
+    const root = this.appPaths.sessionsRootDir();
+    const sessions = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const mappings = await Promise.all(
+      sessions
+        .filter((entry) => entry.isDirectory())
+        .map(async (entry) => {
+          const mappingPath = path.join(root, entry.name, "hermes-cli-session.json");
+          const raw = await fs.readFile(mappingPath, "utf8").catch(() => "");
+          if (!raw) return undefined;
+          try {
+            const parsed = JSON.parse(raw) as Record<string, unknown>;
+            return {
+              sessionId: entry.name,
+              mappingPath,
+              ...parsed,
+            };
+          } catch {
+            return {
+              sessionId: entry.name,
+              mappingPath,
+              parseError: true,
+            };
+          }
+        }),
+    );
+    return mappings.filter(Boolean);
   }
 }

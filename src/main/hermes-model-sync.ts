@@ -99,6 +99,9 @@ function toHermesProvider(provider: ProviderId) {
     // Hermes routes plain OpenAI-compatible API keys through its OpenRouter/custom-compatible path.
     return "openrouter";
   }
+  if (provider === "copilot_acp") {
+    return "copilot-acp";
+  }
   return provider;
 }
 

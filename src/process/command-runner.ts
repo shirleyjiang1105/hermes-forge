@@ -4,6 +4,7 @@ export type CommandResult = {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  diagnostics?: CommandDiagnostics;
 };
 
 export type CommandLineEvent =
@@ -17,6 +18,27 @@ export type CommandOptions = {
   timeoutMs?: number;
   signal?: AbortSignal;
   detached?: boolean;
+  commandId?: string;
+  runtimeKind?: "windows" | "wsl";
+};
+
+export type CommandDiagnostics = {
+  commandId: string;
+  binary: string;
+  argv: string[];
+  cwd: string;
+  runtimeKind?: "windows" | "wsl";
+  envRedacted?: Record<string, string>;
+  timeoutMs?: number;
+  startedAt: string;
+  endedAt: string;
+  durationMs: number;
+  exitCode: number | null;
+  signal?: string;
+  spawnError?: string;
+  stderrPreview: string;
+  stdoutPreview: string;
+  category: "ok" | "spawn_error" | "timeout" | "cancelled" | "non_zero_exit";
 };
 
 const activeChildren = new Set<ChildProcessWithoutNullStreams>();
@@ -39,7 +61,16 @@ function killProcessTree(child: ChildProcessWithoutNullStreams) {
 }
 
 export function runCommand(command: string, args: string[], options: CommandOptions): Promise<CommandResult> {
+  return executeCommand(command, args, options);
+}
+
+export function executeCommand(command: string, args: string[], options: CommandOptions): Promise<CommandResult> {
   return new Promise((resolve) => {
+    const startedAtMs = Date.now();
+    const startedAt = new Date(startedAtMs).toISOString();
+    let timedOut = false;
+    let cancelled = false;
+    let spawnError: string | undefined;
     const child = spawn(command, args, {
       cwd: options.cwd,
       env: { ...process.env, ...options.env },
@@ -53,11 +84,15 @@ export function runCommand(command: string, args: string[], options: CommandOpti
 
     const timer = options.timeoutMs
       ? setTimeout(() => {
+          timedOut = true;
           killProcessTree(child);
         }, options.timeoutMs)
       : undefined;
 
-    const abort = () => killProcessTree(child);
+    const abort = () => {
+      cancelled = true;
+      killProcessTree(child);
+    };
     options.signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -67,6 +102,7 @@ export function runCommand(command: string, args: string[], options: CommandOpti
       stderr += chunk.toString("utf8");
     });
     child.on("error", (error) => {
+      spawnError = error.message;
       stderr += error.message;
     });
     child.on("close", (exitCode) => {
@@ -75,7 +111,34 @@ export function runCommand(command: string, args: string[], options: CommandOpti
       }
       activeChildren.delete(child);
       options.signal?.removeEventListener("abort", abort);
-      resolve({ exitCode, stdout, stderr });
+      const endedAtMs = Date.now();
+      const diagnostics: CommandDiagnostics = {
+        commandId: options.commandId ?? `${command}-${startedAtMs}`,
+        binary: command,
+        argv: [...args],
+        cwd: options.cwd,
+        runtimeKind: options.runtimeKind,
+        envRedacted: redactEnv(options.env),
+        timeoutMs: options.timeoutMs,
+        startedAt,
+        endedAt: new Date(endedAtMs).toISOString(),
+        durationMs: endedAtMs - startedAtMs,
+        exitCode,
+        signal: timedOut ? "timeout" : cancelled ? "abort" : undefined,
+        spawnError,
+        stderrPreview: preview(stderr),
+        stdoutPreview: preview(stdout),
+        category: spawnError
+          ? "spawn_error"
+          : timedOut
+            ? "timeout"
+            : cancelled
+              ? "cancelled"
+              : exitCode === 0
+                ? "ok"
+                : "non_zero_exit",
+      };
+      resolve({ exitCode, stdout, stderr, diagnostics });
     });
   });
 }
@@ -169,4 +232,21 @@ export async function* streamCommand(
   if (timedOut) {
     return;
   }
+}
+
+function preview(value: string) {
+  const text = value.trim();
+  return text.length > 4000 ? `${text.slice(0, 4000)}\n...[truncated]` : text;
+}
+
+function redactEnv(env: NodeJS.ProcessEnv | undefined) {
+  if (!env) return undefined;
+  const redacted: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (typeof value !== "string") continue;
+    redacted[key] = /(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|KEY)/i.test(key)
+      ? "<redacted>"
+      : value;
+  }
+  return redacted;
 }

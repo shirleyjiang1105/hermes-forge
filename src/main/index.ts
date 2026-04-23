@@ -16,6 +16,7 @@ import { WorkSessionService } from "./work-session-service";
 import { HermesCliAdapter } from "../adapters/hermes/hermes-cli-adapter";
 import { SecretVault } from "../auth/secret-vault";
 import { DiagnosticsService } from "../diagnostics/diagnostics-service";
+import { buildPermissionOverview } from "./permission-overview-service";
 import { FileTreeService } from "../file-manager/file-tree-service";
 import { HermesConnectorService } from "./hermes-connector-service";
 import { HermesModelSyncService } from "./hermes-model-sync";
@@ -35,6 +36,21 @@ import { ClientAutoUpdateService } from "../updater/client-auto-update-service";
 import { UpdateService } from "../updater/update-service";
 import { killActiveCommands, runCommand } from "../process/command-runner";
 import { resolveEnginePermissions } from "../shared/types";
+import { NativeRuntimeAdapter } from "../runtime/native-runtime-adapter";
+import { RuntimeProbeService } from "../runtime/runtime-probe-service";
+import { RuntimeResolver as HermesRuntimeResolver } from "../runtime/runtime-resolver";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import { ShutdownPipeline } from "../runtime/runtime-diagnostics";
+import { WslRuntimeAdapter } from "../runtime/wsl-runtime-adapter";
+import { InstallOrchestrator } from "../install/install-orchestrator";
+import { ManagedWslInstallStrategy } from "../install/managed-wsl-install-strategy";
+import { NativeInstallStrategy } from "../install/native-install-strategy";
+import { WslDoctorService } from "../install/wsl-doctor-service";
+import { WslDoctorReportService } from "../install/wsl-doctor-report-service";
+import { WslDistroService } from "../install/wsl-distro-service";
+import { WslHermesInstallService } from "../install/wsl-hermes-install-service";
+import { WslRepairService } from "../install/wsl-repair-service";
+import { ManagedWslInstallerService } from "../install/managed-wsl-installer-service";
 
 const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR;
 const isPortable = Boolean(portableRoot);
@@ -43,27 +59,13 @@ const isSystemAuditMode = process.argv.includes("--system-audit") || process.env
 
 let mainWindow: BrowserWindow | undefined;
 let windowsControlBridge: WindowsControlBridge | undefined;
-
-async function resolveWindowsHostForWsl(distro?: string) {
-  const args = [
-    ...(distro?.trim() ? ["-d", distro.trim()] : []),
-    "ip",
-    "route",
-    "show",
-    "default",
-  ];
-  const result = await runCommand("wsl.exe", args, {
-    cwd: process.cwd(),
-    timeoutMs: 5000,
-  }).catch(() => undefined);
-  const host = parseWslHost(result?.stdout ?? "");
-  return host || "127.0.0.1";
-}
+let shutdownStarted = false;
 
 async function syncWindowsBridgeConfig(input: {
   appPaths: AppPaths;
   configStore: RuntimeConfigStore;
   bridge?: WindowsControlBridge;
+  runtimeAdapterFactory: RuntimeAdapterFactory;
 }) {
   const config = await input.configStore.read();
   const runtime = {
@@ -79,18 +81,12 @@ async function syncWindowsBridgeConfig(input: {
   if (bridge) {
     await bridge.start();
   }
-  const host = runtime.mode === "wsl" ? await resolveWindowsHostForWsl(runtime.distro) : "127.0.0.1";
+  const host = await input.runtimeAdapterFactory(runtime).getBridgeAccessHost();
   return syncHermesWindowsMcpConfig({
     runtime,
     hermesHome: input.appPaths.hermesDir(),
     bridge: bridge?.accessForHost(host),
   });
-}
-
-function parseWslHost(stdout: string) {
-  const first = stdout.split(/\r?\n/).map((line) => line.trim()).find((line) => line.includes(" via ")) ?? stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? "";
-  const match = first.match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/);
-  return match?.[0];
 }
 
 function scheduleStartupWarmup(input: {
@@ -161,6 +157,13 @@ app.whenReady().then(async () => {
   await appPaths.ensureBaseLayout();
 
   const configStore = new RuntimeConfigStore(appPaths.runtimeConfigPath());
+  const resolveHermesRoot = async () => {
+    const config = await configStore.read();
+    return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
+      ? config.hermesRuntime.managedRoot.trim()
+      : configStore.getEnginePath("hermes");
+  };
+  const hermesRuntimeResolver = new HermesRuntimeResolver(appPaths, resolveHermesRoot);
   const approvalService = new ApprovalService(appPaths);
   const budgeter = new MemoryBudgeter();
   const autoHotkeyService = new AutoHotkeyService();
@@ -185,17 +188,23 @@ app.whenReady().then(async () => {
     windowsToolExecutor,
   );
   await windowsControlBridge.start();
+  const runtimeProbeService = new RuntimeProbeService(configStore, hermesRuntimeResolver, windowsControlBridge, fetch);
+  const runtimeAdapterFactory: RuntimeAdapterFactory = (runtime) =>
+    runtime.mode === "wsl"
+      ? new WslRuntimeAdapter(runtime, hermesRuntimeResolver, runtimeProbeService)
+      : new NativeRuntimeAdapter(runtime, hermesRuntimeResolver, runtimeProbeService);
   const hermesWindowsBridgeTestService = new HermesWindowsBridgeTestService(
     windowsControlBridge,
     () => configStore.read(),
     fetch,
     runCommand,
     windowsToolExecutor,
+    runtimeProbeService,
   );
   const hermes = new HermesCliAdapter(
     appPaths,
     budgeter,
-    () => configStore.getEnginePath("hermes"),
+    resolveHermesRoot,
     () => configStore.read(),
     async (distro?: string) => {
       const config = await configStore.read();
@@ -204,11 +213,17 @@ app.whenReady().then(async () => {
         return undefined;
       }
       await windowsControlBridge?.start();
-      const host = config.hermesRuntime?.mode === "wsl"
-        ? await resolveWindowsHostForWsl(distro)
-        : "127.0.0.1";
+      const runtime = hermesRuntimeResolver.runtimeFromConfig({
+        ...config,
+        hermesRuntime: {
+          ...(config.hermesRuntime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" }),
+          distro: distro ?? config.hermesRuntime?.distro,
+        },
+      });
+      const host = await runtimeAdapterFactory(runtime).getBridgeAccessHost();
       return windowsControlBridge?.accessForHost(host);
     },
+    runtimeAdapterFactory,
   );
   const memoryBroker = new MemoryBroker(budgeter);
   const sessionLog = new SessionLog(appPaths);
@@ -228,7 +243,7 @@ app.whenReady().then(async () => {
   await hermesModelSyncService.syncRuntimeConfig(await configStore.read()).catch((error) => {
     console.warn("[Hermes Forge] Model sync during startup failed:", error);
   });
-  await syncWindowsBridgeConfig({ appPaths, configStore, bridge: windowsControlBridge }).catch((error) => {
+  await syncWindowsBridgeConfig({ appPaths, configStore, bridge: windowsControlBridge, runtimeAdapterFactory }).catch((error) => {
     console.warn("[Hermes Forge] Windows bridge sync during startup failed:", error);
   });
   const hermesSystemAuditService = new HermesSystemAuditService(
@@ -237,8 +252,17 @@ app.whenReady().then(async () => {
     runtimeEnvResolver,
     () => configStore.read(),
   );
-  const engineProbeService = new EngineProbeService(appPaths, hermes, configStore);
-  const setupService = new SetupService(appPaths, hermes, configStore, secretVault);
+  const engineProbeService = new EngineProbeService(appPaths, hermes, configStore, runtimeProbeService);
+  const nativeInstallStrategy = new NativeInstallStrategy(appPaths, hermes, configStore, runtimeProbeService, runtimeAdapterFactory);
+  const wslDoctorService = new WslDoctorService(configStore, runtimeProbeService, runtimeAdapterFactory);
+  const wslRepairService = new WslRepairService(configStore, runtimeProbeService, runtimeAdapterFactory, wslDoctorService);
+  const wslDistroService = new WslDistroService(appPaths, configStore, runtimeProbeService, runtimeAdapterFactory, wslDoctorService);
+  const wslHermesInstallService = new WslHermesInstallService(appPaths, configStore, runtimeProbeService, runtimeAdapterFactory, wslDoctorService);
+  const managedWslInstallerService = new ManagedWslInstallerService(appPaths, wslDoctorService, wslRepairService, wslDistroService, wslHermesInstallService);
+  const wslDoctorReportService = new WslDoctorReportService(appPaths, configStore, wslDoctorService, wslRepairService, managedWslInstallerService);
+  const managedWslInstallStrategy = new ManagedWslInstallStrategy(managedWslInstallerService);
+  const installOrchestrator = new InstallOrchestrator(configStore, nativeInstallStrategy, managedWslInstallStrategy);
+  const setupService = new SetupService(appPaths, hermes, configStore, secretVault, runtimeProbeService, runtimeAdapterFactory, installOrchestrator);
   const diagnosticsService = new DiagnosticsService(
     appPaths,
     setupService,
@@ -254,13 +278,31 @@ app.whenReady().then(async () => {
       portable: isPortable,
       rendererMode: isDevMode ? "dev" : "built",
     }),
+    runtimeProbeService,
+    wslDoctorReportService,
+    async () => buildPermissionOverview({
+      config: await configStore.read(),
+      bridge: windowsControlBridge?.status() ?? { running: false, capabilities: [] },
+      appPaths,
+      resolveHermesRoot,
+      runtimeAdapterFactory,
+    }),
+    async () => managedWslInstallerService.getLastInstallReport(),
   );
-  const hermesWebUiService = new HermesWebUiService(appPaths, () => configStore.getEnginePath("hermes"));
+  const hermesWebUiService = new HermesWebUiService(
+    appPaths,
+    resolveHermesRoot,
+    runtimeAdapterFactory,
+    () => configStore.read(),
+  );
   const hermesConnectorService = new HermesConnectorService(
     appPaths,
     secretVault,
-    () => configStore.getEnginePath("hermes"),
+    resolveHermesRoot,
     async () => (await configStore.read()).hermesRuntime?.pythonCommand,
+    runtimeProbeService,
+    runtimeAdapterFactory,
+    () => configStore.read(),
   );
   const hermesToolLoopRunner = new HermesToolLoopRunner(hermes, windowsToolExecutor);
   const preflightService = new TaskPreflightService(
@@ -269,6 +311,7 @@ app.whenReady().then(async () => {
     hermes,
     configStore,
     secretVault,
+    runtimeAdapterFactory,
   );
 
   if (isSystemAuditMode) {
@@ -375,6 +418,8 @@ app.whenReady().then(async () => {
     hermesWindowsBridgeTestService,
     hermesSystemAuditService,
     approvalService,
+    runtimeAdapterFactory,
+    managedWslInstallerService,
     clientInfo: () => ({
       appVersion: app.getVersion(),
       userDataPath,
@@ -399,12 +444,27 @@ app.whenReady().then(async () => {
     }
   });
 
-  app.on("before-quit", () => {
-    killActiveCommands();
-    void hermes.stop("app-shutdown");
-    void windowsControlBridge?.stop();
-    void hermesConnectorService.shutdown();
-    void modelRuntimeProxyService.shutdown();
+  const shutdownPipeline = new ShutdownPipeline();
+  app.on("before-quit", (event) => {
+    if (shutdownStarted) {
+      return;
+    }
+    shutdownStarted = true;
+    event.preventDefault();
+    void shutdownPipeline.run([
+      { id: "task-runner-drain", timeoutMs: 5000, run: () => taskRunner.shutdown("app-shutdown") },
+      { id: "active-command-kill", timeoutMs: 3000, run: async () => killActiveCommands() },
+      { id: "hermes-stop", timeoutMs: 5000, run: () => hermes.stop("app-shutdown") },
+      { id: "bridge-stop", timeoutMs: 5000, run: async () => { await windowsControlBridge?.stop(); } },
+      { id: "connector-shutdown", timeoutMs: 8000, run: () => hermesConnectorService.shutdown() },
+      { id: "model-runtime-proxy-shutdown", timeoutMs: 5000, run: () => modelRuntimeProxyService.shutdown() },
+    ]).then((report) => {
+      console.info("[Hermes Forge] Shutdown pipeline completed:", report);
+      app.exit(0);
+    }).catch((error) => {
+      console.warn("[Hermes Forge] Shutdown pipeline crashed:", error);
+      app.exit(1);
+    });
   });
 });
 

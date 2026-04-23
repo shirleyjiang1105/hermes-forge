@@ -1,5 +1,59 @@
 # Release Notes
 
+## Hermes Forge v0.1.10
+
+发布日期：2026-04-23
+
+这是一次面向 WSL 主链路和发布可控性的收口版本。重点是让桌面端回到“壳与控制层”，由 WSL 内的 Hermes CLI 负责会话延续、运行上下文和能力协商；同时，Forge 现在可以绑定并发布固定的 Hermes fork / commit，不再依赖官方上游版本线。
+
+### 新增内容
+
+- WSL Hermes CLI 主链路收口：
+  - Forge session 与 Hermes CLI session 建立持久映射，并优先使用 `--resume`。
+  - 新增原生 Launch Metadata sidecar，WSL `--query` 回到用户自然输入。
+  - Hermes CLI 新增 `capabilities --json` 和 `--launch-metadata` 能力协商。
+- 固定 Hermes 受管依赖：
+  - Managed WSL installer 支持配置 Hermes 安装源：`repo url / branch / commit / source label`。
+  - 当前版本默认使用 pinned fork source，并优先按 commit 安装，而不是仅跟随 branch。
+  - 安装完成后会记录实际安装的 Hermes source、commit、version 和 capability gate 结果。
+- 权限模型收口：
+  - 新增 `permissionPolicy`：`passthrough` / `bridge_guarded` / `restricted_workspace`。
+  - `restricted_workspace` 当前无法真实 WSL 隔离时会直接阻断，不再伪装可用。
+  - 新增后端权威 Permission Overview，并统一设置页、聊天输入预检条和 Agent 面板的展示口径。
+- Managed WSL 链路增强：
+  - WSL ready 时新配置默认优先 WSL；不可用时仍回退 Windows。
+  - 设置页 WSL 模式下提供 Managed WSL Plan / Repair / Install / Last Report 入口。
+- 模型接入整改：
+  - 接入流程改为先选 provider family，再选或填写模型。
+  - 区分 API Key、OAuth/本地凭据、Custom Endpoint 三类。
+  - 保存前后执行 health check：auth、模型发现、最小 chat、agent 能力、WSL 可达性。
+  - 模型能力分层为 provider-only、辅助模型、主 agent 模型，避免弱工具模型误设为主模型。
+
+### 修复内容
+
+- 修复 WSL 普通任务默认硬塞 `--yolo` 的问题，默认改为 guarded。
+- 移除 WSL 路径下 memory / history / USER / MEMORY / 附件正文 / context bundle 的桌面端 prompt 注入。
+- 修复桌面端通过解析 `chat --help` 判断 CLI 能力的不稳定做法，改为正式 capability negotiation。
+- 修复 Forge 发布依赖 Hermes 官方后续版本的问题，改为支持固定 Hermes fork / commit 作为受管依赖。
+- 修复 custom endpoint 在 WSL 中无法访问 Windows localhost 时缺少明确诊断的问题。
+- 修复 provider/key/model 容易错配时反馈过于模糊的问题。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过。
+- `npm run package:portable` 通过。
+- 当前受管 Hermes 源已固定为 pinned fork / commit，并纳入 installer report 与 diagnostics。
+- RC Smoke Matrix 覆盖：
+  - WSL + bridge_guarded + guarded
+  - WSL + passthrough + guarded
+  - WSL + bridge_guarded + yolo
+  - WSL + restricted_workspace blocked
+  - CLI capability gate blocked
+  - Bridge capability 未报告
+  - sessionMode fresh / resumed / degraded
+
 ## Hermes Forge v0.1.9
 
 发布日期：2026-04-23

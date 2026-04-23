@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { runCommand } from "../process/command-runner";
 import { runtimeConfigSchema } from "../shared/schemas";
 import { defaultEnginePermissions } from "../shared/types";
 import type { EngineId, RuntimeConfig } from "../shared/types";
@@ -15,6 +16,15 @@ const hermesPathCandidates = [
 const ENGINE_PATH_CANDIDATES: Record<EngineId, string[]> = {
   hermes: hermesPathCandidates,
 };
+
+const DEFAULT_PINNED_HERMES_SOURCE = {
+  repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
+  branch: "codex/launch-metadata-capabilities",
+  commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+  sourceLabel: "pinned" as const,
+};
+
+let preferredRuntimeCache: Promise<NonNullable<RuntimeConfig["hermesRuntime"]>> | undefined;
 
 const defaultConfig: RuntimeConfig = {
   defaultModelProfileId: "default-local",
@@ -61,7 +71,11 @@ const defaultConfig: RuntimeConfig = {
   hermesRuntime: {
     mode: "windows",
     pythonCommand: "python3",
+    managedRoot: undefined,
     windowsAgentMode: "hermes_native",
+    cliPermissionMode: "guarded",
+    permissionPolicy: "bridge_guarded",
+    installSource: DEFAULT_PINNED_HERMES_SOURCE,
   },
 };
 
@@ -71,14 +85,26 @@ export class RuntimeConfigStore {
   async read(): Promise<RuntimeConfig> {
     const raw = await fs.readFile(this.configPath, "utf8").catch(() => undefined);
     if (!raw) {
-      await this.write(defaultConfig);
-      return defaultConfig;
+      const config = await defaultConfigWithPreferredRuntime();
+      await this.write(config);
+      return config;
     }
-    const parsed = runtimeConfigSchema.safeParse(JSON.parse(raw));
+    const parsedJson = JSON.parse(raw) as RuntimeConfig & { hermesRuntime?: RuntimeConfig["hermesRuntime"] };
+    const parsed = runtimeConfigSchema.safeParse(parsedJson);
     if (!parsed.success) {
-      return defaultConfig;
+      return await defaultConfigWithPreferredRuntime();
     }
-    return parsed.data as RuntimeConfig;
+    const config = parsed.data as RuntimeConfig;
+    if (!parsedJson.hermesRuntime?.mode) {
+      return {
+        ...config,
+        hermesRuntime: {
+          ...(await preferredHermesRuntime()),
+          ...(config.hermesRuntime ?? {}),
+        },
+      };
+    }
+    return config;
   }
 
   async write(config: RuntimeConfig) {
@@ -109,4 +135,52 @@ export class RuntimeConfigStore {
     }
     return undefined;
   }
+}
+
+async function defaultConfigWithPreferredRuntime(): Promise<RuntimeConfig> {
+  return {
+    ...defaultConfig,
+    hermesRuntime: await preferredHermesRuntime(),
+  };
+}
+
+async function preferredHermesRuntime(): Promise<NonNullable<RuntimeConfig["hermesRuntime"]>> {
+  preferredRuntimeCache ??= detectPreferredHermesRuntime();
+  return await preferredRuntimeCache;
+}
+
+export function __resetPreferredHermesRuntimeCacheForTests() {
+  preferredRuntimeCache = undefined;
+}
+
+async function detectPreferredHermesRuntime(): Promise<NonNullable<RuntimeConfig["hermesRuntime"]>> {
+  if (process.platform !== "win32") {
+    return defaultConfig.hermesRuntime!;
+  }
+  const status = await runCommand("wsl.exe", ["--status"], {
+    cwd: process.cwd(),
+    timeoutMs: 8000,
+    runtimeKind: "windows",
+    commandId: "runtime-config.prefer-wsl.status",
+  }).catch(() => undefined);
+  const list = await runCommand("wsl.exe", ["-l", "-q"], {
+    cwd: process.cwd(),
+    timeoutMs: 8000,
+    runtimeKind: "windows",
+    commandId: "runtime-config.prefer-wsl.list",
+  }).catch(() => undefined);
+  const hasStatus = status?.exitCode === 0;
+  const distros = (list?.stdout ?? "")
+    .replace(/\0/g, "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (hasStatus && distros.length > 0) {
+    return {
+      ...defaultConfig.hermesRuntime!,
+      mode: "wsl",
+      distro: defaultConfig.hermesRuntime?.distro ?? distros[0],
+    };
+  }
+  return defaultConfig.hermesRuntime!;
 }

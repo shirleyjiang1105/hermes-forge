@@ -105,12 +105,25 @@ export class TaskRunner {
     };
     await this.publishStep(workspaceId, workSessionId, taskRunId, actualEngine, "stage-context-entered", false, "已进入 Hermes 上下文准备阶段。");
     const contextAt = Date.now();
-    const [runtimeEnv, contextBundle, runtimeConfig] = await Promise.all([
+    const [runtimeEnv, runtimeConfig] = await Promise.all([
       this.runtimeEnvResolver.resolve(input.modelProfileId),
-      this.memoryBroker.prepareContextBundle(contextRequest),
       this.runtimeEnvResolver.readConfig(),
     ]);
-    await this.publishStep(workspaceId, workSessionId, taskRunId, actualEngine, "context-complete", true, `Hermes 运行环境和 MEMORY.md 上下文已准备，耗时 ${Date.now() - contextAt}ms。`);
+    const runtimeMode = runtimeConfig.hermesRuntime?.mode ?? "windows";
+    const contextBundle = runtimeMode === "wsl"
+      ? this.cliOwnedContextBundle(workspaceId)
+      : await this.memoryBroker.prepareContextBundle(contextRequest);
+    await this.publishStep(
+      workspaceId,
+      workSessionId,
+      taskRunId,
+      actualEngine,
+      "context-complete",
+      true,
+      runtimeMode === "wsl"
+        ? `Hermes WSL CLI 将自行处理 session/memory，上下文预注入已关闭，耗时 ${Date.now() - contextAt}ms。`
+        : `Hermes 运行环境和 MEMORY.md 上下文已准备，耗时 ${Date.now() - contextAt}ms。`,
+    );
     this.metrics.get(taskRunId)!.contextMs = Date.now() - contextAt;
 
     const permissions = resolveEnginePermissions(runtimeConfig, actualEngine);
@@ -190,7 +203,7 @@ export class TaskRunner {
     const runRequest: EngineRunRequest = {
       sessionId,
       conversationId: workSessionId,
-      conversationHistory: input.conversationHistory ?? [],
+      conversationHistory: runtimeMode === "wsl" ? [] : input.conversationHistory ?? [],
       workspaceId,
       workspacePath: targetPath,
       userInput: input.userInput,
@@ -205,7 +218,7 @@ export class TaskRunner {
     };
 
     const windowsAgentMode = runtimeConfig.hermesRuntime?.windowsAgentMode ?? "hermes_native";
-    if (windowsAgentMode === "host_tool_loop" && this.hermesToolLoopRunner?.canRun()) {
+    if (runtimeMode !== "wsl" && windowsAgentMode === "host_tool_loop" && this.hermesToolLoopRunner?.canRun()) {
       void this.consumeToolLoopRun(runRequest, controller, workSessionId);
       await this.publishStep(workspaceId, workSessionId, sessionId, actualEngine, "tool-loop-dispatched", true, `任务已交给宿主 Hermes Tool Loop fallback，启动链路总耗时 ${Date.now() - startAt}ms。`);
       return {
@@ -349,6 +362,9 @@ export class TaskRunner {
     }
 
     const runtimeConfig = await this.runtimeEnvResolver.readConfig();
+    if (runtimeConfig.hermesRuntime?.mode === "wsl") {
+      return undefined;
+    }
     const permissions = resolveEnginePermissions(runtimeConfig, meta.actualEngine);
     const contextBundle = this.emptyContextBundle(meta.workspaceId);
     const runtimeEnv = this.nativeRuntimeEnv(runtimeConfig, input.modelProfileId);
@@ -425,6 +441,22 @@ export class TaskRunner {
     const createdAt = now();
     return {
       id: `windows-native-${crypto.randomUUID()}`,
+      workspaceId,
+      policy: "isolated",
+      readonly: true,
+      maxCharacters: 0,
+      usedCharacters: 0,
+      sources: [],
+      summary: "",
+      createdAt,
+      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
+    };
+  }
+
+  private cliOwnedContextBundle(workspaceId: string): ContextBundle {
+    const createdAt = now();
+    return {
+      id: `hermes-cli-owned-${crypto.randomUUID()}`,
       workspaceId,
       policy: "isolated",
       readonly: true,
@@ -531,6 +563,22 @@ export class TaskRunner {
       return true;
     }
     return false;
+  }
+
+  async shutdown(reason = "shutdown", timeoutMs = 5000) {
+    for (const [sessionId, controller] of this.running) {
+      console.info("[Hermes Forge] Aborting active task during shutdown:", { sessionId, reason });
+      controller.abort();
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (this.running.size > 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    if (this.running.size > 0) {
+      const residual = [...this.running.keys()];
+      this.running.clear();
+      throw new Error(`TaskRunner shutdown timed out; residual tasks: ${residual.join(", ")}`);
+    }
   }
 
   private snapshotMode(input: StartTaskInput): "scoped" | "full" | "manifest" {
