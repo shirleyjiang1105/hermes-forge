@@ -431,7 +431,11 @@ export class WslRepairService {
       : undefined;
     const pipAvailable = pip?.exitCode === 0;
     const venv = pythonAvailable
-      ? await this.runInDistro(runtime, "python3 -m venv --help >/dev/null", "repair.wsl.probe.venv")
+      ? await this.runInDistro(
+          runtime,
+          "tmpdir=$(mktemp -d 2>/dev/null || mktemp -d -t hermes-venv-check) && python3 -m venv \"$tmpdir/test-venv\" >/dev/null 2>&1 && [ -x \"$tmpdir/test-venv/bin/python\" ]; status=$?; rm -rf \"$tmpdir\"; exit $status",
+          "repair.wsl.probe.venv",
+        )
       : undefined;
     const venvAvailable = venv?.exitCode === 0;
 
@@ -471,9 +475,9 @@ export class WslRepairService {
         status: venvAvailable ? "ok" : !pythonAvailable ? "manual_action_required" : support.aptAvailable && support.privilegeMode !== "none" ? "repair_planned" : "manual_action_required",
         available: Boolean(venvAvailable),
         code: venvAvailable ? "ok" : "venv_unavailable",
-        summary: venvAvailable ? "WSL 内 venv 模块可用。" : "WSL 内 venv 模块不可用。",
+        summary: venvAvailable ? "WSL 内可成功创建 Python 虚拟环境。" : "WSL 内无法成功创建 Python 虚拟环境。",
         detail: (venv?.stdout || venv?.stderr || (pythonAvailable ? "" : "python3 不可用，无法继续检测 venv。")).trim(),
-        fixHint: venvAvailable ? undefined : "可通过 Managed WSL repair 显式安装 python3-venv；若 python3 本身缺失，请先修复 python3。",
+        fixHint: venvAvailable ? undefined : "可通过 Managed WSL repair 显式安装 python3-venv；若已安装仍失败，请检查 ensurepip/系统 Python 包完整性。",
         debugContext: { diagnostics: venv?.diagnostics, pythonAvailable },
       },
     ];

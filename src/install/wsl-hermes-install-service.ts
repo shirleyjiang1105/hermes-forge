@@ -39,6 +39,7 @@ type RepoEnsureResult = {
 };
 
 type VenvEnsureResult = {
+  ok: boolean;
   python: string;
   venvPath?: string;
   step: ReturnType<typeof installStep>;
@@ -241,6 +242,37 @@ export class WslHermesInstallService {
     const venv = await this.ensureVirtualEnv(runtime, hermesRoot, basePython);
     steps.push(venv.step);
     venvStatus = venv.venvStatus;
+    if (!venv.ok) {
+      failedCommand = venv.failedCommand;
+      return this.finalize({
+        requestedAt,
+        distroName: runtime.distro ?? "unknown",
+        hermesRoot,
+        pythonResolved: basePython,
+        venvPath: venv.venvPath,
+        repoReady: true,
+        installExecuted: false,
+        healthCheckPassed: false,
+        resumedFromStage,
+        lastSuccessfulStage,
+        repoStatus,
+        venvStatus,
+        bridgeStatus: report.runtimeProbe.bridge,
+        failedCommand,
+        failureArtifacts: this.failureArtifacts({
+          failedCommand,
+          distroName: runtime.distro,
+          managedRoot: hermesRoot,
+          repoStatus,
+          venvStatus,
+          bridgeStatus: report.runtimeProbe.bridge,
+          lastSuccessfulStage,
+          recommendedRecoveryAction: "run_execute_repair",
+        }),
+        steps,
+        debugContext: { repoStatus, venvStatus },
+      });
+    }
     const installPython = venv.python ?? basePython;
     lastSuccessfulStage = "ensure_venv";
 
@@ -548,6 +580,7 @@ export class WslHermesInstallService {
     const exists = await this.runInDistro(runtime, `[ -x ${shellQuote(`${venvPath}/bin/python`)} ] && echo yes || echo no`, "install.wsl.check-venv");
     if ((exists.stdout || "").trim() === "yes") {
       return {
+        ok: true,
         venvPath,
         python: `${venvPath}/bin/python`,
         venvStatus: {
@@ -568,26 +601,28 @@ export class WslHermesInstallService {
     const create = await this.runInDistro(runtime, `${python} -m venv ${shellQuote(venvPath)}`, "install.wsl.create-venv");
     if (create.exitCode !== 0) {
       return {
-        venvPath: undefined,
+        ok: false,
+        venvPath,
         python,
         venvStatus: {
-          state: "skipped",
-          path: undefined,
+          state: "failed",
+          path: venvPath,
           detail: create.stderr || create.stdout,
         },
         failedCommand: commandSummary(create),
         step: installStep({
           phase: "installing_dependencies",
           step: "ensure-venv",
-          status: "skipped",
-          code: "venv_create_skipped",
-          summary: "未创建虚拟环境，将继续使用系统 Python。",
+          status: "failed",
+          code: "venv_unavailable",
+          summary: "创建 Python 虚拟环境失败，已停止后续 pip 安装。",
           detail: create.stderr || create.stdout,
-          fixHint: "如需隔离环境，可在后续手动创建 venv；本轮继续尝试系统 python。",
+          fixHint: "请先修复 python3-venv 或 ensurepip 环境，再重新执行 install；当前不会回退到系统 Python。",
         }),
       };
     }
     return {
+      ok: true,
       venvPath,
       python: `${venvPath}/bin/python`,
       venvStatus: {

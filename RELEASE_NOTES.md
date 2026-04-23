@@ -1,5 +1,26 @@
 # Release Notes
 
+## Hermes Forge v0.1.11
+
+发布日期：2026-04-23
+
+这是一次面向 Managed WSL 安装稳定性的修复版本。重点是彻底解决 WSL 里 `pip install` 意外落到系统 Python、从而触发 `externally-managed-environment` 的问题，并让安装器界面对虚拟环境状态给出更可信的反馈。
+
+### 修复内容
+
+- 修复 Managed WSL 安装器在 `.venv` 创建失败后仍继续使用系统 Python 执行 `pip install -e .` 的问题。
+- 将 `.venv` 创建失败从“跳过继续”改为“立即阻断并提示修复”，避免再次触发 Debian/Ubuntu 的 PEP 668 保护。
+- 修复 WSL repair 对 `venv` 的预检过于宽松的问题，改为真实创建临时虚拟环境，而不是只检测 `python3 -m venv --help`。
+- 优化安装器面板中的 Venv 状态展示，优先反映实际安装阶段的虚拟环境结果，减少“顶部显示 ok、实际安装失败”的误导。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过。
+- `npm run package:portable` 通过。
+- 新增 `venv` 创建失败回归测试，确认安装流程会在 `pip install` 前阻断。
+
 ## Hermes Forge v0.1.10
 
 发布日期：2026-04-23

@@ -177,6 +177,12 @@ export function ManagedWslInstallerPanel(props: {
 }
 
 function MetricGrid(props: { report: ManagedWslInstallerReport }) {
+  const installedVenvStatus = props.report.lastHermesInstall?.venvStatus as
+    | { state?: string; path?: string; detail?: string }
+    | undefined;
+  const installedVenv = installedVenvStatus
+    ? `${installedVenvStatus.state ?? "unknown"} · ${installedVenvStatus.path ?? installedVenvStatus.detail ?? "unknown"}`
+    : `${props.report.venvStatus.status} · ${props.report.venvStatus.code}`;
   const items = [
     { label: "WSL 发行版", value: props.report.distroName ?? "unknown" },
     { label: "安装目录", value: props.report.managedRoot ?? "unknown" },
@@ -186,7 +192,7 @@ function MetricGrid(props: { report: ManagedWslInstallerReport }) {
     { label: "Python", value: `${props.report.pythonStatus.status} · ${props.report.pythonStatus.code}` },
     { label: "Git", value: `${props.report.gitStatus.status} · ${props.report.gitStatus.code}` },
     { label: "Pip", value: `${props.report.pipStatus.status} · ${props.report.pipStatus.code}` },
-    { label: "Venv", value: `${props.report.venvStatus.status} · ${props.report.venvStatus.code}` },
+    { label: "Venv", value: installedVenv },
   ];
   return (
     <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
