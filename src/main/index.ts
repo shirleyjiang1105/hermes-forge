@@ -2,6 +2,7 @@ import { app, BrowserWindow } from "electron";
 import path from "node:path";
 import { AppPaths } from "./app-paths";
 import { AutoHotkeyService } from "./autohotkey-service";
+import { resolveActiveHermesHome } from "./hermes-home";
 import { registerIpcHandlers } from "./ipc";
 import { RuntimeConfigStore } from "./runtime-config";
 import { RuntimeEnvResolver } from "./runtime-env-resolver";
@@ -82,9 +83,10 @@ async function syncWindowsBridgeConfig(input: {
     await bridge.start();
   }
   const host = await input.runtimeAdapterFactory(runtime).getBridgeAccessHost();
+  const hermesHome = await resolveActiveHermesHome(input.appPaths.hermesDir());
   return syncHermesWindowsMcpConfig({
     runtime,
-    hermesHome: input.appPaths.hermesDir(),
+    hermesHome,
     bridge: bridge?.accessForHost(host),
   });
 }

@@ -15,6 +15,11 @@ describe("StatusBar", () => {
 
   it("lights API and Hermes from real and fallback status sources", async () => {
     useAppStore.setState({
+      runtimeConfig: {
+        hermesRuntime: { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" },
+        modelProfiles: [],
+        updateSources: {},
+      } as any,
       clientInfo: {
         appVersion: "0.1.2",
         userDataPath: "D:/temp",
@@ -70,7 +75,7 @@ describe("StatusBar", () => {
     });
 
     expect(screen.getByRole("button", { name: "API 连接正常" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Hermes 已连接" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Hermes 已连接 · 当前运行：WSL" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Gateway 正在运行" })).toBeInTheDocument();
     expect(screen.getByTestId("status-light-api")).toHaveClass("hermes-status-light--ok");
     expect(screen.getByTestId("status-light-hermes")).toHaveClass("hermes-status-light--ok");

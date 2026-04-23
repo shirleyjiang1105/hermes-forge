@@ -51,7 +51,7 @@ describe("runtimeConfigSchema", () => {
       mode: "windows",
       pythonCommand: "python3",
       windowsAgentMode: "hermes_native",
-      cliPermissionMode: "guarded",
+      cliPermissionMode: "yolo",
       permissionPolicy: "bridge_guarded",
     });
   });

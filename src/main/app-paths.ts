@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { ensureHermesHomeLayout } from "./hermes-home";
 
 export class AppPaths {
   constructor(public readonly userDataPath: string) {}
@@ -78,12 +79,9 @@ export class AppPaths {
   }
 
   async ensureBaseLayout() {
-    await fs.mkdir(this.hermesDir(), { recursive: true });
-    await fs.mkdir(path.join(this.hermesDir(), "skills"), { recursive: true });
+    await ensureHermesHomeLayout(this.hermesDir());
     await fs.mkdir(this.vaultDir(), { recursive: true });
     await fs.mkdir(this.sessionsRootDir(), { recursive: true });
-    await this.ensureTextFile(path.join(this.hermesDir(), "USER.md"), "# USER\n\n");
-    await this.ensureTextFile(path.join(this.hermesDir(), "MEMORY.md"), "# MEMORY\n\n");
   }
 
   async ensureWorkspaceLayout(workspacePath: string) {
@@ -97,13 +95,5 @@ export class AppPaths {
       "utf8",
     );
     return workspaceId;
-  }
-
-  private async ensureTextFile(filePath: string, content: string) {
-    try {
-      await fs.access(filePath);
-    } catch {
-      await fs.writeFile(filePath, content, "utf8");
-    }
   }
 }

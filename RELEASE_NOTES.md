@@ -1,5 +1,59 @@
 # Release Notes
 
+## Hermes Forge v0.1.13
+
+发布日期：2026-04-23
+
+这是一次把“设置、WSL 主链路、记忆/技能目录、连接器状态和自动更新发布流程”一起收口的可交付版本。重点是让用户只面对一套主设置中心，而且默认更贴近真实开发使用方式：优先 WSL、默认自动放行命令，并把难懂的技术选项改成更容易理解的说明。
+
+### 新增内容
+
+- 主设置中心整合更多运行时能力：
+  - 现在可直接在主设置页控制 `Windows / WSL`、Windows 联动方式、文件访问保护、命令审批方式、WSL 发行版和 Python 命令。
+  - 工作台里的次级设置入口已改为统一跳转主设置中心，减少双入口混淆。
+- 主设置中心新增更直观的状态与诊断信息：
+  - 显示“当前正在使用：WSL / Windows”。
+  - 新增运行时概览、Windows 联动检查结果和一键诊断入口。
+
+### 修复内容
+
+- 修复知识库里的 `USER.md / MEMORY.md`、SkillsPanel 和 WSL Hermes 实际读取目录不一致的问题，统一到当前 active Hermes home。
+- 修复 diagnostics / memory status / permission overview 显示路径与 WSL Hermes 实际运行目录不一致的问题。
+- 修复 QQ Bot 因为没有 required 字段而被误判为“已配置”的问题；未填写任何配置时现在会正确显示为“快速配置”。
+- 修复 SkillsPanel 出错时没有反馈的问题，读取 / 保存 / 删除失败现在会明确提示原因。
+- 将设置页文案改成用户更容易理解的表达，不再直接暴露一堆难懂的技术术语。
+- 默认运行取向调整为：优先 WSL，默认 `yolo` 命令审批模式。
+- 延续自动更新发布链路修复：Windows 正式更新包仍只使用 NSIS，portable 独立文件名输出，避免覆盖 `latest.yml` 对应产物。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- WSL 记忆 / skills 路径一致性回归测试通过。
+- 微信 / QQ 连接器状态与交互回归测试通过。
+- 自动更新元数据与 NSIS 安装包一致性验证通过。
+
+## Hermes Forge v0.1.12
+
+发布日期：2026-04-23
+
+这是一次面向自动更新发布链路的修复版本。重点是修复 Windows 安装版与 portable 包在同一文件名下互相覆盖的问题，确保 GitHub release 中的 `latest.yml`、安装包和 blockmap 始终对应同一份 NSIS 更新包，使旧版本可以稳定通过“检测更新”升级到最新版本。
+
+### 修复内容
+
+- 修复 `package:win` 同时构建 NSIS 与 portable 时使用同名 exe、导致自动更新元数据与实际上传文件不一致的问题。
+- 将官方 Windows 更新发布链路收口为仅产出 NSIS 安装包，避免 `latest.yml` 指向被 portable 覆盖后的错误文件。
+- 将 `package:portable` 调整为独立文件名输出，避免与自动更新安装包互相覆盖。
+- 更新发布检查清单，明确 `package:win` 是自动更新正式发布入口，portable 仅作为单独的手动分发包。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过。
+- `npm run package:win` 通过。
+- 重新检查 `release/latest.yml` 与 `Hermes-Forge-0.1.12-x64.exe` 的文件名、大小和哈希来源保持一致。
+
 ## Hermes Forge v0.1.11
 
 发布日期：2026-04-23

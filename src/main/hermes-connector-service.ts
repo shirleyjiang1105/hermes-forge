@@ -1022,7 +1022,7 @@ export class HermesConnectorService {
     }
 
     const missingRequired = await this.missingRequired(platform, saved, envValues);
-    const configured = missingRequired.length === 0;
+    const configured = await this.hasConfigurationSignal(platform, saved, envValues) && missingRequired.length === 0;
     const status = connectorStatus(enabled, configured);
     const runtimeStatus = connectorRuntimeStatus(enabled, configured, gateway);
     return {
@@ -1115,6 +1115,33 @@ export class HermesConnectorService {
       if (!hasToken && !hasPassword) missing.push("accessToken");
     }
     return [...new Set(missing)];
+  }
+
+  private async hasConfigurationSignal(
+    platform: HermesConnectorPlatform,
+    saved: StoredPlatformConfig | undefined,
+    envValues: Record<string, string>,
+  ) {
+    for (const field of platform.fields) {
+      if (field.secret) {
+        const ref = saved?.secretRefs?.[field.key];
+        if ((ref && await this.secretVault.hasSecret(ref)) || Boolean(envValues[field.envVar]?.trim())) {
+          return true;
+        }
+        continue;
+      }
+      const savedValue = saved?.values?.[field.key];
+      if (field.type === "boolean") {
+        if (savedValue === true || parseBoolean(envValues[field.envVar])) {
+          return true;
+        }
+        continue;
+      }
+      if (String(savedValue ?? envValues[field.envVar] ?? "").trim()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private async runtimeContext(root: string): Promise<ConnectorRuntimeContext> {
@@ -1451,7 +1478,9 @@ function connectorRuntimeStatus(enabled: boolean, configured: boolean, gateway: 
 
 function statusMessage(status: HermesConnectorStatus, runtimeStatus: HermesConnectorConfig["runtimeStatus"], missing: string[]) {
   if (status === "disabled") return "已禁用，不会同步到 Hermes .env。";
-  if (status === "unconfigured") return `缺少必填配置：${missing.join("、")}`;
+  if (status === "unconfigured") {
+    return missing.length > 0 ? `缺少必填配置：${missing.join("、")}` : "尚未配置，点击快速配置开始接入。";
+  }
   if (runtimeStatus === "running") return "已配置，Gateway 正在运行。";
   if (runtimeStatus === "error") return "已配置，但 Gateway 最近报告错误。";
   return "已配置，等待同步或启动 Gateway。";

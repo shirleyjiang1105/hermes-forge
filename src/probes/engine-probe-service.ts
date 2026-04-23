@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import type { AppPaths } from "../main/app-paths";
+import { resolveActiveHermesHome } from "../main/hermes-home";
 import type { RuntimeConfigStore } from "../main/runtime-config";
 import type { EngineAdapter } from "../adapters/engine-adapter";
 import type { HermesProbe, HermesProbeSummary, MemoryStatus } from "../shared/types";
@@ -33,11 +33,12 @@ export class EngineProbeService {
     const runtimeProbe = await this.runtimeProbeService?.probe({ workspacePath }).catch(() => undefined);
     const cliExists = runtimeProbe?.hermesCliExists ?? await this.legacyCliExists(rootPath);
     const runtimeStatus = this.runtimeStatus(runtimeProbe, cliExists);
-    const memoryDir = path.join(os.homedir(), ".hermes", "memories");
+    const hermesHome = await resolveActiveHermesHome(this.appPaths.hermesDir());
+    const memoryDir = path.join(hermesHome, "memories");
     const userPath = path.join(memoryDir, "USER.md");
     const memoryPath = path.join(memoryDir, "MEMORY.md");
-    const skillCount = await this.countEntries(path.join(rootPath, "skills"));
-    const optionalSkillCount = await this.countEntries(path.join(rootPath, "optional-skills"));
+    const skillCount = await this.countEntries(path.join(hermesHome, "skills"));
+    const optionalSkillCount = await this.countEntries(path.join(hermesHome, "optional-skills"));
     const toolCount = await this.countEntries(path.join(rootPath, "tools"));
     const acpAdapter = await this.exists(path.join(rootPath, "acp_adapter"));
     const acpRegistry = await this.exists(path.join(rootPath, "acp_registry"));

@@ -99,7 +99,7 @@ export function StatusBar() {
     makeStatusItem({
       key: "hermes",
       shortLabel: "Hermes",
-      detail: hermesDetail(hermesStatus, store.hermesProbe, store.hermesStatus),
+      detail: hermesDetail(hermesStatus, store.hermesProbe, store.hermesStatus, store.runtimeConfig?.hermesRuntime?.mode),
       tone: connectionTone(hermesStatus),
       icon: hermesStatus === "connected" ? ShieldCheck : hermesIcon(hermesStatus),
       spinning: hermesStatus === "checking",
@@ -188,13 +188,12 @@ function connectionTone(status: ConnectionState): BadgeTone {
   return "warn";
 }
 
-function hermesDetail(status: ConnectionState, probe?: HermesProbeSummary, summary?: HermesStatusSummary) {
-  if (probe?.probe.message?.trim()) return probe.probe.message;
-  if (summary?.engine?.message?.trim()) return summary.engine.message;
-  if (status === "connected") return "Hermes 在线";
-  if (status === "warning") return "Hermes 可用，但存在警告";
-  if (status === "disconnected") return "Hermes 离线";
-  return "正在检查 Hermes";
+function hermesDetail(status: ConnectionState, probe?: HermesProbeSummary, summary?: HermesStatusSummary, runtimeMode?: "windows" | "wsl") {
+  const runtimeLabel = runtimeMode === "wsl" ? "WSL" : runtimeMode === "windows" ? "Windows" : undefined;
+  const base = probe?.probe.message?.trim()
+    || summary?.engine?.message?.trim()
+    || (status === "connected" ? "Hermes 在线" : status === "warning" ? "Hermes 可用，但存在警告" : status === "disconnected" ? "Hermes 离线" : "正在检查 Hermes");
+  return runtimeLabel ? `${base} · 当前运行：${runtimeLabel}` : base;
 }
 
 function hermesIcon(status: ConnectionState) {

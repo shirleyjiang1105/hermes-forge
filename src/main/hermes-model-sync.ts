@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveActiveHermesHome } from "./hermes-home";
 import type { RuntimeEnvResolver } from "./runtime-env-resolver";
 import type { EngineRuntimeEnv, ModelProfile, ProviderId, RuntimeConfig } from "../shared/types";
 
@@ -76,14 +77,7 @@ export class HermesModelSyncService {
   }
 
   private async activeHermesHome() {
-    const base = this.hermesHomeBase();
-    const activeProfile = (await fs.readFile(path.join(base, "active_profile"), "utf8").catch(() => "")).trim();
-    if (!activeProfile || /[\\/]/.test(activeProfile)) {
-      return base;
-    }
-    const candidate = path.join(base, "profiles", activeProfile);
-    const stat = await fs.stat(candidate).catch(() => undefined);
-    return stat?.isDirectory() ? candidate : base;
+    return await resolveActiveHermesHome(this.hermesHomeBase());
   }
 }
 

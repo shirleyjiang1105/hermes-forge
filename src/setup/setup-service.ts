@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveActiveHermesHome } from "../main/hermes-home";
 import type { AppPaths } from "../main/app-paths";
 import type { RuntimeConfigStore } from "../main/runtime-config";
 import type { EngineAdapter } from "../adapters/engine-adapter";
@@ -610,7 +611,10 @@ export class SetupService {
       };
     }
 
-    const memoryDir = path.join(os.homedir(), ".hermes", "memories");
+    const hermesHomeBase = typeof (this.appPaths as { hermesDir?: unknown }).hermesDir === "function"
+      ? this.appPaths.hermesDir()
+      : path.join(os.homedir(), ".hermes");
+    const memoryDir = path.join(await resolveActiveHermesHome(hermesHomeBase), "memories");
     await fs.mkdir(memoryDir, { recursive: true }).catch(() => undefined);
     return {
       id: "hermes",

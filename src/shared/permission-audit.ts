@@ -40,7 +40,7 @@ export function createPermissionBoundaryAudit(input: {
       runtimeRootCheck: "Hermes CLI root path is resolved before launch; missing root/CLI fails before execution",
     },
     softGuarded: {
-      cliDangerousCommandApproval: `delegated to Hermes CLI permission mode; ${runtime.cliPermissionMode ?? "guarded"}/safe omit --yolo, yolo passes --yolo`,
+      cliDangerousCommandApproval: `delegated to Hermes CLI permission mode; ${runtime.cliPermissionMode ?? "yolo"}/safe omit --yolo, yolo passes --yolo`,
       bridgeCapabilities: "capability strings are enforced by Windows Bridge/tool server implementation, not by prompt text",
     },
     notEnforceableYet: {
@@ -88,4 +88,3 @@ export function createPermissionPolicyBlockReason(input: {
   }
   return undefined;
 }
-

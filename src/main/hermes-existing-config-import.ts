@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { resolveActiveHermesHome } from "./hermes-home";
 import type { SecretVault } from "../auth/secret-vault";
 import type { HermesConnectorService } from "./hermes-connector-service";
 import type { RuntimeConfigStore } from "./runtime-config";
@@ -100,14 +101,6 @@ async function importModelProfile(input: {
     profileId: profile.id,
     secretRef: profile.secretRef,
   };
-}
-
-async function resolveActiveHermesHome(baseHome: string) {
-  const activeProfile = (await fs.readFile(path.join(baseHome, "active_profile"), "utf8").catch(() => "")).trim();
-  if (!activeProfile || /[\\/]/.test(activeProfile)) return baseHome;
-  const candidate = path.join(baseHome, "profiles", activeProfile);
-  const stat = await fs.stat(candidate).catch(() => undefined);
-  return stat?.isDirectory() ? candidate : baseHome;
 }
 
 async function readEnvValues(envPath: string) {

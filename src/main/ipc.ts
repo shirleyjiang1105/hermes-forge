@@ -693,7 +693,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         pythonCommand: parsed.runtime?.pythonCommand?.trim() || config.hermesRuntime?.pythonCommand || "python3",
         distro: parsed.runtime?.distro?.trim() || undefined,
         windowsAgentMode: parsed.runtime?.windowsAgentMode ?? config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-        cliPermissionMode: parsed.runtime?.cliPermissionMode ?? config.hermesRuntime?.cliPermissionMode ?? "guarded",
+      cliPermissionMode: parsed.runtime?.cliPermissionMode ?? config.hermesRuntime?.cliPermissionMode ?? "yolo",
         permissionPolicy: parsed.runtime?.permissionPolicy ?? config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
         installSource: parsed.runtime?.installSource
           ? {

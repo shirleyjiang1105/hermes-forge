@@ -301,7 +301,7 @@ describe("HermesCliAdapter prompt isolation", () => {
 });
 
 describe("HermesCliAdapter WSL permission mode", () => {
-  it("uses guarded CLI mode by default and does not pass --yolo", async () => {
+  it("uses yolo CLI mode by default and passes --yolo", async () => {
     const adapter = new HermesCliAdapter({ baseDir: () => os.tmpdir(), hermesDir: () => os.tmpdir() } as never, {} as never, async () => "C:\\Hermes Agent");
     const invocation = await (adapter as never as {
       conversationInvocation(
@@ -321,8 +321,8 @@ describe("HermesCliAdapter WSL permission mode", () => {
       "test",
     );
 
-    expect(invocation.permissionMode).toBe("guarded");
-    expect(invocation.args).not.toContain("--yolo");
+    expect(invocation.permissionMode).toBe("yolo");
+    expect(invocation.args).toContain("--yolo");
   });
 
   it("passes --yolo only when the runtime config explicitly selects yolo", async () => {
@@ -599,5 +599,45 @@ describe("HermesCliAdapter Windows launch", () => {
       PROMPT_TOOLKIT_COLOR_DEPTH: "DEPTH_1_BIT",
       TERM: "dumb",
     });
+  });
+
+  it("uses the active Hermes profile for WSL HERMES_HOME and memory status", async () => {
+    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-adapter-"));
+    await fs.mkdir(path.join(baseDir, "hermes-home", "profiles", "wechat", "memories"), { recursive: true });
+    await fs.writeFile(path.join(baseDir, "hermes-home", "active_profile"), "wechat", "utf8");
+    await fs.writeFile(path.join(baseDir, "hermes-home", "profiles", "wechat", "memories", "USER.md"), "偏好：叫我小夏", "utf8");
+    await fs.writeFile(path.join(baseDir, "hermes-home", "profiles", "wechat", "memories", "MEMORY.md"), "长期记忆：使用 WSL runtime", "utf8");
+    const adapter = new HermesCliAdapter(
+      { baseDir: () => baseDir, hermesDir: () => path.join(baseDir, "hermes-home") } as never,
+      {} as never,
+      async () => "C:\\Hermes Agent",
+      async () => ({
+        hermesRuntime: {
+          mode: "wsl",
+          pythonCommand: "python3",
+          windowsAgentMode: "hermes_native",
+        },
+        modelProfiles: [],
+      } as never),
+    );
+
+    const launch = await (adapter as never as {
+      launchSpec(
+        runtime: { mode: "wsl"; pythonCommand: string; windowsAgentMode: "hermes_native" },
+        rootPath: string,
+        pythonArgs: string[],
+        cwd: string,
+      ): Promise<{ args: string[] }>;
+    }).launchSpec(
+      { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native" },
+      "/mnt/c/Hermes Agent",
+      ["/mnt/c/Hermes Agent/hermes", "--version"],
+      "D:\\repo",
+    );
+    const status = await adapter.getMemoryStatus("workspace");
+
+    expect(launch.args).toContain(`HERMES_HOME=${toWslPath(path.join(baseDir, "hermes-home", "profiles", "wechat"))}`);
+    expect(status.filePath).toBe(path.join(baseDir, "hermes-home", "profiles", "wechat", "memories"));
+    expect(status.entries).toBe(2);
   });
 });

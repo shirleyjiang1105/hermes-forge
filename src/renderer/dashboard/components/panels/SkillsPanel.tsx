@@ -12,29 +12,45 @@ export function SkillsPanel() {
   const [editing, setEditing] = useState<{ id: string; content: string; isNew?: boolean } | undefined>();
   const [confirming, setConfirming] = useState<HermesSkill | undefined>();
   const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   async function refresh() {
     store.setWebUiOverview(await window.workbenchClient.getWebUiOverview());
   }
 
   async function editSkill(skill: HermesSkill) {
-    const file = await window.workbenchClient.readSkill(skill.id);
-    setEditing({ id: skill.id, content: file.content });
+    setError("");
+    try {
+      const file = await window.workbenchClient.readSkill(skill.id);
+      setEditing({ id: skill.id, content: file.content });
+    } catch (err) {
+      setError(err instanceof Error ? `技能读取失败：${err.message}` : "技能读取失败。");
+    }
   }
 
   async function saveSkill() {
     if (!editing?.id.trim()) return;
-    await window.workbenchClient.saveSkill({ id: editing.id.trim(), content: editing.content });
-    setEditing(undefined);
-    setMessage("技能已保存。");
-    await refresh();
+    setError("");
+    try {
+      await window.workbenchClient.saveSkill({ id: editing.id.trim(), content: editing.content });
+      setEditing(undefined);
+      setMessage("技能已保存。");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? `技能保存失败：${err.message}` : "技能保存失败。");
+    }
   }
 
   async function deleteSkill(skill: HermesSkill) {
-    await window.workbenchClient.deleteSkill(skill.id);
-    setConfirming(undefined);
-    setMessage("技能已删除。");
-    await refresh();
+    setError("");
+    try {
+      await window.workbenchClient.deleteSkill(skill.id);
+      setConfirming(undefined);
+      setMessage("技能已删除。");
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? `技能删除失败：${err.message}` : "技能删除失败。");
+    }
   }
 
   const validSkills = skills.filter((skill) => 
@@ -65,7 +81,7 @@ export function SkillsPanel() {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm text-slate-500">
           <Wrench size={14} />
-          <span>读取并编辑 ~/.hermes/skills 下的 Markdown 技能文件。</span>
+          <span>读取并编辑当前 Hermes Home 下 `skills/` 目录的 Markdown 技能文件。</span>
         </div>
         <button
           className="inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md active:scale-[0.98]"
@@ -78,7 +94,8 @@ export function SkillsPanel() {
       </div>
 
       {message ? <NoticeCard text={message} onClose={() => setMessage("")} /> : null}
-      {confirming ? <ConfirmCard title={`删除技能：${confirming.name}`} body="技能文件会从 ~/.hermes/skills 删除。请确认没有其他 Agent 依赖它。" tone="danger" onCancel={() => setConfirming(undefined)} onConfirm={() => void deleteSkill(confirming)} /> : null}
+      {error ? <NoticeCard text={error} onClose={() => setError("")} /> : null}
+      {confirming ? <ConfirmCard title={`删除技能：${confirming.name}`} body="技能文件会从当前 Hermes Home 的 skills 目录删除。请确认没有其他 Agent 依赖它。" tone="danger" onCancel={() => setConfirming(undefined)} onConfirm={() => void deleteSkill(confirming)} /> : null}
 
       {editing ? (
         <section className="rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
@@ -193,7 +210,7 @@ export function SkillsPanel() {
             <Wrench size={28} className="text-slate-400" />
           </div>
           <p className="mt-4 text-sm text-slate-500">暂无技能</p>
-          <p className="mt-1 text-xs text-slate-400">创建后会写入 ~/.hermes/skills</p>
+          <p className="mt-1 text-xs text-slate-400">创建后会写入当前 Hermes Home 的 `skills/` 目录</p>
           <button
             className="mt-4 inline-flex items-center gap-2 rounded-lg bg-indigo-600 px-4 py-2 text-sm font-medium text-white shadow-sm transition-all hover:bg-indigo-700"
             onClick={() => setEditing({ id: "new-skill.md", content: "# New Skill\n\n描述这个技能的用途。\n", isNew: true })}

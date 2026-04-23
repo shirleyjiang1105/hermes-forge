@@ -1,8 +1,8 @@
 import fs from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { shell } from "electron";
 import type { AppPaths } from "./app-paths";
+import { ensureHermesHomeLayout, resolveActiveHermesHome } from "./hermes-home";
 import { runCommand } from "../process/command-runner";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import { validateSkillId, validateProfileName, validateCronSchedule } from "../security";
@@ -152,7 +152,7 @@ export class HermesWebUiService {
   }
 
   async listSkills(): Promise<HermesSkill[]> {
-    const root = this.hermesHome("skills");
+    const root = path.join(await this.currentHermesHome(), "skills");
     const files = await this.walkFiles(root, 3);
     const skills = await Promise.all(files.filter((file) => this.isValidSkillFile(file)).map(async (file) => {
       const stat = await fs.stat(file);
@@ -188,7 +188,7 @@ export class HermesWebUiService {
   }
 
   async readSkill(id: string) {
-    const filePath = await this.resolveUnder(this.hermesHome("skills"), id);
+    const filePath = await this.resolveUnder(path.join(await this.currentHermesHome(), "skills"), id);
     return { id, path: filePath, content: await fs.readFile(filePath, "utf8") };
   }
 
@@ -199,23 +199,25 @@ export class HermesWebUiService {
       throw new Error(`技能验证失败: ${validation.errors.join(", ")}`);
     }
     
-    const filePath = await this.resolveUnder(this.hermesHome("skills"), skillId);
+    const skillsRoot = path.join(await this.currentHermesHome(), "skills");
+    const filePath = await this.resolveUnder(skillsRoot, skillId);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await this.backupPath(filePath);
     await fs.writeFile(filePath, content, "utf8");
-    return this.readSkill(path.relative(this.hermesHome("skills"), filePath));
+    return this.readSkill(path.relative(skillsRoot, filePath));
   }
 
   async deleteSkill(id: string) {
-    const filePath = await this.resolveUnder(this.hermesHome("skills"), id);
+    const filePath = await this.resolveUnder(path.join(await this.currentHermesHome(), "skills"), id);
     await this.moveToTrash(filePath);
     return { ok: true, id };
   }
 
   async listMemoryFiles(): Promise<HermesMemoryFile[]> {
+    const currentHome = await this.currentHermesHome();
     const files: Array<HermesMemoryFile["id"]> = ["USER.md", "MEMORY.md"];
     return await Promise.all(files.map(async (fileName) => {
-      const filePath = this.hermesHome("memories", fileName);
+      const filePath = path.join(currentHome, "memories", fileName);
       await fs.mkdir(path.dirname(filePath), { recursive: true });
       await fs.writeFile(filePath, "", { flag: "a" });
       const stat = await fs.stat(filePath);
@@ -231,7 +233,7 @@ export class HermesWebUiService {
   }
 
   async saveMemoryFile(id: HermesMemoryFile["id"], content: string) {
-    const filePath = this.hermesHome("memories", id);
+    const filePath = path.join(await this.currentHermesHome(), "memories", id);
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.copyFile(filePath, `${filePath}.${Date.now()}.bak`).catch(() => undefined);
     await fs.writeFile(filePath, content, "utf8");
@@ -248,7 +250,7 @@ export class HermesWebUiService {
   }
 
   async listProfiles(): Promise<HermesProfile[]> {
-    const base = this.hermesHome();
+    const base = await this.baseHermesHome();
     const active = (await fs.readFile(path.join(base, "active_profile"), "utf8").catch(() => "")).trim() || "default";
     const profileRoot = path.join(base, "profiles");
     const entries = await fs.readdir(profileRoot, { withFileTypes: true }).catch(() => []);
@@ -274,7 +276,7 @@ export class HermesWebUiService {
   }
 
   async switchProfile(name: string) {
-    await fs.writeFile(path.join(this.hermesHome(), "active_profile"), name === "default" ? "" : name, "utf8");
+    await fs.writeFile(path.join(await this.baseHermesHome(), "active_profile"), name === "default" ? "" : name, "utf8");
     return { ok: true, active: name, profiles: await this.listProfiles() };
   }
 
@@ -286,7 +288,7 @@ export class HermesWebUiService {
     
     const safe = name.toLowerCase().replace(/[^a-z0-9_-]/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
     if (!safe) throw new Error("Profile 名称不能为空。");
-    const profilePath = path.join(this.hermesHome(), "profiles", safe);
+    const profilePath = path.join(await this.baseHermesHome(), "profiles", safe);
     await fs.mkdir(path.join(profilePath, "skills"), { recursive: true });
     await fs.mkdir(path.join(profilePath, "memories"), { recursive: true });
     await fs.mkdir(path.join(profilePath, "cron"), { recursive: true });
@@ -295,13 +297,13 @@ export class HermesWebUiService {
 
   async deleteProfile(name: string) {
     if (name === "default") throw new Error("不能删除 default profile。");
-    const profilePath = await this.resolveUnder(path.join(this.hermesHome(), "profiles"), name);
+    const profilePath = await this.resolveUnder(path.join(await this.baseHermesHome(), "profiles"), name);
     await this.moveToTrash(profilePath);
     return { ok: true, id: name, profiles: await this.listProfiles() };
   }
 
   async listCronJobs(): Promise<HermesCronJob[]> {
-    const jobsPath = this.hermesHome("cron", "jobs.json");
+    const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
     const raw = await this.readJson<unknown[]>(jobsPath, []);
     return raw.map((item, index) => {
       const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
@@ -333,7 +335,7 @@ export class HermesWebUiService {
       }
     }
     
-    const jobsPath = this.hermesHome("cron", "jobs.json");
+    const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
     const raw = await this.readJson<Record<string, unknown>[]>(jobsPath, []);
     const at = new Date().toISOString();
     const id = input.id?.trim() || `job-${Date.now().toString(36)}`;
@@ -391,7 +393,7 @@ export class HermesWebUiService {
 
   async deleteCronJob(id: string) {
     const result = await this.runHermes(["cron", "delete", id]).catch(async (error: unknown) => {
-      const jobsPath = this.hermesHome("cron", "jobs.json");
+    const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
       const raw = await this.readJson<Record<string, unknown>[]>(jobsPath, []);
       await this.backupPath(jobsPath);
       await this.writeJson(jobsPath, raw.filter((item) => String(item.id ?? item.name ?? "") !== id));
@@ -449,6 +451,7 @@ export class HermesWebUiService {
 
   private async runHermes(args: string[]) {
     const root = await this.resolveHermesRoot();
+    const currentHermesHome = await this.currentHermesHome();
     const runtime = await this.currentRuntime();
     const adapter = runtime ? this.runtimeAdapterFactory!(runtime) : undefined;
     const runtimeRoot = adapter?.toRuntimePath(root);
@@ -467,9 +470,10 @@ export class HermesWebUiService {
           PYTHONUTF8: "1",
           PYTHONIOENCODING: "utf-8",
           PYTHONPATH: runtimeRoot,
+          HERMES_HOME: adapter?.toRuntimePath(currentHermesHome) ?? currentHermesHome,
         },
       })
-      : await this.legacyHermesLaunch(root, args);
+      : await this.legacyHermesLaunch(root, args, currentHermesHome);
     const result = await runCommand(launch.command, launch.args, {
       cwd: launch.cwd,
       timeoutMs: 30000,
@@ -491,14 +495,14 @@ export class HermesWebUiService {
     } satisfies NonNullable<RuntimeConfig["hermesRuntime"]>;
   }
 
-  private async legacyHermesLaunch(root: string, args: string[]) {
+  private async legacyHermesLaunch(root: string, args: string[], hermesHome: string) {
     // Legacy fallback: kept for tests/standalone construction paths until all WebUI callers inject RuntimeAdapterFactory.
     const cliPath = path.join(root, "hermes");
     return {
       command: "python",
       args: [cliPath, ...args],
       cwd: root,
-      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONPATH: root },
+      env: { PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", PYTHONPATH: root, HERMES_HOME: hermesHome },
     };
   }
 
@@ -514,8 +518,14 @@ export class HermesWebUiService {
     return value === "light" || value === "slate" || value === "oled" ? value : "green-light";
   }
 
-  private hermesHome(...segments: string[]) {
-    return path.join(os.homedir(), ".hermes", ...segments);
+  private async baseHermesHome() {
+    const baseHome = this.appPaths.hermesDir();
+    await ensureHermesHomeLayout(baseHome);
+    return baseHome;
+  }
+
+  private async currentHermesHome() {
+    return await resolveActiveHermesHome(await this.baseHermesHome());
   }
 
   private settingsPath() {
@@ -556,7 +566,7 @@ export class HermesWebUiService {
   private async moveToTrash(targetPath: string) {
     const stat = await fs.stat(targetPath).catch(() => undefined);
     if (!stat) return;
-    const trashDir = path.join(this.hermesHome(), ".workbench-trash", new Date().toISOString().slice(0, 10));
+    const trashDir = path.join(await this.baseHermesHome(), ".workbench-trash", new Date().toISOString().slice(0, 10));
     await fs.mkdir(trashDir, { recursive: true });
     const target = path.join(trashDir, `${path.basename(targetPath)}.${Date.now()}`);
     await fs.rename(targetPath, target).catch(async () => {

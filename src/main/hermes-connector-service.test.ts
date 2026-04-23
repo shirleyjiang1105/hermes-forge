@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { HermesConnectorService, testOnly } from "./hermes-connector-service";
 
 describe("HermesConnectorService helpers", () => {
@@ -191,5 +191,44 @@ describe("HermesConnectorService helpers", () => {
     expect(stateful.weixinQrProcess).toMatchObject({ killed: false });
     expect(stateful.weixinQrLineBuffer).toBe("pending-json");
     expect(stateful.activeWeixinQrRunId).toBe(2);
+  });
+
+  it("does not mark QQ Bot as configured when no values or secrets exist", async () => {
+    const service = new HermesConnectorService({} as never, { hasSecret: vi.fn(async () => false) } as never, async () => "D:\\Hermes Agent");
+    const stateful = service as any;
+
+    const connector = await stateful.toConnector(
+      testOnly.PLATFORM_REGISTRY.find((platform: { id: string }) => platform.id === "qqbot"),
+      { platforms: {} },
+      {},
+      { running: false, healthStatus: "stopped", message: "Gateway 未运行。", checkedAt: "2026-04-23T00:00:00.000Z" },
+    );
+
+    expect(connector.configured).toBe(false);
+    expect(connector.status).toBe("unconfigured");
+    expect(connector.message).toContain("尚未配置");
+  });
+
+  it("marks QQ Bot as configured once optional routing values are present", async () => {
+    const service = new HermesConnectorService({} as never, { hasSecret: vi.fn(async () => false) } as never, async () => "D:\\Hermes Agent");
+    const stateful = service as any;
+
+    const connector = await stateful.toConnector(
+      testOnly.PLATFORM_REGISTRY.find((platform: { id: string }) => platform.id === "qqbot"),
+      {
+        platforms: {
+          qqbot: {
+            enabled: true,
+            values: { allowedUsers: "alice,bob" },
+            secretRefs: {},
+          },
+        },
+      },
+      {},
+      { running: false, healthStatus: "stopped", message: "Gateway 未运行。", checkedAt: "2026-04-23T00:00:00.000Z" },
+    );
+
+    expect(connector.configured).toBe(true);
+    expect(connector.status).toBe("configured");
   });
 });

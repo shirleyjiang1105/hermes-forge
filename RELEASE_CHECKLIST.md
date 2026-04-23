@@ -10,8 +10,10 @@ Run these from the repository root:
 npm run check
 npm test
 npm run build
-npm run package:portable
+npm run package:win
 ```
+
+If you need a manual portable build, run `npm run package:portable` separately and do not use its output as the auto-update release artifact.
 
 ## RC Smoke Matrix
 

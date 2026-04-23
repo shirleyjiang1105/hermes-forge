@@ -1,4 +1,5 @@
-import { CalendarClock, Wrench, BookOpen, UserCircle, FolderOpen, FolderKanban, Settings, RefreshCw, ExternalLink } from "lucide-react";
+import { useEffect } from "react";
+import { CalendarClock, Wrench, BookOpen, UserCircle, FolderOpen, FolderKanban, RefreshCw, ExternalLink } from "lucide-react";
 import { useAppStore } from "../../store";
 import { cn } from "../DashboardPrimitives";
 import { TasksPanel } from "./panels/TasksPanel";
@@ -8,7 +9,6 @@ import { ConnectorsPanel } from "./panels/ConnectorsPanel";
 import { ProfilesPanel } from "./panels/ProfilesPanel";
 import { SpacesPanel } from "./panels/SpacesPanel";
 import { ProjectsPanel } from "./panels/ProjectsPanel";
-import { SettingsPanel } from "./panels/SettingsPanel";
 
 type PanelId = ReturnType<typeof useAppStore.getState>["activePanel"];
 
@@ -26,7 +26,6 @@ const panels: PanelConfig[] = [
   { id: "profiles", label: "Agent", icon: UserCircle },
   { id: "spaces", label: "工作区", icon: FolderOpen },
   { id: "projects", label: "项目", icon: FolderKanban },
-  { id: "settings", label: "设置", icon: Settings },
 ];
 
 export function ControlCenter(props: {
@@ -39,7 +38,13 @@ export function ControlCenter(props: {
   const store = useAppStore();
   const active = store.activePanel;
 
-  if (active === "chat") return null;
+  useEffect(() => {
+    if (active !== "settings") return;
+    store.setActivePanel("chat");
+    props.onOpenSettings();
+  }, [active, props, store]);
+
+  if (active === "chat" || active === "settings") return null;
 
   const activeConfig = panels.find((p) => p.id === active);
 
@@ -49,8 +54,8 @@ export function ControlCenter(props: {
         <div className="flex items-center gap-3">
           {activeConfig && (
             <>
-              <div className={cn("grid h-9 w-9 place-items-center rounded-xl", active === "settings" ? "bg-slate-100" : "bg-indigo-100")}>
-                {activeConfig.icon && <activeConfig.icon size={18} className={active === "settings" ? "text-slate-600" : "text-indigo-600"} />}
+              <div className={cn("grid h-9 w-9 place-items-center rounded-xl bg-indigo-100")}>
+                {activeConfig.icon && <activeConfig.icon size={18} className="text-indigo-600" />}
               </div>
               <div>
                 <h2 className="text-base font-semibold text-slate-900">{activeConfig.label}</h2>
@@ -80,7 +85,6 @@ export function ControlCenter(props: {
           {active === "profiles" ? <ProfilesPanel key="profiles" /> : null}
           {active === "spaces" ? <SpacesPanel key="spaces" onSelect={(path) => useAppStore.getState().setWorkspacePath(path)} /> : null}
           {active === "projects" ? <ProjectsPanel key="projects" /> : null}
-          {active === "settings" ? <SettingsPanel key="settings" {...props} /> : null}
         </div>
       </div>
     </div>
@@ -98,6 +102,6 @@ function panelDescription(panel: PanelId): string {
     profiles: "管理多个配置文件",
     spaces: "管理工作区路径",
     projects: "按项目组织会话",
-    settings: "应用设置和诊断",
+    settings: "打开主设置中心",
   }[panel] || "";
 }

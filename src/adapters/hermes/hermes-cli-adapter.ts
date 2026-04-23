@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AppPaths } from "../../main/app-paths";
+import { resolveActiveHermesHome } from "../../main/hermes-home";
 import { syncHermesWindowsMcpConfig } from "../../main/hermes-native-mcp-config";
 import { MemoryBudgeter } from "../../memory/memory-budgeter";
 import { HermesHeadlessWorker } from "./hermes-headless-worker";
@@ -214,7 +215,7 @@ export class HermesCliAdapter implements EngineAdapter {
         at: now(),
       };
     } else if (request.permissions?.memoryRead) {
-      yield { type: "memory_access", engineId: this.id, action: "read", source: this.memoryDir(), at: now() };
+      yield { type: "memory_access", engineId: this.id, action: "read", source: await this.currentMemoryDir(), at: now() };
     }
 
     const cliCapabilities = runtime.mode === "wsl"
@@ -377,8 +378,9 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   async getMemoryStatus(workspaceId: string): Promise<MemoryStatus> {
-    const userPath = path.join(this.memoryDir(), "USER.md");
-    const memoryPath = path.join(this.memoryDir(), "MEMORY.md");
+    const memoryDir = await this.currentMemoryDir();
+    const userPath = path.join(memoryDir, "USER.md");
+    const memoryPath = path.join(memoryDir, "MEMORY.md");
     const userText = await fs.readFile(userPath, "utf8").catch(() => "");
     const memoryText = await fs.readFile(memoryPath, "utf8").catch(() => "");
     const usedCharacters = userText.length + memoryText.length;
@@ -388,8 +390,8 @@ export class HermesCliAdapter implements EngineAdapter {
       usedCharacters,
       maxCharacters: 28000,
       entries: [userText, memoryText].filter(Boolean).length,
-      filePath: this.memoryDir(),
-      message: `Hermes 真实记忆目录：${this.memoryDir()}。`,
+      filePath: memoryDir,
+      message: `Hermes 真实记忆目录：${memoryDir}。`,
     };
   }
 
@@ -626,8 +628,9 @@ export class HermesCliAdapter implements EngineAdapter {
       return "";
     }
     try {
-      const userPath = path.join(this.memoryDir(), "USER.md");
-      const memoryPath = path.join(this.memoryDir(), "MEMORY.md");
+      const memoryDir = await this.currentMemoryDir();
+      const userPath = path.join(memoryDir, "USER.md");
+      const memoryPath = path.join(memoryDir, "MEMORY.md");
       const [userContent, memoryContent] = await Promise.all([
         fs.readFile(userPath, "utf8").catch(() => ""),
         fs.readFile(memoryPath, "utf8").catch(() => ""),
@@ -852,7 +855,7 @@ export class HermesCliAdapter implements EngineAdapter {
 
   private resolveCliPermissionStrategy(runtime: HermesRuntimeConfig): HermesCliPermissionStrategy {
     const configured = this.normalizeCliPermissionMode(runtime.cliPermissionMode);
-    const mode = configured ?? "guarded";
+    const mode = configured ?? "yolo";
     if (mode === "yolo") {
       return {
         mode,
@@ -1439,8 +1442,12 @@ export class HermesCliAdapter implements EngineAdapter {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  private memoryDir() {
-    return path.join(os.homedir(), ".hermes", "memories");
+  private async activeHermesHome() {
+    return await resolveActiveHermesHome(this.appPaths.hermesDir());
+  }
+
+  private async currentMemoryDir() {
+    return path.join(await this.activeHermesHome(), "memories");
   }
 
   private launchMetadataDir() {
@@ -1451,10 +1458,11 @@ export class HermesCliAdapter implements EngineAdapter {
     const bridge = request?.permissions?.contextBridge === false || runtime.windowsAgentMode === "disabled"
       ? undefined
       : await this.getWindowsBridgeAccess?.(runtime.distro);
+    const hermesHome = await this.activeHermesHome();
     if (request) {
       await syncHermesWindowsMcpConfig({
         runtime,
-        hermesHome: this.appPaths.hermesDir(),
+        hermesHome,
         bridge: (runtime.windowsAgentMode ?? "hermes_native") === "hermes_native" ? bridge : undefined,
       });
     }
@@ -1471,7 +1479,7 @@ export class HermesCliAdapter implements EngineAdapter {
       CI: runtime.mode === "wsl" ? process.env.CI ?? "" : "1",
       PROMPT_TOOLKIT_NO_CPR: "1",
       PROMPT_TOOLKIT_COLOR_DEPTH: "DEPTH_1_BIT",
-      HERMES_HOME: runtime.mode === "wsl" ? toWslPath(this.appPaths.hermesDir()) : this.appPaths.hermesDir(),
+      HERMES_HOME: runtime.mode === "wsl" ? toWslPath(hermesHome) : hermesHome,
       ...(request?.runtimeEnv ? {
         HERMES_INFERENCE_PROVIDER: this.hermesProvider(request.runtimeEnv.provider),
         OPENAI_MODEL: request.runtimeEnv.model,
@@ -1653,7 +1661,7 @@ export class HermesCliAdapter implements EngineAdapter {
       distro: config?.hermesRuntime?.distro?.trim() || undefined,
       pythonCommand: config?.hermesRuntime?.pythonCommand?.trim() || "python3",
       windowsAgentMode: config?.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-      cliPermissionMode: config?.hermesRuntime?.cliPermissionMode ?? "guarded",
+      cliPermissionMode: config?.hermesRuntime?.cliPermissionMode ?? "yolo",
       permissionPolicy: config?.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
     };
   }

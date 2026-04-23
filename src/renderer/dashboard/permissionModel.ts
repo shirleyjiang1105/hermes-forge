@@ -78,7 +78,7 @@ export function runtimeWithDefaults(runtime?: HermesRuntimeConfig): Required<Pic
     managedRoot: runtime?.managedRoot,
     pythonCommand: runtime?.pythonCommand ?? "python3",
     windowsAgentMode: runtime?.windowsAgentMode ?? "hermes_native",
-    cliPermissionMode: runtime?.cliPermissionMode ?? "guarded",
+    cliPermissionMode: runtime?.cliPermissionMode ?? "yolo",
     permissionPolicy: runtime?.permissionPolicy ?? "bridge_guarded",
   };
 }

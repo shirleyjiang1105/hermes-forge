@@ -105,6 +105,28 @@ describe("ConnectorsPanel", () => {
     expect(screen.getByRole("button", { name: "开始扫码" })).toBeInTheDocument();
   });
 
+  it("keeps QQ Bot in quick-setup mode when no connector values are configured", async () => {
+    listConnectors.mockResolvedValue(buildListResult({
+      connectors: [
+        buildConnector({
+          platformId: "qqbot",
+          label: "QQ Bot",
+          status: "unconfigured",
+          runtimeStatus: "stopped",
+          configured: false,
+          message: "尚未配置，点击快速配置开始接入。",
+        }),
+      ],
+    }));
+
+    render(<ConnectorsPanel />);
+
+    expect(await screen.findByText("QQ Bot")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "快速配置" })).toBeInTheDocument();
+    expect(screen.getByText("尚未配置，点击快速配置开始接入。")).toBeInTheDocument();
+    expect(screen.queryByText("已配置")).not.toBeInTheDocument();
+  });
+
   it("renders connector config status separately from runtime status", async () => {
     listConnectors.mockResolvedValue(buildListResult({
       connectors: [

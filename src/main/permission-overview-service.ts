@@ -2,6 +2,7 @@ import path from "node:path";
 import { runCommand } from "../process/command-runner";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import type { AppPaths } from "./app-paths";
+import { resolveActiveHermesHome } from "./hermes-home";
 import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason } from "../shared/permission-audit";
 import { resolveEnginePermissions } from "../shared/types";
 import type {
@@ -97,7 +98,7 @@ function runtimeWithDefaults(runtime: RuntimeConfig["hermesRuntime"]): HermesRun
     managedRoot: runtime?.managedRoot,
     pythonCommand: runtime?.pythonCommand ?? "python3",
     windowsAgentMode: runtime?.windowsAgentMode ?? "hermes_native",
-    cliPermissionMode: runtime?.cliPermissionMode ?? "guarded",
+    cliPermissionMode: runtime?.cliPermissionMode ?? "yolo",
     permissionPolicy: runtime?.permissionPolicy ?? "bridge_guarded",
   };
 }
@@ -110,6 +111,7 @@ async function probeCapabilities(input: {
 }): Promise<CapabilityProbe> {
   const adapter = input.runtimeAdapterFactory(input.runtime);
   const rootPath = adapter.toRuntimePath(await input.resolveHermesRoot());
+  const hermesHome = await resolveActiveHermesHome(input.appPaths.hermesDir());
   const cliPath = input.runtime.mode === "wsl"
     ? `${rootPath.replace(/\/+$/, "")}/hermes`
     : path.join(rootPath, "hermes");
@@ -118,7 +120,7 @@ async function probeCapabilities(input: {
     PYTHONIOENCODING: "utf-8",
     PYTHONUNBUFFERED: "1",
     PYTHONPATH: rootPath,
-    HERMES_HOME: adapter.toRuntimePath(input.appPaths.hermesDir()),
+    HERMES_HOME: adapter.toRuntimePath(hermesHome),
     NO_COLOR: "1",
     FORCE_COLOR: "0",
   };

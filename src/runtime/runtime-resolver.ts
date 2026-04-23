@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AppPaths } from "../main/app-paths";
+import { resolveActiveHermesHome } from "../main/hermes-home";
 import type { HermesRuntimeConfig, RuntimeConfig } from "../shared/types";
 import type { RuntimeKind, RuntimePathDescriptor, RuntimePathResolution } from "./runtime-types";
 
@@ -22,19 +23,20 @@ export class RuntimeResolver {
     workspacePath?: string;
   }): Promise<RuntimePathResolution> {
     const hermesRoot = await this.resolveHermesRoot();
+    const activeHermesHome = await resolveActiveHermesHome(this.appPaths.hermesDir());
     const appUserDataPath = descriptor("app-user-data", this.appPaths.baseDir(), "windows-app", true, false, false, "Electron app userData directory.");
-    const profileHermesPath = descriptor("profile-hermes", this.appPaths.hermesDir(), "windows-app", true, true, false, "Desktop-managed Hermes profile directory.");
+    const profileHermesPath = descriptor("profile-hermes", activeHermesHome, "windows-app", true, true, false, "Desktop-managed Hermes profile directory currently used by runtime.");
     const vaultPath = descriptor("vault", this.appPaths.vaultDir(), "windows-app", true, false, false, "Encrypted desktop secret vault.");
     const workspacePath = input.workspacePath?.trim()
       ? descriptor("workspace", input.workspacePath.trim(), "windows-user", true, false, false, "Current user-selected workspace.")
       : undefined;
     const windowsUserHermesPath = descriptor("windows-user-hermes", path.join(os.homedir(), ".hermes"), "windows-user", true, true, false, "Hermes user home on native Windows.");
     const wslHermesHomePath = input.runtime.mode === "wsl"
-      ? descriptor("wsl-hermes-home", toWslPath(profileHermesPath.path), "wsl", true, true, false, "Hermes home as seen from WSL.")
+      ? descriptor("wsl-hermes-home", toWslPath(activeHermesHome), "wsl", true, true, false, "Hermes home as seen from WSL.")
       : undefined;
-    const memoryPath = descriptor("memory", path.join(os.homedir(), ".hermes", "memories"), "windows-user", true, false, false, "Hermes memory files currently used by the adapter.");
-    const mcpConfigPath = descriptor("mcp-config", path.join(profileHermesPath.path, "config.yaml"), "windows-app", true, true, false, "Desktop-managed Hermes MCP config.");
-    const cliConfigPath = descriptor("cli-config", path.join(profileHermesPath.path, "config.yaml"), "windows-app", true, true, false, "Hermes CLI config path written by desktop runtime.");
+    const memoryPath = descriptor("memory", path.join(activeHermesHome, "memories"), "windows-app", true, false, false, "Hermes memory files currently used by the adapter.");
+    const mcpConfigPath = descriptor("mcp-config", path.join(activeHermesHome, "config.yaml"), "windows-app", true, true, false, "Desktop-managed Hermes MCP config.");
+    const cliConfigPath = descriptor("cli-config", path.join(activeHermesHome, "config.yaml"), "windows-app", true, true, false, "Hermes CLI config path written by desktop runtime.");
     const promptTempPath = descriptor("temporary", path.join(this.appPaths.baseDir(), "tmp", "hermes-prompts"), "windows-app", false, true, true, "Temporary prompt files for headless invocations.");
     const all = [
       appUserDataPath,
@@ -70,7 +72,7 @@ export class RuntimeResolver {
       pythonCommand: config?.hermesRuntime?.pythonCommand?.trim() || "python3",
       managedRoot: config?.hermesRuntime?.managedRoot?.trim() || undefined,
       windowsAgentMode: config?.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-      cliPermissionMode: config?.hermesRuntime?.cliPermissionMode ?? "guarded",
+      cliPermissionMode: config?.hermesRuntime?.cliPermissionMode ?? "yolo",
       permissionPolicy: config?.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
       installSource: config?.hermesRuntime?.installSource,
     };

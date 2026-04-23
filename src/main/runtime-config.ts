@@ -73,7 +73,7 @@ const defaultConfig: RuntimeConfig = {
     pythonCommand: "python3",
     managedRoot: undefined,
     windowsAgentMode: "hermes_native",
-    cliPermissionMode: "guarded",
+    cliPermissionMode: "yolo",
     permissionPolicy: "bridge_guarded",
     installSource: DEFAULT_PINNED_HERMES_SOURCE,
   },

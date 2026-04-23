@@ -801,7 +801,7 @@ export class WslHermesInstallService {
       pythonCommand: next.hermesRuntime?.pythonCommand?.trim() || "python3",
       windowsAgentMode: next.hermesRuntime?.windowsAgentMode ?? "hermes_native",
       distro: next.hermesRuntime?.distro,
-      cliPermissionMode: next.hermesRuntime?.cliPermissionMode ?? "guarded",
+      cliPermissionMode: next.hermesRuntime?.cliPermissionMode ?? "yolo",
       permissionPolicy: next.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
       installSource: next.hermesRuntime?.installSource,
     };
@@ -859,7 +859,7 @@ export class WslHermesInstallService {
     if (result.repoReady && result.hermesRoot) {
       const runtime = (await this.configStore.read()).hermesRuntime;
       const distro = runtime?.distro;
-      const commit = await this.runInDistro({ distro, managedRoot: result.hermesRoot, mode: "wsl", pythonCommand: runtime?.pythonCommand ?? "python3", windowsAgentMode: runtime?.windowsAgentMode ?? "hermes_native", cliPermissionMode: runtime?.cliPermissionMode ?? "guarded", permissionPolicy: runtime?.permissionPolicy ?? "bridge_guarded", installSource: runtime?.installSource }, `git -C ${shellQuote(result.hermesRoot)} rev-parse HEAD`, "install.wsl.git-rev-parse").catch(() => undefined);
+    const commit = await this.runInDistro({ distro, managedRoot: result.hermesRoot, mode: "wsl", pythonCommand: runtime?.pythonCommand ?? "python3", windowsAgentMode: runtime?.windowsAgentMode ?? "hermes_native", cliPermissionMode: runtime?.cliPermissionMode ?? "yolo", permissionPolicy: runtime?.permissionPolicy ?? "bridge_guarded", installSource: runtime?.installSource }, `git -C ${shellQuote(result.hermesRoot)} rev-parse HEAD`, "install.wsl.git-rev-parse").catch(() => undefined);
       const resolvedCommit = commit?.exitCode === 0 ? commit.stdout.trim() : undefined;
       if (resolvedCommit) {
         result.hermesCommit ??= resolvedCommit;

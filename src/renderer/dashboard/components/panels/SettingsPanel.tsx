@@ -16,7 +16,7 @@ export function SettingsPanel(props: {
   const store = useAppStore();
   const [restarting, setRestarting] = useState(false);
   const [savingRuntime, setSavingRuntime] = useState(false);
-  const [runtime, setRuntime] = useState<HermesRuntimeConfig>({ mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
+  const [runtime, setRuntime] = useState<HermesRuntimeConfig>({ mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "yolo", permissionPolicy: "bridge_guarded" });
   const [rootPath, setRootPath] = useState("");
   const [bridge, setBridge] = useState<WindowsBridgeStatus | undefined>();
   const [testingBridge, setTestingBridge] = useState(false);
@@ -34,7 +34,7 @@ export function SettingsPanel(props: {
     let alive = true;
     void window.workbenchClient.getConfigOverview().then((overview) => {
       if (!alive) return;
-      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
+      setRuntime(overview?.hermes?.runtime ?? { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "yolo", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? "");
       setBridge(overview?.hermes?.bridge);
     }).catch(() => undefined);
@@ -69,7 +69,7 @@ export function SettingsPanel(props: {
       });
       store.setRuntimeConfig(next);
       const overview = await window.workbenchClient.getConfigOverview();
-      setRuntime(overview?.hermes?.runtime ?? next.hermesRuntime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
+      setRuntime(overview?.hermes?.runtime ?? next.hermesRuntime ?? { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "yolo", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? rootPath);
       setBridge(overview?.hermes?.bridge);
       void permissionOverview.refresh();
@@ -142,7 +142,7 @@ export function SettingsPanel(props: {
     try {
       const result = await window.workbenchClient.importExistingHermesConfig();
       const overview = await window.workbenchClient.getConfigOverview();
-      setRuntime(overview?.hermes?.runtime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" });
+      setRuntime(overview?.hermes?.runtime ?? { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "yolo", permissionPolicy: "bridge_guarded" });
       setRootPath(overview?.hermes?.rootPath ?? rootPath);
       setBridge(overview?.hermes?.bridge);
       store.setRuntimeConfig(overview?.runtimeConfig);
@@ -186,6 +186,10 @@ export function SettingsPanel(props: {
           <h3 className="text-sm font-semibold text-slate-900">Hermes 运行环境</h3>
         </div>
         <div className="grid gap-4">
+          <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-4 py-3 text-sm">
+            <span className="font-medium text-emerald-900">当前正在使用：</span>
+            <span className="ml-2 font-semibold text-emerald-700">{runtime.mode === "wsl" ? "WSL" : "Windows"}</span>
+          </div>
           <label className="grid gap-1 text-sm">
             <span className="text-slate-500">运行位置</span>
             <select
@@ -233,7 +237,7 @@ export function SettingsPanel(props: {
             <span className="text-slate-500">CLI 权限模式</span>
             <select
               className="rounded-lg border border-slate-200 px-3 py-2 text-slate-800"
-              value={runtime.cliPermissionMode ?? "guarded"}
+              value={runtime.cliPermissionMode ?? "yolo"}
               onChange={(event) => setRuntime({ ...runtime, cliPermissionMode: event.target.value as HermesRuntimeConfig["cliPermissionMode"] })}
             >
               <option value="guarded">guarded：使用 CLI 默认审批</option>
@@ -246,7 +250,7 @@ export function SettingsPanel(props: {
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-semibold text-slate-800">Permission Overview</span>
               <span>policy={permissionOverview.data?.permissionPolicy ?? runtime.permissionPolicy ?? "bridge_guarded"}</span>
-              <span>cli={permissionOverview.data?.cliPermissionMode ?? runtime.cliPermissionMode ?? "guarded"}</span>
+              <span>cli={permissionOverview.data?.cliPermissionMode ?? runtime.cliPermissionMode ?? "yolo"}</span>
               <span>transport={permissionOverview.data?.transport ?? (runtime.mode === "wsl" ? "native-arg-env" : "windows-headless")}</span>
               <span>blocked={String(Boolean(policyBlock))}</span>
               {overviewIsFallback ? <span className="rounded-full bg-amber-100 px-2 py-0.5 font-semibold text-amber-700">fallback preview</span> : null}
@@ -307,6 +311,7 @@ export function SettingsPanel(props: {
             </div>
           ) : null}
           <div className="grid gap-3 sm:grid-cols-2">
+            <InfoCard label="当前运行" value={runtime.mode === "wsl" ? "WSL" : "Windows"} />
             <InfoCard label="Bridge 状态" value={bridge?.running ? "已启动" : "未启动"} />
             <InfoCard label="Bridge 端口" value={bridge?.port ? String(bridge.port) : "unknown"} />
             <InfoCard label="Hermes Source" value={runtime.installSource ? `${runtime.installSource.sourceLabel} · ${runtime.installSource.repoUrl}` : "未配置"} monospace />
