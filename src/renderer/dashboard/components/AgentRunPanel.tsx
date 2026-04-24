@@ -20,7 +20,15 @@ import type { ReactNode } from "react";
 import type { EngineEvent, ModelProfile, PermissionOverview, RuntimeConfig, SessionAgentInsightUsage, TaskEventEnvelope, TaskRunProjection } from "../../../shared/types";
 import { useAppStore } from "../../store";
 import { cn } from "../DashboardPrimitives";
-import { extractPermissionDiagnostics, enforcementMatrix } from "../permissionModel";
+import {
+  capabilityProbeUserLabel,
+  cliPermissionModeUserLabel,
+  extractPermissionDiagnostics,
+  enforcementMatrix,
+  permissionPolicyUserLabel,
+  sessionModeUserLabel,
+  transportUserLabel,
+} from "../permissionModel";
 
 type FixTarget = "model" | "hermes" | "health" | "diagnostics" | "workspace";
 type ProgressTone = "complete" | "waiting" | "failed";
@@ -359,28 +367,20 @@ function PermissionDiagnosticsView(props: { diagnostics: ReturnType<typeof extra
     return (
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-2 text-[12px]">
-          <TokenMetric label="Policy" value={props.overview.permissionPolicy} />
-          <TokenMetric label="CLI mode" value={props.overview.cliPermissionMode} />
-          <TokenMetric label="Transport" value={props.overview.transport ?? props.diagnostics.transport ?? "none"} />
-          <TokenMetric label="Session" value={props.overview.sessionMode ?? props.diagnostics.sessionMode ?? "fresh/resume"} />
+          <TokenMetric label="运行保护" value={permissionPolicyUserLabel(props.overview.permissionPolicy)} />
+          <TokenMetric label="命令确认" value={cliPermissionModeUserLabel(props.overview.cliPermissionMode)} />
+          <TokenMetric label="启动方式" value={transportUserLabel(props.overview.transport ?? props.diagnostics.transport ?? "none")} />
+          <TokenMetric label="会话状态" value={sessionModeUserLabel(props.overview.sessionMode ?? props.diagnostics.sessionMode ?? "fresh/resume")} />
         </div>
         {props.overview.blockReason ? (
-          <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] text-rose-800">
-            <p className="font-semibold">{props.overview.blockReason.code}</p>
-            <p className="mt-1 leading-5">{props.overview.blockReason.detail}</p>
-          </div>
+          <PermissionBlockCard block={props.overview.blockReason} />
         ) : null}
         {props.overview.capabilityProbe ? (
-          <details className="rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
-            <summary className="cursor-pointer font-semibold">Capability probe summary</summary>
-            <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
-              {JSON.stringify(props.overview.capabilityProbe, null, 2)}
-            </pre>
-          </details>
+          <TechnicalDetails title={`Hermes 能力检测：${capabilityProbeUserLabel(props.overview.capabilityProbe)}`} payload={props.overview.capabilityProbe} />
         ) : null}
-        <BoundaryGroup title="Hard-enforceable" rows={hard} tone="green" />
-        <BoundaryGroup title="Soft-guarded" rows={soft} tone="amber" />
-        <BoundaryGroup title="Not-enforceable-yet" rows={missing} tone="rose" />
+        <BoundaryGroup title="桌面端已强制保护" rows={hard} tone="green" />
+        <BoundaryGroup title="由 Hermes 确认或提示保护" rows={soft} tone="amber" />
+        <BoundaryGroup title="目前只是提醒，未硬限制" rows={missing} tone="rose" />
       </div>
     );
   }
@@ -392,30 +392,58 @@ function PermissionDiagnosticsView(props: { diagnostics: ReturnType<typeof extra
   return (
     <div className="space-y-3">
       <div className="grid grid-cols-2 gap-2 text-[12px]">
-        <TokenMetric label="Policy" value={props.diagnostics.permissionPolicy ?? runtime?.permissionPolicy ?? "bridge_guarded"} />
-        <TokenMetric label="CLI mode" value={props.diagnostics.cliPermissionMode ?? runtime?.cliPermissionMode ?? "guarded"} />
-        <TokenMetric label="Transport" value={props.diagnostics.transport ?? (runtime?.mode === "wsl" ? "native-arg-env" : "windows-headless")} />
-        <TokenMetric label="Session" value={props.diagnostics.sessionMode ?? "fresh/resume"} />
+        <TokenMetric label="运行保护" value={permissionPolicyUserLabel(props.diagnostics.permissionPolicy ?? runtime?.permissionPolicy ?? "bridge_guarded")} />
+        <TokenMetric label="命令确认" value={cliPermissionModeUserLabel(props.diagnostics.cliPermissionMode ?? runtime?.cliPermissionMode ?? "guarded")} />
+        <TokenMetric label="启动方式" value={transportUserLabel(props.diagnostics.transport ?? (runtime?.mode === "wsl" ? "native-arg-env" : "windows-headless"))} />
+        <TokenMetric label="会话状态" value={sessionModeUserLabel(props.diagnostics.sessionMode ?? "fresh/resume")} />
       </div>
       {props.diagnostics.policyBlock ? (
-        <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] text-rose-800">
-          <p className="font-semibold">{props.diagnostics.policyBlock.code}</p>
-          <p className="mt-1 leading-5">{props.diagnostics.policyBlock.detail}</p>
-        </div>
+        <PermissionBlockCard block={props.diagnostics.policyBlock} />
       ) : null}
       {props.diagnostics.capabilityProbe ? (
-        <details className="rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
-          <summary className="cursor-pointer font-semibold">Capability probe summary</summary>
-          <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
-            {JSON.stringify(props.diagnostics.capabilityProbe, null, 2)}
-          </pre>
-        </details>
+        <TechnicalDetails title={`Hermes 能力检测：${capabilityProbeUserLabel(props.diagnostics.capabilityProbe)}`} payload={props.diagnostics.capabilityProbe} />
       ) : null}
-      <BoundaryGroup title="Hard-enforceable" rows={hard} tone="green" />
-      <BoundaryGroup title="Soft-guarded" rows={soft} tone="amber" />
-      <BoundaryGroup title="Not-enforceable-yet" rows={missing} tone="rose" />
+      {props.diagnostics.wslWorkerDetail ? (
+        <TechnicalDetails title={`WSL Worker：${wslWorkerStatusLabel(props.diagnostics.wslWorkerStatus)}`} payload={{ message: props.diagnostics.wslWorkerDetail }} />
+      ) : null}
+      <BoundaryGroup title="桌面端已强制保护" rows={hard} tone="green" />
+      <BoundaryGroup title="由 Hermes 确认或提示保护" rows={soft} tone="amber" />
+      <BoundaryGroup title="目前只是提醒，未硬限制" rows={missing} tone="rose" />
     </div>
   );
+}
+
+function PermissionBlockCard(props: { block: NonNullable<PermissionOverview["blockReason"]> }) {
+  return (
+    <div className="rounded-lg border border-rose-100 bg-rose-50 px-3 py-2 text-[12px] text-rose-800">
+      <p className="font-semibold">{props.block.summary}</p>
+      <p className="mt-1 leading-5">{props.block.detail}</p>
+      {props.block.fixHint ? <p className="mt-1 font-medium">{props.block.fixHint}</p> : null}
+      <details className="mt-1">
+        <summary className="cursor-pointer font-semibold">技术详情</summary>
+        <p className="mt-1 font-mono text-[11px]">{props.block.code}</p>
+      </details>
+    </div>
+  );
+}
+
+function TechnicalDetails(props: { title: string; payload: unknown }) {
+  return (
+    <details className="rounded-lg bg-slate-50 px-3 py-2 text-[12px] text-slate-600">
+      <summary className="cursor-pointer font-semibold">{props.title}</summary>
+      <pre className="mt-2 max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
+        {JSON.stringify(props.payload, null, 2)}
+      </pre>
+    </details>
+  );
+}
+
+function wslWorkerStatusLabel(status?: string) {
+  if (status === "ready") return "已复用或启动";
+  if (status === "enabled") return "已启用";
+  if (status === "fallback") return "已回退";
+  if (status === "crashed") return "已崩溃";
+  return status || "关闭";
 }
 
 function overviewRows(items: string[]) {
@@ -648,11 +676,12 @@ function runStatusLabel(status?: TaskRunProjection["status"]) {
 
 function progressRows(run: TaskRunProjection): Array<{ label: string; value: string; tone: ProgressTone }> {
   const failed = run.status === "failed" || run.status === "cancelled" || run.status === "interrupted";
+  const finalStatus = run.status === "cancelled" ? "已取消" : run.status === "interrupted" ? "已中断" : "已失败";
   return [
-    { label: "准备上下文", value: "完成", tone: "complete" },
-    { label: "模型响应", value: run.status === "routing" ? "等待中" : failed ? "未完成" : "完成", tone: run.status === "routing" ? "waiting" : failed ? "failed" : "complete" },
-    { label: "工具执行", value: run.toolEvents.length ? `${run.toolEvents.length} 步` : "等待中", tone: run.toolEvents.length ? "complete" : "waiting" },
-    { label: "生成回复", value: run.status === "complete" ? "完成" : failed ? "未完成" : "等待中", tone: run.status === "complete" ? "complete" : failed ? "failed" : "waiting" },
+    { label: "准备运行环境", value: "完成", tone: "complete" },
+    { label: "等待模型回复", value: run.status === "routing" ? "等待中" : failed ? finalStatus : "完成", tone: run.status === "routing" ? "waiting" : failed ? "failed" : "complete" },
+    { label: "执行工具/文件操作", value: run.toolEvents.length ? `${run.toolEvents.length} 步` : failed ? finalStatus : "等待中", tone: run.toolEvents.length ? "complete" : failed ? "failed" : "waiting" },
+    { label: "整理最终回复", value: run.status === "complete" ? "完成" : failed ? finalStatus : "等待中", tone: run.status === "complete" ? "complete" : failed ? "failed" : "waiting" },
   ];
 }
 

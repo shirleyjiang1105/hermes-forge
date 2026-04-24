@@ -305,10 +305,12 @@ function SettingsView(props: {
     try {
       const workspacePath = useAppStore.getState().workspacePath || undefined;
       const result = await window.workbenchClient.exportOneClickDiagnostics(workspacePath);
-      showSaveNotice(result.message);
       const targetPath = result.diagnosticsPath || result.path;
       if (result.ok && targetPath) {
+        showSaveNotice("诊断报告已导出，已打开所在位置。这个文件夹已脱敏，可附到 issue 或发给维护者排查。");
         void window.workbenchClient.openPath(targetPath);
+      } else {
+        showSaveNotice(result.message);
       }
     } catch (error) {
       showSaveNotice(error instanceof Error ? error.message : "导出诊断报告失败");
@@ -1444,7 +1446,10 @@ function App() {
       event,
     });
     if (result.ok && result.path) {
+      store.success("诊断报告已导出", "已打开报告文件夹。报告已脱敏，可附到 issue 或发给维护者排查。");
       void window.workbenchClient.openPath(result.path);
+    } else if (!result.ok) {
+      store.error("诊断导出失败", result.message);
     }
   }
 

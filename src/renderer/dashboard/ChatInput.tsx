@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ClipboardEvent, DragEvent, ReactNode } from "react";
 import { useAppStore } from "../store";
 import { cn } from "./DashboardPrimitives";
-import { buildPreflightState } from "./permissionModel";
+import { buildPreflightState, preflightChipsForUser, preflightDetailForUser, preflightSummaryForUser } from "./permissionModel";
 
 type FixTarget = "model" | "hermes" | "health" | "diagnostics" | "workspace";
 
@@ -727,13 +727,15 @@ function PreflightStrip(props: { preflight: ReturnType<typeof buildPreflightStat
     : props.preflight.tone === "yellow"
       ? "bg-amber-500"
       : "bg-rose-500";
-  const chips = preflightChips(props.preflight).slice(0, 2);
+  const chips = preflightChipsForUser(props.preflight).slice(0, 3);
+  const summary = preflightSummaryForUser(props.preflight);
+  const detail = preflightDetailForUser(props.preflight);
   return (
     <div className={cn("mb-2 rounded-2xl border px-3 py-2 text-[11px]", toneClass)}>
       <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span className="inline-flex items-center gap-1.5 font-semibold">
           <span className={cn("h-2 w-2 rounded-full", dotClass)} />
-          {props.preflight.summary}
+          {summary}
         </span>
         {chips.map((chip) => (
           <span
@@ -746,33 +748,18 @@ function PreflightStrip(props: { preflight: ReturnType<typeof buildPreflightStat
       </div>
       {props.preflight.block ? (
         <details className="mt-1">
-          <summary className="cursor-pointer font-semibold">阻断详情</summary>
-          <p className="mt-1 leading-5">{props.preflight.block.detail}</p>
+          <summary className="cursor-pointer font-semibold">为什么会这样 / 怎么修</summary>
+          <p className="mt-1 leading-5">{detail}</p>
           <p className="mt-1 font-medium">{props.preflight.block.fixHint}</p>
+        </details>
+      ) : props.preflight.tone === "yellow" ? (
+        <details className="mt-1">
+          <summary className="cursor-pointer font-semibold">当前等待或风险说明</summary>
+          <p className="mt-1 leading-5">{detail}</p>
         </details>
       ) : null}
     </div>
   );
-}
-
-function preflightChips(preflight: ReturnType<typeof buildPreflightState>) {
-  const sessionChip = preflight.blocked && preflight.summary === "当前会话正在处理中"
-    ? "等待本轮完成"
-    : preflight.sessionMode === "resumed" || preflight.sessionMode === "continued"
-    ? "延续上次会话"
-    : preflight.sessionMode === "degraded"
-      ? "会话恢复受限"
-      : "新一轮会话";
-
-  const policyChip = preflight.permissionPolicy === "passthrough"
-    ? "项目操作更宽松"
-    : preflight.permissionPolicy === "restricted_workspace"
-      ? "工作区强限制"
-      : preflight.bridgeEnabled
-        ? "Windows 能力受保护"
-        : "Windows 联动已关闭";
-
-  return [sessionChip, policyChip];
 }
 
 function toFileUrl(filePath: string) {

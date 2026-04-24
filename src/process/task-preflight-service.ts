@@ -9,10 +9,16 @@ import { resolveEnginePermissions } from "../shared/types";
 import type { AppError, StartTaskInput } from "../shared/types";
 import { missingSecretMessage, normalizeOpenAiCompatibleBaseUrl, requiresStoredSecret } from "../shared/model-config";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import type { RuntimePreflightResult } from "../runtime/runtime-types";
 import { summarizePreflightFailure } from "../runtime/runtime-preflight";
 
 export class TaskPreflightService {
   private healthCache?: { checkedAt: number; health: Awaited<ReturnType<EngineAdapter["healthCheck"]>> };
+  private runtimePreflightCache?: {
+    checkedAt: number;
+    key: string;
+    result: RuntimePreflightResult;
+  };
 
   constructor(
     private readonly appPaths: AppPaths,
@@ -49,10 +55,17 @@ export class TaskPreflightService {
       pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
       windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native" as const,
     };
-    const result = await this.runtimeAdapterFactory(runtime).preflight({
-      workspacePath: input.workspacePath?.trim() || input.sessionFilesPath,
-      requireBridge: true,
-    });
+    const key = this.runtimePreflightCacheKey(config, input);
+    const cached = this.runtimePreflightCache;
+    const result = cached && cached.key === key && Date.now() - cached.checkedAt < 15_000
+      ? cached.result
+      : await this.runtimeAdapterFactory(runtime).preflight({
+        workspacePath: input.workspacePath?.trim() || input.sessionFilesPath,
+        requireBridge: true,
+      });
+    if (result !== cached?.result) {
+      this.runtimePreflightCache = { checkedAt: Date.now(), key, result };
+    }
     if (!result.ok) {
       const failure = summarizePreflightFailure(result);
       throw this.appError(
@@ -62,6 +75,19 @@ export class TaskPreflightService {
         failure.code === "hermes_root_missing" || failure.code === "hermes_cli_missing" ? "install_hermes" : "open_settings",
       );
     }
+  }
+
+  private runtimePreflightCacheKey(config: Awaited<ReturnType<RuntimeConfigStore["read"]>>, input: StartTaskInput) {
+    const runtime = config.hermesRuntime;
+    return [
+      input.workspacePath?.trim() || input.sessionFilesPath,
+      runtime?.mode ?? "windows",
+      runtime?.distro?.trim() ?? "",
+      runtime?.pythonCommand?.trim() ?? "python3",
+      runtime?.managedRoot?.trim() ?? "",
+      runtime?.windowsAgentMode ?? "hermes_native",
+      input.modelProfileId ?? "",
+    ].join("\0");
   }
 
   private async assertHermesPermissions(input: StartTaskInput) {

@@ -125,7 +125,7 @@ describe("WslDistroService", () => {
 
     const result = await service.createOrAttach({ requestedBy: "install", explicitCreate: true });
 
-    expect(runCommand).toHaveBeenNthCalledWith(1, "wsl.exe", ["--install", "-d", "Ubuntu"], expect.objectContaining({
+    expect(runCommand).toHaveBeenNthCalledWith(1, "wsl.exe", ["--install", "-d", "Ubuntu", "--no-launch"], expect.objectContaining({
       commandId: "install.wsl.bootstrap-distro",
       timeoutMs: 15 * 60 * 1000,
     }));
@@ -139,5 +139,58 @@ describe("WslDistroService", () => {
     expect(write).toHaveBeenCalledWith(expect.objectContaining({
       hermesRuntime: expect.objectContaining({ mode: "wsl", distro: "Ubuntu" }),
     }));
+  });
+
+  it("reports first-launch initialization clearly after Ubuntu is installed but not reachable yet", async () => {
+    const read = vi.fn(async () => config());
+    const write = vi.fn(async (next: RuntimeConfig) => next);
+    const runtimeProbeService = {
+      probe: vi
+        .fn()
+        .mockResolvedValueOnce(probe({
+          distroExists: false,
+          distroReachable: false,
+          commands: {
+            ...probe().commands,
+            wsl: { available: true, message: "no distro", distroExists: false, distroReachable: false },
+          },
+          overallStatus: "unavailable",
+        }))
+        .mockResolvedValueOnce(probe({ distroReachable: false, overallStatus: "unavailable" })),
+    };
+    vi.mocked(runCommand)
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        stdout: "Ubuntu installed",
+        stderr: "",
+        diagnostics: { stdoutPreview: "Ubuntu installed", stderrPreview: "", exitCode: 0 } as any,
+      })
+      .mockResolvedValueOnce({
+        exitCode: 1,
+        stdout: "",
+        stderr: "The distribution has not completed first launch initialization.",
+        diagnostics: { stdoutPreview: "", stderrPreview: "The distribution has not completed first launch initialization.", exitCode: 1 } as any,
+      });
+    const service = new WslDistroService(
+      new AppPaths(tempRoot),
+      { read, write } as any,
+      runtimeProbeService as any,
+      (() => ({ getBridgeAccessHost: vi.fn(async () => "127.0.0.1") })) as any,
+      { diagnose: vi.fn(async () => ({ overallStatus: "unsupported" })) } as any,
+    );
+
+    const result = await service.createOrAttach({ requestedBy: "install", explicitCreate: true });
+
+    expect(result.createdNow).toBe(true);
+    expect(result.reachableAfterCreate).toBe(false);
+    expect(result.recovery?.code).toBe("distro_initialization_required");
+    expect(result.recovery?.fixHint).toContain("打开 Ubuntu");
+    expect(result.steps).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        step: "verify-distro-entry",
+        status: "failed",
+        code: "distro_initialization_required",
+      }),
+    ]));
   });
 });

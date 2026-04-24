@@ -97,6 +97,7 @@ app.whenReady().then(async () => {
       windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
       cliPermissionMode: config.hermesRuntime?.cliPermissionMode ?? "yolo",
       permissionPolicy: config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
+      workerMode: config.hermesRuntime?.workerMode ?? "off",
       installSource: config.hermesRuntime?.installSource,
     };
     if (runtime.mode === "wsl") {
@@ -378,8 +379,27 @@ app.whenReady().then(async () => {
     }),
   });
 
-  // Heavy startup probes are intentionally disabled by default. Users can still
-  // refresh Hermes status, run setup checks, or start Gateway from the UI.
+  const scheduleStartupWarmup = () => {
+    setTimeout(() => {
+      void (async () => {
+        const config = await configStore.read();
+        const mode = config.startupWarmupMode ?? "off";
+        if (mode === "off" || !hermes.warmup) {
+          return;
+        }
+        const probeKind = mode === "real_probe" ? "real" : "cheap";
+        const runtimeEnv = probeKind === "real"
+          ? await runtimeEnvResolver.resolve(config.defaultModelProfileId).catch(() => undefined)
+          : undefined;
+        const result = await hermes.warmup(probeKind, undefined, runtimeEnv);
+        console.info("[Hermes Forge] Startup warmup completed:", result);
+      })().catch((error) => {
+        console.warn("[Hermes Forge] Startup warmup failed:", error);
+      });
+    }, 4000);
+  };
+
+  scheduleStartupWarmup();
   clientAutoUpdateService.scheduleStartupCheck(30000);
 
   app.on("activate", () => {

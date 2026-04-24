@@ -53,6 +53,7 @@ describe("runtimeConfigSchema", () => {
       windowsAgentMode: "hermes_native",
       cliPermissionMode: "yolo",
       permissionPolicy: "bridge_guarded",
+      workerMode: "off",
     });
   });
 
@@ -66,6 +67,7 @@ describe("runtimeConfigSchema", () => {
         windowsAgentMode: "host_tool_loop",
         cliPermissionMode: "safe",
         permissionPolicy: "passthrough",
+        workerMode: "experimental_wsl",
         installSource: {
           repoUrl: "https://github.com/example/hermes-agent.git",
           branch: "main",
@@ -82,6 +84,7 @@ describe("runtimeConfigSchema", () => {
       windowsAgentMode: "host_tool_loop",
       cliPermissionMode: "safe",
       permissionPolicy: "passthrough",
+      workerMode: "experimental_wsl",
       installSource: {
         repoUrl: "https://github.com/example/hermes-agent.git",
         branch: "main",

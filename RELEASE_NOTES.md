@@ -1,5 +1,47 @@
 # Release Notes
 
+## Hermes Forge v0.1.17
+
+发布日期：2026-04-24
+
+这是一次面向 Windows + WSL 用户的稳定性和速度打磨版本。重点是降低连续回复的启动等待、修复实验性 WSL Worker 设置无法保存的问题，并改善新电脑首次安装 WSL / Ubuntu / Hermes Agent 时的可恢复体验。
+
+### 新增内容
+
+- 新增实验性“常驻 WSL Worker”灰度开关：
+  - 默认关闭，只在 WSL runtime 下生效。
+  - 开启后会复用一个常驻 WSL worker，减少连续任务中的 `wsl.exe` 冷启动等待。
+  - worker 异常、崩溃或协议失败时会自动回退到普通 WSL CLI 启动链路。
+- Agent 技术详情新增 WSL Worker 状态诊断：
+  - enabled
+  - ready
+  - fallback
+  - crashed
+- Managed WSL 安装链路优化新电脑首次安装：
+  - 自动安装 Ubuntu 时优先使用 `wsl.exe --install -d Ubuntu --no-launch`，避免后台卡在 Ubuntu 首次交互初始化。
+  - 若 Windows 需要重启或 Ubuntu 需要首次打开初始化，现在会给出明确下一步，而不是显示成模糊失败。
+
+### 修复内容
+
+- 修复“常驻 WSL Worker”在设置页点击开启并保存后又恢复关闭的问题。
+- 修复主进程配置保存 schema 未允许 `workerMode`，导致新字段被过滤的问题。
+- 优化 WSL Hermes 启动链路的 warmup / preflight / capability / path 缓存，减少重复检测开销。
+- 优化首启、聊天输入区、Agent 面板和权限诊断文案，减少普通用户看到内部字段名的机会。
+- 修复新电脑 WSL/Ubuntu 尚未初始化时，自动安装流程缺少明确恢复提示的问题。
+
+### 已知限制
+
+- 实验性 WSL Worker 当前只减少 `wsl.exe` / WSL shell 冷启动；每个请求内部仍会启动 Hermes CLI 子进程。
+- Windows 首次启用 WSL/虚拟化有时仍需要系统重启。
+- Ubuntu 首次初始化仍需要用户打开一次 Ubuntu 并完成用户名/密码设置。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过。
+- `npm run package:win` 通过。
+
 ## Hermes Forge v0.1.13
 
 发布日期：2026-04-23

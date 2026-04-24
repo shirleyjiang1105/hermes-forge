@@ -13,6 +13,7 @@ import {
   type LaunchMetadataBridge,
 } from "./hermes-launch-metadata";
 import { runCommand, streamCommand } from "../../process/command-runner";
+import type { CommandLineEvent } from "../../process/command-runner";
 import { validateWslHermesCli, type HermesCliValidationFailureKind } from "../../runtime/hermes-cli-resolver";
 import type { RuntimeAdapterFactory } from "../../runtime/runtime-adapter";
 import { toWslPath as runtimeToWslPath } from "../../runtime/runtime-resolver";
@@ -25,6 +26,7 @@ import type {
   EngineEvent,
   EngineHealth,
   EngineRunRequest,
+  EngineRuntimeEnv,
   HermesCliPermissionMode,
   HermesRuntimeConfig,
   EngineUpdateStatus,
@@ -32,6 +34,7 @@ import type {
   PermissionOverviewBlockReason,
   RuntimeConfig,
 } from "../../shared/types";
+import { HermesWslWorker } from "./hermes-wsl-worker";
 
 const now = () => new Date().toISOString();
 const HEADLESS_RESULT_START = "__HERMES_FORGE_RESULT_START__";
@@ -129,8 +132,9 @@ export class HermesCliAdapter implements EngineAdapter {
   capabilities = ["file_memory", "private_skills", "context_bridge", "cli"] as const;
   private windowsPython?: Promise<{ command: string; argsPrefix: string[]; lastError?: string }>;
   private windowsHeadlessWorker?: HermesHeadlessWorker;
+  private wslWorker?: HermesWslWorker;
   private readonly liveCliSessionMappings = new Set<string>();
-  private cliCapabilityProbe?: Promise<HermesCliCapabilityProbe>;
+  private cliCapabilityProbe?: { key: string; probe: Promise<HermesCliCapabilityProbe> };
 
   constructor(
     private readonly appPaths: AppPaths,
@@ -166,6 +170,30 @@ export class HermesCliAdapter implements EngineAdapter {
         message: `未找到 Hermes CLI，请确认 ${rootPath} 存在。`,
       };
     }
+    if (runtime.mode === "wsl") {
+      const capabilities = await this.negotiateCliCapabilities(runtime, rootPath);
+      if (!capabilities.minimumSatisfied) {
+        const block = this.cliCapabilityBlockReason(capabilities);
+        return {
+          engineId: this.id,
+          label: this.label,
+          available: false,
+          mode: "cli",
+          path: rootPath,
+          version: capabilities.cliVersion,
+          message: `${block.summary}：${block.detail}`,
+        };
+      }
+      return {
+        engineId: this.id,
+        label: this.label,
+        available: true,
+        mode: "cli",
+        version: capabilities.cliVersion,
+        path: rootPath,
+        message: "Hermes CLI 已通过 WSL 接入。",
+      };
+    }
 
     const launch = await this.launchSpec(runtime, rootPath, [cliPath, "--version"], rootPath);
     const result = await runCommand(launch.command, launch.args, {
@@ -184,9 +212,60 @@ export class HermesCliAdapter implements EngineAdapter {
       version: result.stdout.split(/\r?\n/)[0]?.trim(),
       path: rootPath,
       message: result.exitCode === 0
-        ? (runtime.mode === "wsl" ? "Hermes CLI 已通过 WSL 接入。" : "Hermes CLI 已接入真实本地安装。")
+        ? "Hermes CLI 已接入真实本地安装。"
         : `Hermes 检测失败：${failure}`,
     };
+  }
+
+  async warmup(kind: "cheap" | "real" = "cheap", workspacePath?: string, runtimeEnv?: EngineRuntimeEnv) {
+    const startedAt = Date.now();
+    const runtime = await this.hermesRuntime();
+    try {
+      const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
+      if (runtime.mode === "wsl") {
+        const capabilities = await this.negotiateCliCapabilities(runtime, rootPath);
+        if (!capabilities.minimumSatisfied) {
+          return {
+            ok: false,
+            message: `Hermes WSL 预热未完成：${capabilities.reason ?? `缺失能力 ${capabilities.missing.join(", ")}`}`,
+            probeKind: kind,
+            diagnosticCategory: "agent" as const,
+            durationMs: Date.now() - startedAt,
+            provider: runtimeEnv?.provider,
+            model: runtimeEnv?.model,
+          };
+        }
+        return {
+          ok: true,
+          message: `Hermes WSL 已预热：${workspacePath ? `工作区 ${workspacePath}，` : ""}CLI capability 缓存就绪。`,
+          probeKind: kind,
+          durationMs: Date.now() - startedAt,
+          provider: runtimeEnv?.provider,
+          model: runtimeEnv?.model,
+        };
+      }
+
+      const health = await this.healthCheck();
+      return {
+        ok: health.available,
+        message: health.available ? "Hermes Windows runtime 已预热。" : health.message,
+        probeKind: kind,
+        diagnosticCategory: health.available ? undefined : "agent" as const,
+        durationMs: Date.now() - startedAt,
+        provider: runtimeEnv?.provider,
+        model: runtimeEnv?.model,
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        message: error instanceof Error ? error.message : "Hermes 预热失败。",
+        probeKind: kind,
+        diagnosticCategory: "unknown" as const,
+        durationMs: Date.now() - startedAt,
+        provider: runtimeEnv?.provider,
+        model: runtimeEnv?.model,
+      };
+    }
   }
 
   async *run(request: EngineRunRequest, signal: AbortSignal): AsyncIterable<EngineEvent> {
@@ -276,13 +355,11 @@ export class HermesCliAdapter implements EngineAdapter {
     const stderrLines: string[] = [];
     const streamReplyLines: string[] = [];
     try {
-      for await (const event of streamCommand(launch.command, launch.args, {
-        cwd: launch.cwd,
-        signal,
-        timeoutMs: 10 * 60 * 1000,
-        env: launch.env,
-        detached: launch.detached,
-      })) {
+      for await (const event of this.streamWslInvocation(runtime, rootPath, invocation.args, launch, request, signal, 10 * 60 * 1000)) {
+        if (event.type === "diagnostic") {
+          yield event;
+          continue;
+        }
         if (event.type === "stdout") {
           stdoutLines.push(event.line);
           const normalizedLine = this.normalizeReply(event.line);
@@ -297,7 +374,7 @@ export class HermesCliAdapter implements EngineAdapter {
           if (!this.isTechnicalLine(event.line)) {
             yield { type: "stderr", line: event.line, at: now() };
           }
-        } else {
+        } else if (event.type === "exit") {
           exitCode = event.exitCode;
         }
       }
@@ -362,18 +439,12 @@ export class HermesCliAdapter implements EngineAdapter {
     const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request, invocation.env);
     const lines: string[] = [];
     try {
-      for await (const event of streamCommand(launch.command, launch.args, {
-        cwd: launch.cwd,
-        signal,
-        timeoutMs: 90_000,
-        env: launch.env,
-        detached: launch.detached,
-      })) {
+      for await (const event of this.streamWslInvocation(runtime, rootPath, invocation.args, launch, request, signal, 90_000)) {
         if (event.type === "stdout") {
           lines.push(event.line);
         } else if (event.type === "stderr") {
           lines.push(event.line);
-        } else if (event.exitCode !== 0) {
+        } else if (event.type === "exit" && event.exitCode !== 0) {
           throw new Error(`Hermes Tool Loop 规划失败，退出码 ${event.exitCode ?? "unknown"}。`);
         }
       }
@@ -388,6 +459,8 @@ export class HermesCliAdapter implements EngineAdapter {
   async stop(_sessionId: string) {
     await this.windowsHeadlessWorker?.stop();
     this.windowsHeadlessWorker = undefined;
+    await this.wslWorker?.stop();
+    this.wslWorker = undefined;
     return;
   }
 
@@ -782,6 +855,81 @@ export class HermesCliAdapter implements EngineAdapter {
     }, signal);
   }
 
+  private async *streamWslInvocation(
+    runtime: HermesRuntimeConfig,
+    rootPath: string,
+    pythonArgs: string[],
+    launch: { command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; detached?: boolean },
+    request: EngineRunRequest,
+    signal: AbortSignal,
+    timeoutMs: number,
+  ): AsyncIterable<CommandLineEvent | Extract<EngineEvent, { type: "diagnostic" }>> {
+    if (runtime.mode === "wsl" && runtime.workerMode === "experimental_wsl") {
+      yield {
+        type: "diagnostic",
+        category: "hermes-wsl-worker",
+        message: "enabled：常驻 WSL Hermes worker 已启用，本轮将优先通过 worker 执行。",
+        at: now(),
+      };
+      try {
+        const worker = await this.ensureWslWorker(rootPath, runtime, launch.env);
+        for await (const event of worker.run({
+          cwd: runtimeToWslPath(request.workspacePath),
+          rootPath,
+          args: pythonArgs,
+          env: launch.env,
+          timeoutMs,
+        }, signal)) {
+          if (event.type === "ready") {
+            yield {
+              type: "diagnostic",
+              category: "hermes-wsl-worker",
+              message: event.reused
+                ? "ready：已复用常驻 WSL Hermes worker。"
+                : "ready：常驻 WSL Hermes worker 已启动。",
+              at: now(),
+            };
+            continue;
+          }
+          if (event.type === "started") {
+            continue;
+          }
+          if (event.type === "error") {
+            throw new Error(event.message);
+          }
+          yield event;
+        }
+        return;
+      } catch (error) {
+        if (signal.aborted) throw error;
+        await this.wslWorker?.stop();
+        this.wslWorker = undefined;
+        yield {
+          type: "diagnostic",
+          category: "hermes-wsl-worker",
+          message: `crashed：常驻 WSL Hermes worker 不可用。原因：${error instanceof Error ? error.message : String(error)}`,
+          at: now(),
+        };
+        yield {
+          type: "diagnostic",
+          category: "hermes-wsl-worker",
+          message: `fallback：常驻 Worker 启动或执行失败，已使用普通 WSL 启动。原因：${error instanceof Error ? error.message : String(error)}`,
+          at: now(),
+        };
+      }
+    }
+
+    for await (const event of streamCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
+      signal,
+      timeoutMs,
+      env: launch.env,
+      detached: launch.detached,
+    })) {
+      yield event;
+    }
+  }
+
   private async headlessInvocation(rootPath: string, runtime: HermesRuntimeConfig, prompt: HermesPromptPayload, request: EngineRunRequest | undefined, source: string): Promise<HermesInvocation> {
     const promptPath = await this.writePromptFile(prompt.userPrompt);
     const systemPath = await this.writePromptFile(prompt.systemPrompt, "system");
@@ -858,6 +1006,15 @@ export class HermesCliAdapter implements EngineAdapter {
     return packagedPath && await this.exists(packagedPath) ? packagedPath : devPath;
   }
 
+  private async wslWorkerPath() {
+    const processWithResources = process as NodeJS.Process & { resourcesPath?: string };
+    const packagedPath = processWithResources.resourcesPath
+      ? path.join(processWithResources.resourcesPath, "hermes-wsl-worker.py")
+      : undefined;
+    const devPath = path.resolve(process.cwd(), "resources", "hermes-wsl-worker.py");
+    return packagedPath && await this.exists(packagedPath) ? packagedPath : devPath;
+  }
+
   private modelArgs(request: EngineRunRequest) {
     const args: string[] = [];
     const model = request.runtimeEnv?.model?.trim();
@@ -916,8 +1073,16 @@ export class HermesCliAdapter implements EngineAdapter {
         reason: "native launch metadata negotiation is only used for WSL CLI runs",
       });
     }
-    this.cliCapabilityProbe = this.probeCliCapabilities(runtime, rootPath);
-    return await this.cliCapabilityProbe;
+    const key = [
+      runtime.mode,
+      runtime.distro?.trim() ?? "",
+      runtime.pythonCommand?.trim() ?? "python3",
+      rootPath,
+    ].join("\0");
+    if (this.cliCapabilityProbe?.key !== key) {
+      this.cliCapabilityProbe = { key, probe: this.probeCliCapabilities(runtime, rootPath) };
+    }
+    return await this.cliCapabilityProbe.probe;
   }
 
   private async probeCliCapabilities(runtime: HermesRuntimeConfig, rootPath: string): Promise<HermesCliCapabilityProbe> {
@@ -1073,6 +1238,19 @@ export class HermesCliAdapter implements EngineAdapter {
       };
     }
 
+    if (this.liveCliSessionMappings.has(forgeSessionId)) {
+      return {
+        forgeSessionId,
+        status: "continued",
+        cliSessionId: mapping.cliSessionId,
+        cliSource,
+        mappingPath,
+        cliStateDbPath: stateDbPath,
+        cliStateDbRuntimePath: stateDbRuntimePath,
+        resumeArgs: ["--resume", mapping.cliSessionId],
+      };
+    }
+
     const validation = await this.validateCliSessionHandle(runtime, rootPath, mapping.cliSessionId, stateDbPath, stateDbRuntimePath);
     if (!validation.ok) {
       const reason = validation.reason;
@@ -1100,10 +1278,9 @@ export class HermesCliAdapter implements EngineAdapter {
       };
     }
 
-    const status: HermesCliSessionStatus = this.liveCliSessionMappings.has(forgeSessionId) ? "continued" : "resumed";
     return {
       forgeSessionId,
-      status,
+      status: "resumed",
       cliSessionId: mapping.cliSessionId,
       cliSource,
       mappingPath,
@@ -1626,6 +1803,57 @@ export class HermesCliAdapter implements EngineAdapter {
       });
     }
     return this.windowsHeadlessWorker;
+  }
+
+  private async ensureWslWorker(rootPath: string, runtime: HermesRuntimeConfig, env?: NodeJS.ProcessEnv) {
+    const key = this.wslWorkerKey(rootPath, runtime, env);
+    if (this.wslWorker && this.wslWorker.getKey() !== key) {
+      await this.wslWorker.stop();
+      this.wslWorker = undefined;
+    }
+    if (!this.wslWorker) {
+      this.wslWorker = new HermesWslWorker(key, async () => {
+        const workerPath = runtimeToWslPath(await this.wslWorkerPath());
+        const pythonCommand = runtime.pythonCommand?.trim() || "python3";
+        return {
+          command: "wsl.exe",
+          args: [
+            ...this.wslDistroArgs(runtime),
+            "--cd",
+            rootPath,
+            "env",
+            "PYTHONUTF8=1",
+            "PYTHONIOENCODING=utf-8",
+            "PYTHONUNBUFFERED=1",
+            pythonCommand,
+            workerPath,
+          ],
+          cwd: process.cwd(),
+          env: process.env,
+        };
+      });
+    }
+    return this.wslWorker;
+  }
+
+  private wslWorkerKey(rootPath: string, runtime: HermesRuntimeConfig, env?: NodeJS.ProcessEnv) {
+    const envFingerprint = crypto.createHash("sha256").update(JSON.stringify({
+      provider: env?.HERMES_INFERENCE_PROVIDER,
+      model: env?.OPENAI_MODEL,
+      openaiBaseUrl: env?.OPENAI_BASE_URL ?? env?.AI_BASE_URL,
+      anthropicBaseUrl: env?.ANTHROPIC_BASE_URL,
+      hermesHome: env?.HERMES_HOME,
+      bridgeUrl: env?.HERMES_WINDOWS_BRIDGE_URL,
+      bridgeMode: env?.HERMES_WINDOWS_AGENT_MODE,
+    })).digest("hex").slice(0, 16);
+    return [
+      runtime.distro?.trim() ?? "<default>",
+      rootPath,
+      runtime.pythonCommand?.trim() || "python3",
+      runtime.permissionPolicy ?? "bridge_guarded",
+      runtime.cliPermissionMode ?? "yolo",
+      envFingerprint,
+    ].join("\0");
   }
 
   private async detectWindowsPython(rootPath: string, cliPath: string, env: NodeJS.ProcessEnv) {

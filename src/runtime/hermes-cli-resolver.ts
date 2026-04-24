@@ -5,6 +5,7 @@ import type { HermesRuntimeConfig, RuntimeConfig } from "../shared/types";
 import { toWslPath } from "./runtime-resolver";
 
 const WSL_TIMEOUT_MS = 12_000;
+const RESOLVED_WSL_CLI_CACHE_MS = 60_000;
 
 export type HermesCliValidationFailureKind =
   | "distro_missing"
@@ -41,6 +42,8 @@ export type HermesCliValidationResult =
   | { ok: true; capabilities: NonNullable<ResolvedHermesCli["capabilities"]>; command: string; result: CommandResult }
   | HermesCliValidationFailure;
 
+let resolvedWslCliCache: { key: string; checkedAt: number; value: ResolvedHermesCli } | undefined;
+
 export async function resolveHermesCliForRuntime(
   configStore: RuntimeConfigStore,
   runtime: HermesRuntimeConfig,
@@ -55,6 +58,14 @@ export async function resolveHermesCliForRuntime(
       cliPath: path.join(rootPath, "hermes"),
       source: "windows",
     };
+  }
+
+  const cacheKey = resolvedWslCliCacheKey(config, runtime);
+  if (resolvedWslCliCache?.key === cacheKey && Date.now() - resolvedWslCliCache.checkedAt < RESOLVED_WSL_CLI_CACHE_MS) {
+    if (options.persist !== false) {
+      await persistResolvedWslHermesRoot(configStore, config, runtime, resolvedWslCliCache.value.rootPath);
+    }
+    return resolvedWslCliCache.value;
   }
 
   const distro = runtime.distro?.trim();
@@ -81,13 +92,15 @@ export async function resolveHermesCliForRuntime(
     if (options.persist !== false) {
       await persistResolvedWslHermesRoot(configStore, config, runtime, rootPath);
     }
-    return {
+    const resolved = {
       runtime,
       rootPath,
       cliPath,
       source: candidate.source,
       wslHome,
     };
+    resolvedWslCliCache = { key: cacheKey, checkedAt: Date.now(), value: resolved };
+    return resolved;
   }
 
   throw new Error([
@@ -97,6 +110,17 @@ export async function resolveHermesCliForRuntime(
     `已尝试: ${candidates.map((item) => item.cliPath).join("；") || "<none>"}`,
     failures.length ? `失败详情: ${failures.slice(0, 6).join("；")}` : "",
   ].filter(Boolean).join(" "));
+}
+
+function resolvedWslCliCacheKey(config: RuntimeConfig, runtime: HermesRuntimeConfig) {
+  return [
+    runtime.mode,
+    runtime.distro?.trim() ?? "",
+    runtime.pythonCommand?.trim() ?? "python3",
+    runtime.managedRoot?.trim() ?? "",
+    config.hermesRuntime?.managedRoot?.trim() ?? "",
+    config.enginePaths?.hermes?.trim() ?? "",
+  ].join("\0");
 }
 
 export async function validateWslHermesCli(

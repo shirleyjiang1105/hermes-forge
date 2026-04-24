@@ -8,7 +8,7 @@ This matrix is the release-candidate gate for the WSL main path after session, m
 | --- | --- | --- | --- |
 | M1 | `WSL + bridge_guarded + guarded` | Runnable, `native-arg-env`, green preflight | P0 |
 | M2 | `WSL + passthrough + guarded` | Runnable, yellow preflight, no blocked mismatch | P1 |
-| M3 | `WSL + bridge_guarded + yolo` | Runnable, yellow preflight, CLI mode shown as `yolo` everywhere | P1 |
+| M3 | `WSL + bridge_guarded + yolo` | Runnable, yellow preflight, command risk shown as user-facing "命令自动放行"; raw `yolo` only in technical details | P1 |
 | M4 | `WSL + restricted_workspace` | Blocked everywhere with `policy_not_enforceable` | P0 |
 | M5 | `CLI capability below minimum gate` | Blocked everywhere with capability-based block reason | P0 |
 | M6 | `Bridge disabled / capability not reported` | Bridge panel shows "backend did not report capability" or disabled state consistently | P1 |
@@ -22,6 +22,8 @@ Every matrix row should keep these surfaces aligned:
 - `ChatInput` preflight strip
 - `AgentRunPanel`
 - task diagnostics / exported diagnostics
+
+Default UI copy should describe the user impact first. Raw fields such as `transport`, `capabilityProbe`, `permissionPolicy`, and `cliPermissionMode` should stay available only in technical details or exported diagnostics.
 
 ## Release Gate
 
@@ -53,4 +55,3 @@ The RC diagnostic bundle must include or embed:
 - `taskDiagnostics`
 - `sessionMappings`
 - `recentEvents`
-

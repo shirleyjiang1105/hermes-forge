@@ -115,6 +115,27 @@ Hermes Forge 主要解决三个问题：
 
 注意：当前安装包尚未进行商业代码签名。Windows 或 macOS 首次打开时可能出现系统安全提示，这是早期独立开发版本的正常限制。
 
+## 5 分钟开始使用
+
+Windows + WSL 用户建议按这条最短路径开始：
+
+1. 安装并打开 Hermes Forge，选择或创建一个工作区。
+2. 在首启体检里选择推荐模式，让应用自动检查 WSL、Hermes Agent、模型配置和 Windows Bridge。
+3. 如果提示缺少 Hermes，点击“安装 WSL 版 Hermes Agent”；如果提示模型未配置，进入“模型连接”并填写 OpenAI-compatible、本地模型、OpenRouter 或 OpenAI API。
+4. 在模型页点击连接测试，成功后保存为默认模型。
+5. 回到聊天页发送第一条消息；底部状态条应显示运行环境、模型、权限和 Bridge 是否可用。
+
+首次体验的目标是：从打开应用到成功发出第一条消息不超过 5 分钟。遇到红色或黄色状态时，优先点击对应的“重新检测”“打开设置”“一键修复”或“导出诊断报告”。
+
+## Windows / WSL 常见问题
+
+- **WSL 不可用**：确认已安装 WSL2 和一个默认发行版，然后在设置页重新检测。应用会优先尝试 WSL 原生 Hermes 链路。
+- **Hermes CLI 检测失败**：使用设置页的“安装 WSL 版 Hermes Agent”或手动选择 Hermes 根目录；导出诊断报告会包含最近安装记录。
+- **模型不可用**：检查 base URL、API key、模型名和默认模型；保存前先运行连接测试。
+- **Bridge 不可达**：Windows Bridge 负责 PowerShell、文件、截图、窗口等桌面能力。Bridge 关闭时聊天仍可运行，但 Windows 原生能力不可用。
+- **回复慢或长时间无输出**：常见原因是 WSL / Hermes 冷启动、模型响应慢、网络慢或工具执行中。当前版本已有 warmup、preflight、capability 和路径缓存；后续会继续做常驻 WSL Hermes worker。
+- **需要报错排查**：在设置页导出诊断报告。导出包默认脱敏，不包含 API key 或 token 明文，可附到 issue。
+
 ## 本地开发
 
 推荐环境：

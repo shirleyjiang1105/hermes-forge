@@ -65,14 +65,18 @@ For each combination, confirm these areas stay consistent:
 ## Manual Acceptance
 
 - Launch the client from the packaged app.
+- Fresh install reaches first successful message in less than 5 minutes on a normal Windows + WSL machine.
 - Confirm the chat input shows model, workspace, and permission status.
+- Confirm chat input and Agent panel use user-facing labels by default, with raw transport / capability / policy details hidden behind technical details.
 - Configure a model source, test the connection, then save it as default.
 - Send 5 normal text tasks in one session and confirm each reaches a final result.
 - Create a second session, send 2-3 tasks, then switch back and confirm history does not mix.
 - Quit and reopen the app, then confirm recent session history is restored.
+- Confirm failures always reach a final visible state: complete, failed, cancelled, or blocked.
 - Upload one file or image attachment and send a task with it.
 - Trigger an approval flow and test both allow and deny.
-- Export diagnostics from the app and confirm the output path is shown.
+- Trigger model configuration error, WSL unavailable, and Bridge unavailable states; each must show a clear fix entry.
+- Export diagnostics from the app and confirm the output path is shown with guidance that the bundle can be attached to an issue.
 
 ## Diagnostic Bundle Structure
 

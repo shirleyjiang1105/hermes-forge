@@ -44,6 +44,7 @@ const RECOMMENDED_RUNTIME: HermesRuntimeConfig = {
   windowsAgentMode: "hermes_native",
   cliPermissionMode: "guarded",
   permissionPolicy: "bridge_guarded",
+  workerMode: "off",
 };
 
 export function SettingsPanel(props: {
@@ -217,12 +218,14 @@ export function SettingsPanel(props: {
         windowsAgentMode: runtime.windowsAgentMode ?? "hermes_native",
         cliPermissionMode: runtime.cliPermissionMode ?? "guarded",
         permissionPolicy: runtime.permissionPolicy ?? "bridge_guarded",
+        workerMode: runtime.workerMode ?? "off",
       };
     }
     return {
       ...runtime,
       mode: runtimeChoice,
       pythonCommand: runtime.pythonCommand?.trim() || "python3",
+      workerMode: runtime.workerMode ?? "off",
     };
   }
 
@@ -418,6 +421,19 @@ export function SettingsPanel(props: {
                 ]}
               />
 
+              {runtimeChoice !== "windows" ? (
+                <AdvancedSelect
+                  label="常驻 WSL Worker"
+                  tooltip="实验性加速。开启后会复用一个 WSL worker 来减少连续任务的启动等待；失败时会自动回退普通 WSL 启动。"
+                  value={runtime.workerMode ?? "off"}
+                  onChange={(value) => setRuntime({ ...runtime, workerMode: value as HermesRuntimeConfig["workerMode"] })}
+                  options={[
+                    { value: "off", label: "关闭（默认）" },
+                    { value: "experimental_wsl", label: "实验性开启" },
+                  ]}
+                />
+              ) : null}
+
               <AdvancedSelect
                 label="启动前检查强度"
                 tooltip="检查越完整，启动前越能发现问题，但可能稍慢。推荐保持标准。"
@@ -472,6 +488,7 @@ function withRuntimeDefaults(runtime: HermesRuntimeConfig): HermesRuntimeConfig 
     windowsAgentMode: runtime.windowsAgentMode ?? "hermes_native",
     cliPermissionMode: runtime.cliPermissionMode ?? "guarded",
     permissionPolicy: runtime.permissionPolicy ?? "bridge_guarded",
+    workerMode: runtime.workerMode ?? "off",
   };
 }
 

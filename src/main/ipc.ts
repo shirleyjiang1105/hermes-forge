@@ -667,6 +667,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         windowsAgentMode: z.enum(["hermes_native", "host_tool_loop", "disabled"]).optional(),
         cliPermissionMode: z.enum(["yolo", "safe", "guarded"]).optional(),
         permissionPolicy: z.enum(["passthrough", "bridge_guarded", "restricted_workspace"]).optional(),
+        workerMode: z.enum(["off", "experimental_wsl"]).optional(),
         installSource: z.object({
           repoUrl: z.string().trim().url(),
           branch: z.string().trim().max(200).optional(),
@@ -696,8 +697,9 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         pythonCommand: parsed.runtime?.pythonCommand?.trim() || config.hermesRuntime?.pythonCommand || "python3",
         distro: parsed.runtime?.distro?.trim() || undefined,
         windowsAgentMode: parsed.runtime?.windowsAgentMode ?? config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-      cliPermissionMode: parsed.runtime?.cliPermissionMode ?? config.hermesRuntime?.cliPermissionMode ?? "yolo",
+        cliPermissionMode: parsed.runtime?.cliPermissionMode ?? config.hermesRuntime?.cliPermissionMode ?? "yolo",
         permissionPolicy: parsed.runtime?.permissionPolicy ?? config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
+        workerMode: parsed.runtime?.workerMode ?? config.hermesRuntime?.workerMode ?? "off",
         installSource: parsed.runtime?.installSource
           ? {
             ...(config.hermesRuntime?.installSource ?? {}),

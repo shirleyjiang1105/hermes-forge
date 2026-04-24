@@ -31,6 +31,8 @@ export type PermissionDiagnostics = {
   notEnforceableYet?: Record<string, string>;
   policyBlock?: PolicyBlockReason;
   sessionMode?: string;
+  wslWorkerStatus?: string;
+  wslWorkerDetail?: string;
 };
 
 export type PreflightState = {
@@ -46,6 +48,95 @@ export type PreflightState = {
   detail: string;
   block?: PolicyBlockReason;
 };
+
+export function runtimeUserLabel(value?: string) {
+  if (value === "wsl") return "WSL 原生环境";
+  if (value === "windows") return "Windows 本机环境";
+  return value || "未检测到运行环境";
+}
+
+export function permissionPolicyUserLabel(value?: string) {
+  if (value === "bridge_guarded") return "推荐保护";
+  if (value === "passthrough") return "宽松直通";
+  if (value === "restricted_workspace") return "工作区强限制（当前不可用）";
+  return value || "推荐保护";
+}
+
+export function cliPermissionModeUserLabel(value?: string) {
+  if (value === "yolo") return "命令自动放行";
+  if (value === "guarded") return "危险命令会确认";
+  if (value === "safe") return "安全模式";
+  return value || "危险命令会确认";
+}
+
+export function transportUserLabel(value?: string) {
+  if (value === "native-arg-env") return "原生 WSL 启动";
+  if (value === "windows-headless") return "Windows 本机启动";
+  if (!value || value === "none") return "尚未建立";
+  return value;
+}
+
+export function sessionModeUserLabel(value?: string) {
+  if (value === "fresh") return "新会话";
+  if (value === "resumed" || value === "continued") return "已恢复历史";
+  if (value === "degraded") return "恢复受限";
+  if (value === "headless") return "本机无界面会话";
+  if (value === "fresh/resume") return "自动恢复";
+  return value || "自动恢复";
+}
+
+export function capabilityProbeUserLabel(probe?: PermissionOverview["capabilityProbe"] | Record<string, unknown> | null) {
+  if (!probe) return "等待检测";
+  const minimumSatisfied = typeof probe.minimumSatisfied === "boolean" ? probe.minimumSatisfied : undefined;
+  const support = typeof probe.support === "string" ? probe.support : undefined;
+  if (minimumSatisfied === false || support === "unsupported") return "Hermes CLI 版本不满足";
+  if (support === "degraded") return "能力可用但降级";
+  if (minimumSatisfied === true || support === "native") return "能力满足";
+  return "已检测";
+}
+
+export function preflightSummaryForUser(preflight: PreflightState) {
+  if (preflight.block) return preflight.block.summary;
+  if (preflight.blocked && preflight.summary === "当前会话正在处理中") return "Hermes 正在处理上一条消息";
+  if (preflight.tone === "red") return preflight.summary || "环境需要修复后才能发送";
+  if (preflight.tone === "yellow") {
+    if (preflight.sessionMode === "degraded") return "可以发送，但会话恢复受限";
+    if (preflight.permissionPolicy === "passthrough") return "可以发送，但项目操作更宽松";
+    if (preflight.cliPermissionMode === "yolo") return "可以发送，但命令会自动放行";
+    return "可以发送，但当前状态需要留意";
+  }
+  return "环境就绪，可以发送";
+}
+
+export function preflightDetailForUser(preflight: PreflightState) {
+  if (preflight.block) return preflight.block.detail;
+  if (preflight.blocked && preflight.summary === "当前会话正在处理中") return "等当前回复完成后，就可以继续发送下一条消息。";
+  if (preflight.tone === "yellow") {
+    if (preflight.sessionMode === "degraded") return "历史会话没有完整恢复，本轮仍可运行；如结果不连续，可以新建会话再试。";
+    if (preflight.permissionPolicy === "passthrough") return "Hermes 会更接近原生 CLI 行为，适合熟悉命令行和当前项目风险的用户。";
+    if (preflight.cliPermissionMode === "yolo") return "命令执行不会逐项询问，适合可信工作区；不确定时建议切回 guarded。";
+    return preflight.detail;
+  }
+  return preflight.detail;
+}
+
+export function preflightChipsForUser(preflight: PreflightState) {
+  const sessionChip = preflight.blocked && preflight.summary === "当前会话正在处理中"
+    ? "等待本轮完成"
+    : sessionModeUserLabel(preflight.sessionMode);
+
+  const policyChip = preflight.permissionPolicy === "passthrough"
+    ? "项目操作更宽松"
+    : preflight.permissionPolicy === "restricted_workspace"
+      ? "策略需修复"
+      : preflight.bridgeEnabled
+        ? "Windows 能力受保护"
+        : "Windows 联动已关闭";
+
+  const commandChip = cliPermissionModeUserLabel(preflight.cliPermissionMode);
+
+  return [sessionChip, policyChip, commandChip];
+}
 
 export const POLICY_OPTIONS: Array<{
   id: HermesPermissionPolicyMode;
@@ -204,6 +295,10 @@ export function extractPermissionDiagnostics(events: TaskEventEnvelope[]): Permi
     }
     if (diagnostic.category === "hermes-cli-permission-mode" && !next.cliPermissionMode) {
       next.cliPermissionMode = matchValue(diagnostic.message, /permission mode：([^（\s]+)/);
+    }
+    if (diagnostic.category === "hermes-wsl-worker" && !next.wslWorkerDetail) {
+      next.wslWorkerDetail = diagnostic.message;
+      next.wslWorkerStatus = diagnostic.message.split(/[：:]/)[0] || "unknown";
     }
   }
   return next;

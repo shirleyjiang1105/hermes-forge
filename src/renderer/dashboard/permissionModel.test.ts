@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildPreflightState } from "./permissionModel";
+import { buildPreflightState, preflightChipsForUser, preflightSummaryForUser } from "./permissionModel";
 import type { PermissionOverview } from "../../shared/types";
 
 function overview(input: Partial<PermissionOverview>): PermissionOverview {
@@ -137,5 +137,15 @@ describe("RC smoke matrix", () => {
     const degraded = buildPreflightState({ events: [], overview: overview({ sessionMode: "degraded" }) });
     expect(degraded.sessionMode).toBe("degraded");
     expect(degraded.tone).toBe("yellow");
+  });
+
+  it("translates preflight state into user-facing copy", () => {
+    const ready = buildPreflightState({ events: [], overview: overview({}) });
+    expect(preflightSummaryForUser(ready)).toBe("环境就绪，可以发送");
+    expect(preflightChipsForUser(ready)).toEqual(expect.arrayContaining(["新会话", "Windows 能力受保护", "危险命令会确认"]));
+
+    const yolo = buildPreflightState({ events: [], overview: overview({ cliPermissionMode: "yolo" }) });
+    expect(preflightSummaryForUser(yolo)).toBe("可以发送，但命令会自动放行");
+    expect(preflightChipsForUser(yolo)).toContain("命令自动放行");
   });
 });

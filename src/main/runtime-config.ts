@@ -77,6 +77,7 @@ const defaultConfig: RuntimeConfig = {
     windowsAgentMode: "hermes_native",
     cliPermissionMode: "yolo",
     permissionPolicy: "bridge_guarded",
+    workerMode: "off",
     installSource: DEFAULT_PINNED_HERMES_SOURCE,
   },
 };

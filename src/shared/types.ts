@@ -35,6 +35,7 @@ export type HermesRuntimeConfig = {
   windowsAgentMode?: WindowsAgentMode;
   cliPermissionMode?: HermesCliPermissionMode;
   permissionPolicy?: HermesPermissionPolicyMode;
+  workerMode?: "off" | "experimental_wsl";
   installSource?: HermesInstallSourceConfig;
 };
 

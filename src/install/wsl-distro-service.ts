@@ -100,13 +100,9 @@ export class WslDistroService {
     }
 
     if (!beforeProbe.wslAvailable && options.explicitCreate) {
-      command = `wsl.exe --install -d ${distroName}`;
-      const result = await runCommand("wsl.exe", ["--install", "-d", distroName], {
-        cwd: process.cwd(),
-        timeoutMs: CREATE_TIMEOUT_MS,
-        commandId: "install.wsl.bootstrap-distro",
-        runtimeKind: "wsl",
-      });
+      const install = await runWslInstallDistro(distroName, "install.wsl.bootstrap-distro");
+      command = install.command;
+      const result = install.result;
       stdoutPreview = result.diagnostics?.stdoutPreview ?? result.stdout.slice(0, 4000);
       stderrPreview = result.diagnostics?.stderrPreview ?? result.stderr.slice(0, 4000);
       if (result.exitCode !== 0) {
@@ -206,13 +202,9 @@ export class WslDistroService {
         });
       }
 
-      command = `wsl.exe --install -d ${distroName}`;
-      const result = await runCommand("wsl.exe", ["--install", "-d", distroName], {
-        cwd: process.cwd(),
-        timeoutMs: CREATE_TIMEOUT_MS,
-        commandId: "install.wsl.create-distro",
-        runtimeKind: "wsl",
-      });
+      const install = await runWslInstallDistro(distroName, "install.wsl.create-distro");
+      command = install.command;
+      const result = install.result;
       stdoutPreview = result.diagnostics?.stdoutPreview ?? result.stdout.slice(0, 4000);
       stderrPreview = result.diagnostics?.stderrPreview ?? result.stderr.slice(0, 4000);
       if (result.exitCode === 0) {
@@ -298,14 +290,21 @@ export class WslDistroService {
       runtimeKind: "wsl",
     });
     const reachableAfterCreate = reachable.exitCode === 0;
+    const initializationRequired = !reachableAfterCreate && createdNow;
+    const unavailableSummary = initializationRequired
+      ? "Ubuntu 已安装/已发起，但还需要重启或首次初始化。"
+      : "Managed distro 不可进入。";
+    const unavailableFixHint = initializationRequired
+      ? "如果 Windows 提示重启，请先重启；然后从开始菜单打开 Ubuntu，完成用户名/密码初始化，再回到应用重新点击安装。"
+      : "请手动启动该 distro 完成初始化后再重试。";
     steps.push(installStep({
       phase: "health_check",
       step: "verify-distro-entry",
       status: reachableAfterCreate ? "passed" : "failed",
-      code: reachableAfterCreate ? "ok" : "distro_unavailable",
-      summary: reachableAfterCreate ? "Managed distro 可进入。" : "Managed distro 不可进入。",
+      code: reachableAfterCreate ? "ok" : initializationRequired ? "distro_initialization_required" : "distro_unavailable",
+      summary: reachableAfterCreate ? "Managed distro 可进入。" : unavailableSummary,
       detail: reachable.stdout || reachable.stderr,
-      fixHint: reachableAfterCreate ? undefined : "请手动启动该 distro 完成初始化后再重试。",
+      fixHint: reachableAfterCreate ? undefined : unavailableFixHint,
     }));
     await adapter.getBridgeAccessHost().catch(() => undefined);
     const reprobe = await this.runtimeProbeService.probe({ runtime: nextConfig.hermesRuntime });
@@ -339,10 +338,10 @@ export class WslDistroService {
       recovery: reachableAfterCreate ? undefined : {
         failureStage: "create_distro",
         disposition: "manual_action_required",
-        code: "distro_unavailable",
-        summary: "Managed distro 已创建/选中，但当前仍无法进入。",
+        code: initializationRequired ? "distro_initialization_required" : "distro_unavailable",
+        summary: initializationRequired ? "Ubuntu 安装已发起，等待 Windows 重启或首次初始化。" : "Managed distro 已创建/选中，但当前仍无法进入。",
         detail: reachable.stderr || reachable.stdout,
-        fixHint: "请先手动打开该 distro 完成初始化，再重新点击 install。",
+        fixHint: unavailableFixHint,
         nextAction: "manual_create_distro",
       },
       failureArtifacts: {
@@ -383,6 +382,44 @@ export class WslDistroService {
 
 function cloneConfig(config: RuntimeConfig): RuntimeConfig {
   return JSON.parse(JSON.stringify(config)) as RuntimeConfig;
+}
+
+async function runWslInstallDistro(distroName: string, commandId: string) {
+  const noLaunchArgs = ["--install", "-d", distroName, "--no-launch"];
+  let result = await runCommand("wsl.exe", noLaunchArgs, {
+    cwd: process.cwd(),
+    timeoutMs: CREATE_TIMEOUT_MS,
+    commandId,
+    runtimeKind: "wsl",
+  });
+  if (result.exitCode !== 0 && noLaunchUnsupported(result)) {
+    const fallbackArgs = ["--install", "-d", distroName];
+    result = await runCommand("wsl.exe", fallbackArgs, {
+      cwd: process.cwd(),
+      timeoutMs: CREATE_TIMEOUT_MS,
+      commandId: `${commandId}.fallback`,
+      runtimeKind: "wsl",
+    });
+    return {
+      result,
+      command: `wsl.exe ${fallbackArgs.join(" ")}`,
+    };
+  }
+  return {
+    result,
+    command: `wsl.exe ${noLaunchArgs.join(" ")}`,
+  };
+}
+
+function noLaunchUnsupported(result: Awaited<ReturnType<typeof runCommand>>) {
+  const output = `${result.stderr}\n${result.stdout}\n${result.diagnostics?.stderrPreview ?? ""}\n${result.diagnostics?.stdoutPreview ?? ""}`.toLowerCase();
+  return output.includes("no-launch") && (
+    output.includes("unknown")
+    || output.includes("unrecognized")
+    || output.includes("invalid")
+    || output.includes("不支持")
+    || output.includes("无法识别")
+  );
 }
 
 function commandSummary(
