@@ -304,21 +304,28 @@ export class HermesWebUiService {
 
   async listCronJobs(): Promise<HermesCronJob[]> {
     const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
-    const raw = await this.readJson<unknown[]>(jobsPath, []);
+    const raw = this.cronJobRecords(await this.readJson<unknown>(jobsPath, []));
     return raw.map((item, index) => {
       const record = item && typeof item === "object" ? item as Record<string, unknown> : {};
       const id = String(record.id ?? record.name ?? `job-${index}`);
+      const state = typeof record.state === "string" ? record.state : undefined;
+      const repeat = record.repeat && typeof record.repeat === "object" ? record.repeat as Record<string, unknown> : undefined;
+      const deliver = Array.isArray(record.deliver) ? record.deliver.join(", ") : typeof record.deliver === "string" ? record.deliver : undefined;
       return {
         id,
         name: String(record.name ?? record.title ?? id),
         prompt: typeof record.prompt === "string" ? record.prompt : undefined,
-        schedule: typeof record.schedule === "string" ? record.schedule : typeof record.cron === "string" ? record.cron : undefined,
-        status: record.enabled === false || record.paused === true ? "paused" : "active",
-        source: typeof record.source === "string" && record.source === "cli" ? "cli" : "json-fallback",
-        lastOutput: typeof record.last_output === "string" ? record.last_output : undefined,
+        schedule: this.displayCronSchedule(record),
+        status: record.enabled === false || record.paused === true || state === "paused" ? "paused" : state === "scheduled" ? "active" : "unknown",
+        source: typeof record.source === "string" && record.source === "json-fallback" ? "json-fallback" : "cli",
+        lastOutput: this.cronLastOutput(record),
         path: jobsPath,
         lastRunAt: typeof record.last_run_at === "string" ? record.last_run_at : undefined,
         nextRunAt: typeof record.next_run_at === "string" ? record.next_run_at : undefined,
+        repeat: typeof repeat?.times === "number" ? repeat.times : null,
+        deliver,
+        skills: Array.isArray(record.skills) ? record.skills.map(String).filter(Boolean) : typeof record.skill === "string" ? [record.skill] : undefined,
+        script: typeof record.script === "string" ? record.script : undefined,
       };
     });
   }
@@ -335,52 +342,42 @@ export class HermesWebUiService {
       }
     }
     
-    const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
-    const raw = await this.readJson<Record<string, unknown>[]>(jobsPath, []);
-    const at = new Date().toISOString();
     const id = input.id?.trim() || `job-${Date.now().toString(36)}`;
-    const current = raw.find((item) => String(item.id ?? item.name ?? "") === id) ?? {};
-    const cliResult = await this.tryRunHermes(["cron", input.id ? "update" : "create", "--name", input.name?.trim() || String(current.name ?? "未命名任务"), "--schedule", input.schedule?.trim() || String(current.schedule ?? current.cron ?? "manual"), "--prompt", input.prompt ?? String(current.prompt ?? "")]);
-    if (cliResult.ok) {
-      const cliJobs = await this.listCronJobs();
-      return cliJobs.find((item) => item.id === id || item.name === input.name) ?? {
-        id,
-        name: input.name?.trim() || "未命名任务",
-        prompt: input.prompt,
-        schedule: input.schedule,
-        status: input.status ?? "active",
-        source: "cli",
-        lastOutput: cliResult.message,
-      };
+    const existing = input.id ? await this.getCronJob(input.id) : undefined;
+    const name = input.name.trim();
+    const schedule = input.schedule?.trim() || existing?.schedule || "30m";
+    const prompt = input.prompt ?? existing?.prompt ?? "";
+    const cliArgs = input.id
+      ? ["cron", "edit", input.id, "--name", name, "--schedule", schedule, "--prompt", prompt]
+      : ["cron", "create", "--name", name, schedule, prompt];
+    const cliResult = await this.runHermes(cliArgs);
+    if (!cliResult.ok) {
+      throw new Error(`Hermes 原生定时任务保存失败：${cliResult.message || `exit ${cliResult.exitCode}`}`);
     }
-    const next = {
-      ...current,
+    if (input.status === "paused") {
+      await this.tryRunHermes(["cron", "pause", input.id || this.extractCreatedCronId(cliResult.message) || id]);
+    }
+    const cliJobs = await this.listCronJobs();
+    return cliJobs.find((item) => item.id === input.id || item.id === this.extractCreatedCronId(cliResult.message) || item.name === name) ?? {
       id,
-      name: input.name?.trim() || String(current.name ?? "未命名任务"),
-      prompt: input.prompt ?? String(current.prompt ?? ""),
-      schedule: input.schedule?.trim() || String(current.schedule ?? current.cron ?? "manual"),
-      enabled: input.status === "paused" ? false : true,
-      paused: input.status === "paused",
-      source: "json-fallback",
-      last_output: cliResult.message || "Hermes CLI 未提供 cron create/update，已回退写入 jobs.json。",
-      updated_at: at,
-      created_at: String(current.created_at ?? at),
-    };
-    await this.writeJson(jobsPath, [next, ...raw.filter((item) => String(item.id ?? item.name ?? "") !== id)]);
-    return (await this.listCronJobs()).find((item) => item.id === id) ?? {
-      id,
-      name: String(next.name),
-      prompt: String(next.prompt),
-      schedule: String(next.schedule),
+      name,
+      prompt,
+      schedule,
       status: input.status ?? "active",
-      source: "json-fallback",
-      lastOutput: String(next.last_output ?? ""),
-      path: jobsPath,
+      source: "cli",
+      lastOutput: cliResult.message,
     };
   }
 
   async runCronJob(id: string) {
-    return this.runHermes(["cron", "run", id]);
+    const trigger = await this.runHermes(["cron", "run", id]);
+    if (!trigger.ok) return trigger;
+    const tick = await this.runHermes(["cron", "tick"], { timeoutMs: 10 * 60 * 1000 });
+    return {
+      ok: tick.ok,
+      message: [trigger.message, tick.message || "已触发 Hermes cron scheduler tick。"].filter(Boolean).join("\n"),
+      exitCode: tick.exitCode,
+    };
   }
 
   async pauseCronJob(id: string) {
@@ -392,14 +389,46 @@ export class HermesWebUiService {
   }
 
   async deleteCronJob(id: string) {
-    const result = await this.runHermes(["cron", "delete", id]).catch(async (error: unknown) => {
-    const jobsPath = path.join(await this.currentHermesHome(), "cron", "jobs.json");
-      const raw = await this.readJson<Record<string, unknown>[]>(jobsPath, []);
-      await this.backupPath(jobsPath);
-      await this.writeJson(jobsPath, raw.filter((item) => String(item.id ?? item.name ?? "") !== id));
-      return { ok: true, message: `CLI 删除失败，已回退更新 jobs.json：${error instanceof Error ? error.message : "未知错误"}`, exitCode: null };
-    });
-    return result;
+    return await this.runHermes(["cron", "delete", id]);
+  }
+
+  private async getCronJob(id: string) {
+    return (await this.listCronJobs()).find((item) => item.id === id);
+  }
+
+  private displayCronSchedule(record: Record<string, unknown>) {
+    if (typeof record.schedule_display === "string") return record.schedule_display;
+    if (typeof record.schedule === "string") return record.schedule;
+    if (typeof record.cron === "string") return record.cron;
+    const schedule = record.schedule && typeof record.schedule === "object" ? record.schedule as Record<string, unknown> : undefined;
+    if (!schedule) return undefined;
+    if (typeof schedule.display === "string") return schedule.display;
+    if (typeof schedule.expr === "string") return schedule.expr;
+    if (schedule.kind === "interval" && typeof schedule.minutes === "number") return `${schedule.minutes}m`;
+    if (schedule.kind === "once" && typeof schedule.run_at === "string") return schedule.run_at;
+    return undefined;
+  }
+
+  private cronLastOutput(record: Record<string, unknown>) {
+    if (typeof record.last_output === "string") return record.last_output;
+    const lastStatus = typeof record.last_status === "string" ? record.last_status : undefined;
+    const lastError = typeof record.last_error === "string" ? record.last_error : undefined;
+    const deliveryError = typeof record.last_delivery_error === "string" ? record.last_delivery_error : undefined;
+    if (lastError) return `${lastStatus ?? "failed"}: ${lastError}`;
+    if (deliveryError) return `delivery: ${deliveryError}`;
+    return lastStatus;
+  }
+
+  private extractCreatedCronId(message: string) {
+    return message.match(/Created job:\s*([a-zA-Z0-9_-]+)/)?.[1];
+  }
+
+  private cronJobRecords(raw: unknown): unknown[] {
+    if (Array.isArray(raw)) return raw;
+    if (raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).jobs)) {
+      return (raw as Record<string, unknown>).jobs as unknown[];
+    }
+    return [];
   }
 
   async previewFile(filePath: string): Promise<FilePreviewResult> {
@@ -449,7 +478,7 @@ export class HermesWebUiService {
     return { ok: !error, message: error || `已打开：${targetPath}` };
   }
 
-  private async runHermes(args: string[]) {
+  private async runHermes(args: string[], options: { timeoutMs?: number } = {}) {
     const root = await this.resolveHermesRoot();
     const currentHermesHome = await this.currentHermesHome();
     const runtime = await this.currentRuntime();
@@ -476,7 +505,7 @@ export class HermesWebUiService {
       : await this.legacyHermesLaunch(root, args, currentHermesHome);
     const result = await runCommand(launch.command, launch.args, {
       cwd: launch.cwd,
-      timeoutMs: 30000,
+      timeoutMs: options.timeoutMs ?? 30000,
       env: launch.env,
       commandId: "webui.hermes",
       runtimeKind: runtime?.mode ?? "windows",

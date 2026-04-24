@@ -61,21 +61,25 @@ export function validateMemoryContent(content: string): ValidationResult {
 
 export function validateCronSchedule(schedule: string): ValidationResult {
   const errors: string[] = [];
+  const trimmed = schedule.trim();
   
-  if (!schedule || schedule.trim() === "") {
+  if (!trimmed) {
     errors.push("定时计划不能为空");
   }
+
+  const duration = "\\d+\\s*(m|min|mins|minute|minutes|h|hr|hrs|hour|hours|d|day|days)";
   
   const patterns = [
-    /^manual$/,
-    /^RRULE:.+/i,
-    /^(@(yearly|annually|monthly|weekly|daily|hourly|reboot))$/,
-    /^(\*|\d{1,2}|\d{1,2}-\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}) (\*|\d{1,3}|\d{1,3}-\d{1,3}) (\*|\d{1,2}|\d{1,2}-\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2})$/,
+    new RegExp(`^${duration}$`, "i"),
+    new RegExp(`^every\\s+${duration}$`, "i"),
+    /^(\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2})$/,
+    /^(\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{1,2}|\d{1,2}-\d{1,2}|\*\/\d{1,2}) (\*|\d{4}|\d{4}-\d{4})$/,
+    /^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?(?:Z|[+-]\d{2}:\d{2})?$/,
   ];
   
-  const isValid = patterns.some((pattern) => pattern.test(schedule.trim()));
+  const isValid = patterns.some((pattern) => pattern.test(trimmed));
   if (!isValid) {
-    errors.push("定时计划格式无效，支持: manual, RRULE, cron 表达式");
+    errors.push("定时计划格式无效，支持: 30m、every 2h、2026-04-24T09:00、0 9 * * *");
   }
   
   return { valid: isValid, errors };

@@ -410,6 +410,10 @@ export type HermesCronJob = {
   path?: string;
   lastRunAt?: string;
   nextRunAt?: string;
+  repeat?: number | null;
+  deliver?: string;
+  skills?: string[];
+  script?: string;
 };
 
 export type HermesConnectorPlatformId =

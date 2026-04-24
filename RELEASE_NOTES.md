@@ -1,5 +1,44 @@
 # Release Notes
 
+## Hermes Forge v0.1.18
+
+发布日期：2026-04-24
+
+这是一次紧急补丁版本，重点修复定时任务在 Forge 前端“看起来保存了，但没有真正接入 Hermes Agent 原生 cron 调度”的问题。现在定时任务会走 Hermes 原生 CLI，WSL runtime 下会通过原生 WSL Hermes Agent 写入和触发 cron。
+
+### 修复内容
+
+- 修复 Forge 调用 Hermes cron CLI 参数错误的问题：
+  - 新建任务改为 `hermes cron create --name <name> <schedule> <prompt>`。
+  - 编辑任务改为 `hermes cron edit <job_id> --name ... --schedule ... --prompt ...`。
+  - 删除、暂停、恢复继续走 Hermes 原生命令。
+- 修复保存失败后静默写入 fallback JSON，导致任务不会真正被 Hermes scheduler 执行的问题。
+- 修复前端读取原生 `jobs.json` 结构错误的问题：
+  - 兼容 Hermes 原生 `{ "jobs": [...] }` 结构。
+  - 正确展示 `schedule_display`、任务状态、下次运行时间、最后运行状态。
+- 修复“立即运行”只标记任务、不实际执行的问题：
+  - 现在会先 `hermes cron run <job_id>`。
+  - 随后执行 `hermes cron tick`，立即触发 Hermes scheduler。
+- 修复定时任务表单不符合 Hermes 规范的问题：
+  - 移除 `manual / RRULE` 这类 Hermes 当前不支持的输入提示。
+  - 改为间隔、Cron 表达式、指定时间三种规范入口。
+  - 默认使用 `every 1h`，任务 prompt 改为必填。
+- 新增 Gateway 状态提示：
+  - Hermes 原生 cron 自动触发依赖 Gateway。
+  - Gateway 未运行时，任务页会提示并提供“启动 Gateway”按钮。
+
+### 已知限制
+
+- Hermes cron 的自动执行仍依赖 Hermes Gateway 运行；Gateway 未运行时，任务会保存但不会按计划自动触发。
+- “立即运行”会触发一次 `cron tick`，真实执行仍取决于模型、密钥和当前 Hermes runtime 配置是否可用。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过。
+- WSL 原生 Hermes cron smoke 通过：在临时 `HERMES_HOME` 下创建任务并生成原生 `{ jobs: [...] }` 结构。
+
 ## Hermes Forge v0.1.17
 
 发布日期：2026-04-24
