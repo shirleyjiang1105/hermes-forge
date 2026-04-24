@@ -160,4 +160,97 @@ describe("WslHermesInstallService", () => {
     expect(result.steps.find((step) => step.step === "reprobe-after-install")).toMatchObject({ status: "passed" });
     expect(result.steps.find((step) => step.step === "redoctor-after-install")).toMatchObject({ status: "passed" });
   });
+
+  it("imports an existing WSL Hermes CLI before treating the managed directory as invalid", async () => {
+    const configStore = {
+      read: vi.fn(async () => ({
+        hermesRuntime: {
+          mode: "wsl",
+          distro: "Ubuntu",
+          pythonCommand: "python3",
+          managedRoot: "/home/test/broken-hermes",
+        },
+      })),
+      write: vi.fn(async () => undefined),
+    };
+    const runtimeProbeService = {
+      probe: vi.fn(async () => ({
+        overallStatus: "ready",
+        issues: [],
+        bridge: { running: true, reachable: true, configured: true, message: "ok" },
+      })),
+    };
+    const doctorService = {
+      diagnose: vi.fn(async () => ({
+        ...createDoctorReport(),
+        runtime: {
+          ...createDoctorReport().runtime,
+          managedRoot: "/home/test/existing-hermes",
+        },
+      })),
+    };
+    runCommandMock.mockImplementation(async (_command: string, _args: string[], options: { commandId: string }) => {
+      switch (options.commandId) {
+        case "install.wsl.resolve-home":
+          return { exitCode: 0, stdout: "/home/test", stderr: "" };
+        case "install.wsl.mkdir-root":
+          return { exitCode: 0, stdout: "", stderr: "" };
+        case "install.wsl.ensure-python":
+          return { exitCode: 0, stdout: "Python 3.12.3", stderr: "" };
+        case "install.wsl.find-existing-hermes":
+          return { exitCode: 0, stdout: "/home/test/existing-hermes/hermes\n", stderr: "" };
+        case "install.wsl.existing-hermes-file":
+          return { exitCode: 0, stdout: "yes\n", stderr: "" };
+        case "install.wsl.existing-hermes-python":
+          return { exitCode: 0, stdout: "/home/test/existing-hermes/.venv/bin/python", stderr: "" };
+        case "install.wsl.existing-hermes-version":
+          return { exitCode: 0, stdout: "Hermes Agent v0.10.0", stderr: "" };
+        case "install.wsl.existing-hermes-capabilities":
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              cliVersion: "0.10.0",
+              capabilities: {
+                supportsLaunchMetadataArg: true,
+                supportsLaunchMetadataEnv: true,
+                supportsResume: true,
+              },
+            }),
+            stderr: "",
+          };
+        case "install.wsl.git-rev-parse":
+          return { exitCode: 1, stdout: "", stderr: "not a git repo" };
+        default:
+          return { exitCode: 1, stdout: "", stderr: `unexpected command: ${options.commandId}` };
+      }
+    });
+
+    const service = new WslHermesInstallService(
+      { baseDir: () => "C:\\temp" } as any,
+      configStore as any,
+      runtimeProbeService as any,
+      (() => ({ preflight: vi.fn() })) as any,
+      doctorService as any,
+    );
+
+    const result = await service.install({
+      report: {
+        ...createDoctorReport(),
+        runtime: {
+          ...createDoctorReport().runtime,
+          managedRoot: "/home/test/broken-hermes",
+        },
+      },
+    });
+
+    expect(result.healthCheckPassed).toBe(true);
+    expect(result.installExecuted).toBe(false);
+    expect(result.hermesRoot).toBe("/home/test/existing-hermes");
+    expect(result.repoStatus).toMatchObject({ state: "reused", root: "/home/test/existing-hermes" });
+    expect(result.steps.find((step) => step.step === "import-existing-hermes")).toMatchObject({ status: "passed" });
+    expect(runCommandMock.mock.calls.some((call) => call[2]?.commandId === "install.wsl.git-version")).toBe(false);
+    expect(configStore.write).toHaveBeenCalledWith(expect.objectContaining({
+      hermesRuntime: expect.objectContaining({ managedRoot: "/home/test/existing-hermes" }),
+    }));
+  });
 });

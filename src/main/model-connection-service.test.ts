@@ -63,7 +63,7 @@ describe("model-connection-service", () => {
     fetchMock
       .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "my-model", context_length: 32000 }] }), { status: 200 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
-      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "plain text only" } }] }), { status: 200 }));
+      .mockResolvedValue(new Response(JSON.stringify({ choices: [{ message: { content: "plain text only" } }] }), { status: 200 }));
 
     const result = await testModelConnection({
       draft: {
@@ -82,6 +82,64 @@ describe("model-connection-service", () => {
     expect(result.failureCategory).toBe("tool_calling_unavailable");
     expect(result.agentRole).toBe("auxiliary_model");
     expect(result.healthChecks?.map((step) => step.id)).toEqual(expect.arrayContaining(["auth", "models", "chat", "agent_capability"]));
+    expect(result.healthChecks?.find((step) => step.id === "agent_capability")?.detail).toContain("标准 tools + required");
+  });
+
+  it("accepts OpenAI-compatible tool calling when only required mode works", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "my-model", context_length: 32000 }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "unsupported forced tool choice" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "unsupported flat tool choice" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "call_1", type: "function", function: { name: "ping", arguments: "{}" } }] } }] }), { status: 200 }));
+
+    const result = await testModelConnection({
+      draft: {
+        sourceType: "openai_compatible",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        model: "my-model",
+        maxTokens: 32000,
+      },
+      config: { modelProfiles: [], updateSources: {}, hermesRuntime: { mode: "windows" } } as never,
+      secretVault: secretVault(),
+      runtimeAdapterFactory: runtimeAdapterFactory(),
+      resolveHermesRoot: async () => "D:\\Hermes Agent",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.supportsTools).toBe(true);
+    expect(result.healthChecks?.find((step) => step.id === "agent_capability")?.detail).toContain("通过：标准 tools + required");
+  });
+
+  it("accepts legacy OpenAI-compatible function_call responses", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "legacy-model", context_length: 32000 }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "plain" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "plain" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "plain" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "plain" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { function_call: { name: "ping", arguments: "{}" } } }] }), { status: 200 }));
+
+    const result = await testModelConnection({
+      draft: {
+        sourceType: "openai_compatible",
+        baseUrl: "http://127.0.0.1:8080/v1",
+        model: "legacy-model",
+        maxTokens: 32000,
+      },
+      config: { modelProfiles: [], updateSources: {}, hermesRuntime: { mode: "windows" } } as never,
+      secretVault: secretVault(),
+      runtimeAdapterFactory: runtimeAdapterFactory(),
+      resolveHermesRoot: async () => "D:\\Hermes Agent",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.supportsTools).toBe(true);
+    expect(result.message).toContain("tool calling");
+    expect(result.healthChecks?.find((step) => step.id === "agent_capability")?.detail).toContain("旧版 functions + function_call");
   });
 
   it("accepts manually typed OpenAI-compatible models when /models is unavailable", async () => {
@@ -113,6 +171,55 @@ describe("model-connection-service", () => {
     expect(result.availableModels).toEqual([]);
     expect(result.healthChecks?.find((item) => item.id === "models")?.message).toContain("已跳过发现");
     expect(result.agentRole).toBe("primary_agent");
+  });
+
+  it("uses chat as the source of truth when /models omits a manually typed model", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ data: [{ id: "listed-model", context_length: 32000 }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "call_1", type: "function", function: { name: "ping", arguments: "{\"message\":\"ok\"}" } }] } }] }), { status: 200 }));
+
+    const result = await testModelConnection({
+      draft: {
+        sourceType: "openai_compatible",
+        baseUrl: "https://api.compat.example/v1",
+        model: "deployment-alias",
+        maxTokens: 32000,
+      },
+      config: { modelProfiles: [], updateSources: {}, hermesRuntime: { mode: "windows" } } as never,
+      secretVault: secretVault(),
+      runtimeAdapterFactory: runtimeAdapterFactory(),
+      resolveHermesRoot: async () => "D:\\Hermes Agent",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.agentRole).toBe("primary_agent");
+    expect(result.healthChecks?.find((item) => item.id === "models")?.message).toContain("继续用 chat 实测为准");
+  });
+
+  it("skips /models HTTP 400 and still validates chat for OpenAI-compatible endpoints", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "models endpoint disabled" }), { status: 400 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "call_1", type: "function", function: { name: "ping", arguments: "{\"message\":\"ok\"}" } }] } }] }), { status: 200 }));
+
+    const result = await testModelConnection({
+      draft: {
+        sourceType: "openai_compatible",
+        baseUrl: "https://api.compat.example/v1",
+        model: "manual-model",
+        maxTokens: 32000,
+      },
+      config: { modelProfiles: [], updateSources: {}, hermesRuntime: { mode: "windows" } } as never,
+      secretVault: secretVault(),
+      runtimeAdapterFactory: runtimeAdapterFactory(),
+      resolveHermesRoot: async () => "D:\\Hermes Agent",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.healthChecks?.find((item) => item.id === "models")?.message).toContain("已跳过发现");
   });
 
   it.each([

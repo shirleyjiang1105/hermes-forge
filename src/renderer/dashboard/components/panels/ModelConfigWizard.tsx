@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, ChevronDown, Cloud, KeyRound, Loader2, Network, PlugZap, Server, ShieldCheck, Sparkles } from "lucide-react";
 import type { LocalModelDiscoveryResult, ModelCapabilityRole, ModelConnectionTestResult, ModelSourceType } from "../../../../shared/types";
 import { stableModelProfileId } from "../../../../shared/model-config";
@@ -36,6 +36,12 @@ type OverviewModels = {
 };
 
 type SecretMeta = { ref: string; exists: boolean };
+
+type OperationNotice = {
+  tone: "info" | "success" | "warning" | "error";
+  title: string;
+  message: string;
+};
 
 type ProviderPreset = {
   id: ModelSourceType;
@@ -276,6 +282,8 @@ export function ModelConfigWizard(props: {
   const [busyAction, setBusyAction] = useState<"discover" | "test" | "save" | undefined>();
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [providerMenuOpen, setProviderMenuOpen] = useState(false);
+  const [operationNotice, setOperationNotice] = useState<OperationNotice | undefined>();
+  const feedbackPanelRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const nextCurrent = props.models.modelProfiles.find((item) => item.id === editingProfileId)
@@ -292,6 +300,7 @@ export function ModelConfigWizard(props: {
     setDiscovery(undefined);
     setShowAdvanced(false);
     setProviderMenuOpen(false);
+    setOperationNotice(undefined);
   }, [props.models.defaultProfileId, props.models.modelProfiles]);
 
   const provider = providerFor(sourceType);
@@ -299,6 +308,16 @@ export function ModelConfigWizard(props: {
   const hasStoredSecret = props.secrets.some((item) => item.ref === effectiveSecretRef && item.exists);
   const testOk = Boolean(testResult?.ok);
   const canUseSavedSecret = hasStoredSecret || Boolean(apiKey.trim()) || !sourceNeedsKey(sourceType);
+  const hasRequiredFields = model.trim().length > 0 && (provider.family === "OAuth / 本地凭据型" || baseUrl.trim().length > 0);
+  const canTestConnection = hasRequiredFields && canUseSavedSecret && !busyAction;
+  const canSaveModel = hasRequiredFields && canUseSavedSecret && !busyAction;
+  const formBlockingHint = model.trim().length === 0
+    ? "请先填写模型名称。"
+    : provider.family !== "OAuth / 本地凭据型" && baseUrl.trim().length === 0
+      ? "请先填写 Base URL。"
+      : !canUseSavedSecret
+        ? "请先填写 API Key，或选择已有密钥引用。"
+        : undefined;
   const shouldAutoDiscover = ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible"].includes(sourceType);
   const currentEditingProfile = editingProfileId ? props.models.modelProfiles.find((item) => item.id === editingProfileId) : undefined;
   const pendingProviderId = providerIdForSource(sourceType);
@@ -329,6 +348,7 @@ export function ModelConfigWizard(props: {
     setTestResult(undefined);
     setShowAdvanced(false);
     setProviderMenuOpen(false);
+    setOperationNotice(undefined);
   }
 
   function createNewProfile(nextSource: ModelSourceType = sourceType) {
@@ -343,6 +363,7 @@ export function ModelConfigWizard(props: {
     setTestResult(undefined);
     setShowAdvanced(false);
     setProviderMenuOpen(false);
+    setOperationNotice(undefined);
   }
 
   function editProfile(profileId: string) {
@@ -357,30 +378,57 @@ export function ModelConfigWizard(props: {
     setTestResult(undefined);
     setShowAdvanced(false);
     setProviderMenuOpen(false);
+    setOperationNotice(undefined);
   }
 
   function updateBaseUrl(value: string) {
     setBaseUrl(value);
     setTestResult(undefined);
+    setOperationNotice(undefined);
   }
 
   function updateModel(value: string) {
     setModel(value);
     setTestResult(undefined);
+    setOperationNotice(undefined);
   }
 
   function updateApiKey(value: string) {
     setApiKey(value);
     setTestResult(undefined);
+    setOperationNotice(undefined);
+  }
+
+  function revealFeedbackPanel() {
+    window.setTimeout(() => {
+      feedbackPanelRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }, 0);
   }
 
   async function discoverLocal() {
     setBusyAction("discover");
+    setOperationNotice({
+      tone: "info",
+      title: "正在探测本地模型",
+      message: "正在检查常见 localhost / WSL 可达地址，完成后会把可用地址和模型填回表单。",
+    });
+    revealFeedbackPanel();
     try {
       const result = await window.workbenchClient.discoverLocalModelSources();
       setDiscovery(result);
       if (result.recommendedBaseUrl) updateBaseUrl(result.recommendedBaseUrl);
       if (result.recommendedModel && !model.trim()) updateModel(result.recommendedModel);
+      setOperationNotice({
+        tone: result.ok ? "success" : "warning",
+        title: result.ok ? "已发现可用本地接口" : "暂未发现本地接口",
+        message: result.message || (result.ok ? "可以选择下方候选项继续测试。" : "请确认本地模型服务已经启动，或手动填写 Base URL 与模型名称。"),
+      });
+    } catch (error) {
+      setOperationNotice({
+        tone: "error",
+        title: "自动探测没有完成",
+        message: error instanceof Error ? error.message : String(error || "未知错误"),
+      });
     } finally {
       setBusyAction(undefined);
     }
@@ -389,6 +437,12 @@ export function ModelConfigWizard(props: {
   async function testConnection() {
     setBusyAction("test");
     setTestResult(undefined);
+    setOperationNotice({
+      tone: "info",
+      title: "正在测试模型连接",
+      message: "正在依次检查鉴权、模型可达性、最小 Chat、tool calling 和 WSL 可达性。",
+    });
+    revealFeedbackPanel();
     try {
       const ref = await ensureSecretIfNeeded(sourceType);
       const result = await window.workbenchClient.testModelConnection({
@@ -399,6 +453,11 @@ export function ModelConfigWizard(props: {
         maxTokens: DEFAULT_MAX_CONTEXT,
       });
       setTestResult(result);
+      setOperationNotice(noticeForTestResult(result));
+    } catch (error) {
+      const failure = connectionFailureFromError(error, sourceType);
+      setTestResult(failure);
+      setOperationNotice(noticeForTestResult(failure));
     } finally {
       setBusyAction(undefined);
     }
@@ -406,6 +465,12 @@ export function ModelConfigWizard(props: {
 
   async function saveModel() {
     setBusyAction("save");
+    setOperationNotice({
+      tone: "info",
+      title: "正在保存并测试",
+      message: "会先保存密钥，再复检模型能力，最后写入模型配置。",
+    });
+    revealFeedbackPanel();
     try {
       const ref = await ensureSecretIfNeeded(sourceType);
       const health = await window.workbenchClient.testModelConnection({
@@ -449,7 +514,7 @@ export function ModelConfigWizard(props: {
         nextProfile,
       ];
       const nextDefaultProfileId = health.agentRole === "primary_agent"
-        ? (props.models.defaultProfileId ?? profileId)
+        ? profileId
         : props.models.defaultProfileId;
       await window.workbenchClient.updateModelConfig({
         defaultProfileId: nextDefaultProfileId,
@@ -457,9 +522,23 @@ export function ModelConfigWizard(props: {
       });
       await props.onRefresh();
       setEditingProfileId(profileId);
-      props.onSaved(health.agentRole === "primary_agent"
-        ? (props.models.defaultProfileId ? "模型已保存" : "模型已保存，并设为默认")
-        : "模型已保存为辅助/待确认来源，未自动设为默认");
+      const savedMessage = health.agentRole === "primary_agent"
+        ? "模型已保存，并设为默认"
+        : "模型已保存为辅助/待确认来源，未自动设为默认";
+      setOperationNotice({
+        tone: health.agentRole === "primary_agent" ? "success" : "warning",
+        title: health.agentRole === "primary_agent" ? "保存完成" : "已保存，暂未设为默认",
+        message: savedMessage,
+      });
+      props.onSaved(savedMessage);
+    } catch (error) {
+      const failure = connectionFailureFromError(error, sourceType);
+      setTestResult(failure);
+      setOperationNotice({
+        tone: "error",
+        title: "保存没有完成",
+        message: failure.recommendedFix ?? failure.message,
+      });
     } finally {
       setBusyAction(undefined);
     }
@@ -694,9 +773,10 @@ export function ModelConfigWizard(props: {
             </button>
 
             <div className="flex flex-wrap justify-end gap-2 border-t border-slate-100 pt-3">
+              {formBlockingHint ? <p className="mr-auto self-center text-[12px] font-medium text-amber-600">{formBlockingHint}</p> : null}
               <button
                 className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60"
-                disabled={busyAction === "test" || (provider.family !== "OAuth / 本地凭据型" && !baseUrl.trim()) || !model.trim() || !canUseSavedSecret}
+                disabled={!canTestConnection}
                 onClick={() => void testConnection()}
                 type="button"
               >
@@ -707,16 +787,24 @@ export function ModelConfigWizard(props: {
               </button>
               <button
                 className="rounded-xl bg-slate-950 px-4 py-2 text-[13px] font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
-                disabled={!testOk || busyAction === "save"}
+                disabled={!canSaveModel}
                 onClick={() => void saveModel()}
                 type="button"
               >
                 <span className="inline-flex items-center gap-2">
                   {busyAction === "save" ? <Loader2 size={14} className="animate-spin" /> : null}
-                  {busyAction === "save" ? "保存中..." : willCreateNewProfile ? "新增并复检" : "保存并复检"}
+                  {busyAction === "save" ? "保存中..." : willCreateNewProfile ? "新增并测试" : "保存并测试"}
                 </span>
               </button>
             </div>
+
+            <ModelOperationFeedback
+              refEl={feedbackPanelRef}
+              busyAction={busyAction}
+              notice={operationNotice}
+              testResult={testResult}
+              formBlockingHint={formBlockingHint}
+            />
           </div>
 
           <p className="mt-5 text-[14px] leading-7 text-slate-500">
@@ -885,7 +973,7 @@ export function ModelConfigWizard(props: {
                   <div key={item.id} className="rounded-xl bg-white/70 px-3 py-2 text-[11px]">
                     <p className="font-semibold text-slate-700">{healthStepLabel(item.id)} · {item.ok ? "通过" : "失败"}</p>
                     <p className="mt-1 text-slate-600">{item.message}</p>
-                    {item.detail ? <p className="mt-1 text-slate-500">{item.detail}</p> : null}
+                    {item.detail ? <p className="mt-1 whitespace-pre-wrap text-slate-500">{item.detail}</p> : null}
                   </div>
                 ))}
               </div>
@@ -921,6 +1009,100 @@ function providerIntro(sourceType: ModelSourceType) {
   return `${provider.description} 保存时会自动重跑 health check，并区分“可接入 provider”“可作主模型”“仅辅助模型”。`;
 }
 
+function ModelOperationFeedback(props: {
+  refEl: { current: HTMLDivElement | null };
+  busyAction?: "discover" | "test" | "save";
+  notice?: OperationNotice;
+  testResult?: ModelConnectionTestResult;
+  formBlockingHint?: string;
+}) {
+  const busyNotice: OperationNotice | undefined = props.busyAction
+    ? {
+      tone: "info",
+      title: props.busyAction === "discover"
+        ? "正在探测本地模型"
+        : props.busyAction === "test"
+          ? "正在测试模型连接"
+          : "正在保存并测试",
+      message: props.busyAction === "save"
+        ? "正在保存密钥、复检模型并写入配置，请稍等。"
+        : props.busyAction === "test"
+          ? "正在检查鉴权、最小 Chat、tool calling 和 WSL 可达性。"
+          : "正在检查常见本地服务地址。",
+    }
+    : undefined;
+  const notice = busyNotice ?? props.notice;
+  const testResultTone = props.testResult
+    ? props.testResult.ok
+      ? "success"
+      : props.testResult.agentRole === "auxiliary_model" || props.testResult.agentRole === "provider_only"
+        ? "warning"
+        : "error"
+    : undefined;
+  const tone = notice?.tone ?? testResultTone ?? (props.formBlockingHint ? "warning" : "info");
+  const title = notice?.title
+    ?? (props.testResult ? (props.testResult.ok ? "连接测试通过" : "连接测试未通过") : props.formBlockingHint ? "还差一步" : "准备测试");
+  const message = notice?.message
+    ?? props.testResult?.message
+    ?? props.formBlockingHint
+    ?? "填写模型名称、Base URL 和必要密钥后，可以直接测试或保存并测试。";
+  const toneClass = feedbackToneClass(tone);
+
+  return (
+    <div ref={props.refEl} aria-live="polite" className={cn("rounded-2xl border px-4 py-3 text-[12px]", toneClass)}>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2 font-semibold">
+            {props.busyAction ? <Loader2 size={15} className="animate-spin" /> : tone === "success" ? <CheckCircle2 size={15} /> : tone === "error" ? <AlertCircle size={15} /> : <ShieldCheck size={15} />}
+            <span>{title}</span>
+          </div>
+          <p className="mt-2 whitespace-pre-wrap leading-6">{message}</p>
+        </div>
+        {props.testResult?.agentRole ? (
+          <StatusBadge label={roleLabel(props.testResult.agentRole)} tone={props.testResult.agentRole === "primary_agent" ? "success" : "warning"} />
+        ) : null}
+      </div>
+
+      {props.testResult ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {typeof props.testResult.supportsTools === "boolean" ? <StatusBadge label={props.testResult.supportsTools ? "tool calling 可用" : "tool calling 未通过"} tone={props.testResult.supportsTools ? "success" : "warning"} /> : null}
+          {typeof props.testResult.contextWindow === "number" ? <StatusBadge label={`ctx:${props.testResult.contextWindow}`} tone={props.testResult.contextWindow >= MIN_AGENT_CONTEXT ? "success" : "warning"} /> : null}
+          {typeof props.testResult.wslReachable === "boolean" ? <StatusBadge label={props.testResult.wslReachable ? "WSL 可达" : "WSL 不可达"} tone={props.testResult.wslReachable ? "success" : "warning"} /> : null}
+        </div>
+      ) : null}
+
+      {props.testResult?.recommendedFix ? (
+        <div className="mt-3 rounded-xl bg-white/70 px-3 py-2 font-medium">
+          下一步：{props.testResult.recommendedFix}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function feedbackToneClass(tone: OperationNotice["tone"]) {
+  if (tone === "success") return "border-emerald-200 bg-emerald-50 text-emerald-700";
+  if (tone === "warning") return "border-amber-200 bg-amber-50 text-amber-800";
+  if (tone === "error") return "border-rose-200 bg-rose-50 text-rose-700";
+  return "border-blue-100 bg-blue-50 text-blue-700";
+}
+
+function noticeForTestResult(result: ModelConnectionTestResult): OperationNotice {
+  if (result.ok) {
+    return {
+      tone: "success",
+      title: "连接测试通过",
+      message: result.message || "这个模型可以作为 Hermes 主模型使用。",
+    };
+  }
+  const canStillSave = result.agentRole === "auxiliary_model" || result.agentRole === "provider_only";
+  return {
+    tone: canStillSave ? "warning" : "error",
+    title: canStillSave ? "模型可保存，但暂不适合作为主模型" : "连接测试未通过",
+    message: result.message || result.recommendedFix || "请按建议动作修复后再试。",
+  };
+}
+
 function StatusBadge(props: { label: string; tone: "success" | "warning" | "muted" | "default" | "selected" }) {
   const className =
     props.tone === "success"
@@ -933,6 +1115,26 @@ function StatusBadge(props: { label: string; tone: "success" | "warning" | "mute
             ? "bg-white/15 text-white"
             : "bg-slate-100 text-slate-600";
   return <span className={`inline-flex shrink-0 rounded-full px-2 py-1 text-[10px] font-semibold ${className}`}>{props.label}</span>;
+}
+
+function connectionFailureFromError(error: unknown, sourceType: ModelSourceType): ModelConnectionTestResult {
+  const message = error instanceof Error ? error.message : String(error || "未知错误");
+  return {
+    ok: false,
+    sourceType,
+    message: "模型配置操作没有完成。",
+    failureCategory: "unknown",
+    recommendedFix: message,
+    healthChecks: [
+      {
+        id: "agent_capability",
+        label: "agent_capability",
+        ok: false,
+        message: "测试或保存过程中发生异常。",
+        detail: message,
+      },
+    ],
+  };
 }
 
 function draftStateForProfile(models: OverviewModels, profileId?: string) {

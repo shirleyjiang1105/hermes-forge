@@ -539,7 +539,15 @@ async function testOpenAiCompatibleFlow(input: {
   const steps: ModelHealthCheckStep[] = [];
   const modelInfo = await fetchOpenAiCompatibleModels(baseUrl, input.apiKey);
   steps.push(step("auth", modelInfo.authResolved, modelInfo.authResolved ? "鉴权已通过" : modelInfo.message));
-  steps.push(step("models", modelInfo.ok, modelInfo.message));
+  const modelListMismatch = modelInfo.availableModels.length > 0 && !modelInfo.availableModels.includes(input.profile.model);
+  steps.push(step(
+    "models",
+    modelInfo.ok,
+    modelListMismatch
+      ? `模型列表返回 ${modelInfo.availableModels.length} 个模型，但未包含 ${input.profile.model}；继续用 chat 实测为准。`
+      : modelInfo.message,
+    modelListMismatch ? `返回模型示例：${modelInfo.availableModels.slice(0, 12).join("、")}` : undefined,
+  ));
   if (!modelInfo.ok) {
     return failure({
       profile: input.profile,
@@ -555,22 +563,6 @@ async function testOpenAiCompatibleFlow(input: {
       authResolved: modelInfo.authResolved,
     });
   }
-  if (modelInfo.availableModels.length > 0 && !modelInfo.availableModels.includes(input.profile.model)) {
-    steps.push(step("models", false, `当前 provider family 不包含模型 ${input.profile.model}`));
-    return failure({
-      profile: input.profile,
-      sourceType: input.sourceType,
-      family: providerFamilyFor(input.sourceType),
-      authMode: input.authMode,
-      category: "provider_mismatch",
-      message: `当前来源能连通，但模型“${input.profile.model}”不属于这组 provider / endpoint。`,
-      fix: "请从返回的模型列表里重新选择，或切换到正确的 provider family。",
-      steps,
-      normalizedBaseUrl: baseUrl,
-      availableModels: modelInfo.availableModels,
-      authResolved: modelInfo.authResolved,
-    });
-  }
   const chat = await testOpenAiCompatibleChat(baseUrl, input.profile.model, input.apiKey);
   steps.push(step("chat", chat.ok, chat.message));
   if (!chat.ok) {
@@ -579,9 +571,13 @@ async function testOpenAiCompatibleFlow(input: {
       sourceType: input.sourceType,
       family: providerFamilyFor(input.sourceType),
       authMode: input.authMode,
-      category: chat.failureCategory ?? "unknown",
-      message: chat.message,
-      fix: chat.recommendedFix,
+      category: modelListMismatch ? "model_not_found" : chat.failureCategory ?? "unknown",
+      message: modelListMismatch
+        ? `模型服务可达，但模型列表不包含“${input.profile.model}”，chat 实测也失败。`
+        : chat.message,
+      fix: modelListMismatch
+        ? "请从返回的模型列表里选择一个模型，或确认模型 ID/部署名是否正确。"
+        : chat.recommendedFix,
       steps,
       normalizedBaseUrl: baseUrl,
       availableModels: modelInfo.availableModels,
@@ -602,6 +598,7 @@ async function testOpenAiCompatibleFlow(input: {
       : toolCheck.ok
         ? `上下文窗口只有 ${contextWindow ?? 0}，更适合作为辅助模型`
         : "tool calling 未通过，不能直接作为 Hermes 主模型",
+    toolCheck.detail,
   ));
   let wslReachable = true;
   let wslProbeUrl: string | undefined;
@@ -726,21 +723,13 @@ async function testAnthropicProvider(profile: ModelProfile, sourceType: ModelSou
     }
     const payload = await response.json().catch(() => undefined) as { data?: Array<{ id?: string; context_window?: number }> } | undefined;
     const availableModels = payload?.data?.map((item) => item.id).filter((item): item is string => Boolean(item)) ?? [];
-    steps.push(step("models", true, availableModels.length ? `发现 ${availableModels.length} 个模型` : "模型列表为空，继续做最小消息测试"));
-    if (availableModels.length > 0 && !availableModels.includes(profile.model)) {
-      return failure({
-        profile,
-        sourceType,
-        family: "api_key",
-        authMode: "api_key",
-        category: "provider_mismatch",
-        message: `Anthropic 当前返回的模型里没有 ${profile.model}。`,
-        fix: "请从 Anthropic 可用模型里重新选择。",
-        steps,
-        normalizedBaseUrl: baseUrl,
-        availableModels,
-      });
-    }
+    const modelListMismatch = availableModels.length > 0 && !availableModels.includes(profile.model);
+    steps.push(step(
+      "models",
+      true,
+      modelListMismatch ? `发现 ${availableModels.length} 个模型，但未包含 ${profile.model}；继续用消息请求实测。` : availableModels.length ? `发现 ${availableModels.length} 个模型` : "模型列表为空，继续做最小消息测试",
+      modelListMismatch ? `返回模型示例：${availableModels.slice(0, 12).join("、")}` : undefined,
+    ));
     const chatResponse = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers: {
@@ -762,9 +751,9 @@ async function testAnthropicProvider(profile: ModelProfile, sourceType: ModelSou
         sourceType,
         family: "api_key",
         authMode: "api_key",
-        category: chatResponse.status === 401 || chatResponse.status === 403 ? "auth_invalid" : "server_error",
-        message: `Anthropic 最小消息请求失败（HTTP ${chatResponse.status}）。`,
-        fix: "请确认模型 ID、账号权限和 API Key 都正确。",
+        category: modelListMismatch ? "model_not_found" : chatResponse.status === 401 || chatResponse.status === 403 ? "auth_invalid" : "server_error",
+        message: modelListMismatch ? `Anthropic 模型列表不包含 ${profile.model}，消息请求也失败。` : `Anthropic 最小消息请求失败（HTTP ${chatResponse.status}）。`,
+        fix: modelListMismatch ? "请从 Anthropic 返回的模型列表中选择，或确认模型别名是否仍可用。" : "请确认模型 ID、账号权限和 API Key 都正确。",
         steps,
         normalizedBaseUrl: baseUrl,
         availableModels,
@@ -861,21 +850,13 @@ async function testGeminiApiProvider(profile: ModelProfile, sourceType: ModelSou
     }
     const payload = await response.json().catch(() => undefined) as { models?: Array<{ name?: string; inputTokenLimit?: number; supportedGenerationMethods?: string[] }> } | undefined;
     const availableModels = payload?.models?.map((item) => item.name?.replace(/^models\//, "")).filter((item): item is string => Boolean(item)) ?? [];
-    steps.push(step("models", true, availableModels.length ? `发现 ${availableModels.length} 个 Gemini 模型` : "模型列表为空，继续做最小 chat 测试"));
-    if (availableModels.length > 0 && !availableModels.includes(profile.model)) {
-      return failure({
-        profile,
-        sourceType,
-        family: "api_key",
-        authMode: "api_key",
-        category: "provider_mismatch",
-        message: `Gemini 当前返回的模型里没有 ${profile.model}。`,
-        fix: "请从 Gemini 可用模型里重新选择。",
-        steps,
-        normalizedBaseUrl: baseUrl,
-        availableModels,
-      });
-    }
+    const modelListMismatch = availableModels.length > 0 && !availableModels.includes(profile.model);
+    steps.push(step(
+      "models",
+      true,
+      modelListMismatch ? `发现 ${availableModels.length} 个 Gemini 模型，但未包含 ${profile.model}；继续用生成请求实测。` : availableModels.length ? `发现 ${availableModels.length} 个 Gemini 模型` : "模型列表为空，继续做最小 chat 测试",
+      modelListMismatch ? `返回模型示例：${availableModels.slice(0, 12).join("、")}` : undefined,
+    ));
     const chatUrl = `${baseUrl}/models/${profile.model}:generateContent?key=${encodeURIComponent(apiKey)}`;
     const chatResponse = await fetch(chatUrl, {
       method: "POST",
@@ -892,9 +873,9 @@ async function testGeminiApiProvider(profile: ModelProfile, sourceType: ModelSou
         sourceType,
         family: "api_key",
         authMode: "api_key",
-        category: "server_error",
-        message: `Gemini 最小生成请求失败（HTTP ${chatResponse.status}）。`,
-        fix: "请确认模型 ID 属于 Gemini，可用区域和账号权限也正确。",
+        category: modelListMismatch ? "model_not_found" : "server_error",
+        message: modelListMismatch ? `Gemini 模型列表不包含 ${profile.model}，生成请求也失败。` : `Gemini 最小生成请求失败（HTTP ${chatResponse.status}）。`,
+        fix: modelListMismatch ? "请从 Gemini 返回的模型列表中选择，或确认模型别名/区域是否可用。" : "请确认模型 ID 属于 Gemini，可用区域和账号权限也正确。",
         steps,
         normalizedBaseUrl: baseUrl,
         availableModels,
@@ -992,13 +973,17 @@ async function fetchOpenAiCompatibleModels(baseUrl: string, apiKey?: string): Pr
         authResolved: !(response.status === 401 || response.status === 403),
       };
     }
-    const payload = await response.json().catch(() => undefined) as { data?: Array<{ id?: string; context_length?: number; context_window?: number }> } | undefined;
-    const availableModels = payload?.data?.map((item) => item.id).filter((item): item is string => Boolean(item)) ?? [];
+    const payload = await response.json().catch(() => undefined) as {
+      data?: Array<{ id?: string; name?: string; context_length?: number; context_window?: number }>;
+      models?: Array<{ id?: string; name?: string; context_length?: number; context_window?: number }>;
+    } | undefined;
+    const rawModels = normalizeOpenAiModelPayload(payload);
+    const availableModels = rawModels.map((item) => item.id).filter((item): item is string => Boolean(item));
     return {
       ok: true,
       message: availableModels.length ? `模型发现成功，共 ${availableModels.length} 个模型。` : "模型发现成功，但服务端未返回模型列表。",
       availableModels,
-      rawModelPayload: payload?.data,
+      rawModelPayload: rawModels,
       authResolved: true,
     };
   } catch (error) {
@@ -1016,7 +1001,18 @@ async function fetchOpenAiCompatibleModels(baseUrl: string, apiKey?: string): Pr
 }
 
 function isOptionalModelDiscoveryStatus(status: number) {
-  return status === 404 || status === 405 || status === 501;
+  return status === 400 || status === 404 || status === 405 || status === 501;
+}
+
+function normalizeOpenAiModelPayload(payload: { data?: Array<{ id?: string; name?: string; context_length?: number; context_window?: number }>; models?: Array<{ id?: string; name?: string; context_length?: number; context_window?: number }> } | undefined) {
+  const items = payload?.data ?? payload?.models ?? [];
+  return items
+    .map((item) => ({
+      id: item.id ?? item.name,
+      context_length: item.context_length,
+      context_window: item.context_window,
+    }))
+    .filter((item) => Boolean(item.id));
 }
 
 async function testOpenAiCompatibleChat(baseUrl: string, model: string, apiKey?: string) {
@@ -1035,14 +1031,17 @@ async function testOpenAiCompatibleChat(baseUrl: string, model: string, apiKey?:
       }),
       signal: AbortSignal.timeout(15000),
     });
-    return response.ok
-      ? { ok: true, message: "最小 chat 请求通过。" }
-      : {
+    if (response.ok) {
+      return { ok: true, message: "最小 chat 请求通过。" };
+    }
+    const preview = await response.text().catch(() => "");
+    const modelMissing = /model.*(not found|not exist|does not exist|unknown|不存在|未找到)|deployment.*not found/i.test(preview);
+    return {
         ok: false,
-        message: `最小 chat 请求失败（HTTP ${response.status}）。`,
-        failureCategory: httpFailureCategory(response.status),
-        recommendedFix: httpFailureFix(response.status, baseUrl),
-      };
+        message: `最小 chat 请求失败（HTTP ${response.status}）${preview ? `：${compactPreview(preview)}` : "。"}`,
+        failureCategory: modelMissing ? "model_not_found" as const : httpFailureCategory(response.status),
+        recommendedFix: modelMissing ? "请确认模型 ID/部署名正确，或从模型列表中选择一个已加载模型。" : httpFailureFix(response.status, baseUrl),
+    };
   } catch (error) {
     return {
       ok: false,
@@ -1053,57 +1052,178 @@ async function testOpenAiCompatibleChat(baseUrl: string, model: string, apiKey?:
   }
 }
 
+type OpenAiToolProbeAttempt = {
+  id: string;
+  label: string;
+  body: Record<string, unknown>;
+};
+
+type OpenAiToolProbeAttemptResult = {
+  label: string;
+  ok: boolean;
+  message: string;
+  status?: number;
+};
+
 async function testOpenAiCompatibleToolCalling(baseUrl: string, model: string, apiKey?: string) {
   const url = `${baseUrl.replace(/\/$/, "")}/chat/completions`;
+  const attempts = buildOpenAiToolProbeAttempts(model);
+  const results: OpenAiToolProbeAttemptResult[] = [];
   try {
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey || "lm-studio"}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: "user", content: "Call the ping tool." }],
-        tools: [{
-          type: "function",
-          function: {
-            name: "ping",
-            description: "ping",
-            parameters: { type: "object", properties: {} },
-          },
-        }],
-        tool_choice: {
-          type: "function",
-          function: { name: "ping" },
+    for (const attempt of attempts) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${apiKey || "lm-studio"}`,
         },
-        max_tokens: 32,
-      }),
-      signal: AbortSignal.timeout(15000),
-    });
-    if (!response.ok) {
-      return {
-        ok: false,
-        message: `tool calling 探测失败（HTTP ${response.status}）。`,
-        recommendedFix: "请确认模型服务开启了 tool calling / function calling，或改用支持工具调用的模型。",
-      };
+        body: JSON.stringify(attempt.body),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!response.ok) {
+        const preview = await response.text().catch(() => "");
+        results.push({
+          label: attempt.label,
+          ok: false,
+          status: response.status,
+          message: `HTTP ${response.status}${preview ? `：${compactPreview(preview)}` : ""}`,
+        });
+        continue;
+      }
+      const payload = await response.json().catch(() => undefined);
+      const parsed = parseOpenAiToolProbePayload(payload);
+      results.push({
+        label: attempt.label,
+        ok: parsed.ok,
+        message: parsed.message,
+      });
+      if (parsed.ok) {
+        return {
+          ok: true,
+          message: parsed.message,
+          detail: toolProbeDetail(results),
+        };
+      }
     }
-    const payload = await response.json().catch(() => undefined) as { choices?: Array<{ message?: { tool_calls?: unknown[] } }> } | undefined;
-    const toolCalls = payload?.choices?.[0]?.message?.tool_calls;
-    return Array.isArray(toolCalls) && toolCalls.length > 0
-      ? { ok: true, message: "tool calling 可用。" }
-      : {
-        ok: false,
-        message: "接口能返回 chat，但没有返回 tool call。",
-        recommendedFix: "请确认本地模型/服务端显式开启了工具调用能力。",
-      };
+    return {
+      ok: false,
+      message: "接口能返回 chat，但所有标准 tool calling 探测都没有返回可执行工具调用。",
+      detail: toolProbeDetail(results),
+      recommendedFix: "请确认模型服务端开启了 function/tool calling、选择了支持工具的模型，并检查代理/网关没有移除 tools 或 tool_choice 参数。",
+    };
   } catch (error) {
     return {
       ok: false,
       message: "tool calling 探测失败。",
+      detail: results.length ? toolProbeDetail(results) : undefined,
       recommendedFix: error instanceof Error ? error.message : "请检查模型服务是否支持工具调用。",
     };
   }
+}
+
+function buildOpenAiToolProbeAttempts(model: string): OpenAiToolProbeAttempt[] {
+  const tool = {
+    type: "function",
+    function: {
+      name: "ping",
+      description: "Return a ping result. You must call this function when asked.",
+      parameters: {
+        type: "object",
+        properties: {
+          message: { type: "string", description: "A short ping message." },
+        },
+        required: ["message"],
+      },
+    },
+  };
+  const messages = [{ role: "user", content: "Call the ping tool now with message \"ok\". Do not answer in text." }];
+  const base = {
+    model,
+    messages,
+    max_tokens: 32,
+    temperature: 0,
+  };
+  return [
+    {
+      id: "tools_forced_nested",
+      label: "标准 tools + 指定函数",
+      body: {
+        ...base,
+        tools: [tool],
+        tool_choice: { type: "function", function: { name: "ping" } },
+      },
+    },
+    {
+      id: "tools_forced_flat",
+      label: "兼容 tools + 平铺指定函数",
+      body: {
+        ...base,
+        tools: [tool],
+        tool_choice: { type: "function", name: "ping" },
+      },
+    },
+    {
+      id: "tools_required",
+      label: "标准 tools + required",
+      body: {
+        ...base,
+        tools: [tool],
+        tool_choice: "required",
+      },
+    },
+    {
+      id: "tools_auto",
+      label: "标准 tools + auto",
+      body: {
+        ...base,
+        tools: [tool],
+        tool_choice: "auto",
+      },
+    },
+    {
+      id: "legacy_functions_forced",
+      label: "旧版 functions + function_call",
+      body: {
+        ...base,
+        functions: [tool.function],
+        function_call: { name: "ping" },
+      },
+    },
+  ];
+}
+
+function parseOpenAiToolProbePayload(payload: unknown) {
+  const choice = isRecord(payload) && Array.isArray(payload.choices) ? payload.choices[0] : undefined;
+  const message = isRecord(choice) && isRecord(choice.message) ? choice.message : undefined;
+  const toolCalls = isRecord(message) && Array.isArray(message.tool_calls) ? message.tool_calls : undefined;
+  if (toolCalls && toolCalls.length > 0) {
+    return { ok: true, message: "tool calling 可用（返回 OpenAI 标准 tool_calls）。" };
+  }
+  const functionCall = isRecord(message) && isRecord(message.function_call) ? message.function_call : undefined;
+  if (functionCall && typeof functionCall.name === "string" && functionCall.name.trim()) {
+    return { ok: true, message: "tool calling 可用（返回旧版 function_call，Forge 会按兼容能力接入）。" };
+  }
+  const finishReason = isRecord(choice) && typeof choice.finish_reason === "string" ? choice.finish_reason : undefined;
+  const content = isRecord(message) && typeof message.content === "string" ? message.content : undefined;
+  if (finishReason === "tool_calls" || finishReason === "function_call") {
+    return { ok: false, message: `响应声明了 ${finishReason}，但没有携带可解析的调用内容。` };
+  }
+  return { ok: false, message: content ? `返回普通文本：${compactPreview(content)}` : "没有返回 tool_calls 或 function_call。" };
+}
+
+function toolProbeDetail(results: OpenAiToolProbeAttemptResult[]) {
+  return results
+    .map((item) => `${item.ok ? "通过" : "失败"}：${item.label} - ${item.message}`)
+    .join("\n");
+}
+
+function compactPreview(input: string, maxLength = 220) {
+  const compact = input.replace(/\s+/g, " ").trim();
+  return compact.length > maxLength ? `${compact.slice(0, maxLength)}...` : compact;
+}
+
+function isRecord(input: unknown): input is Record<string, unknown> {
+  return typeof input === "object" && input !== null;
 }
 
 async function probeWslReachability(input: {

@@ -69,6 +69,16 @@ type VerifyResult = {
   failedCommand?: ManagedWslInstallerFailureCommand;
 };
 
+type ExistingHermesAttachResult = {
+  ok: boolean;
+  rootPath?: string;
+  cliPath?: string;
+  python?: string;
+  version?: string;
+  capabilityProbe?: VerifyResult["capabilityProbe"];
+  steps: Array<ReturnType<typeof installStep>>;
+};
+
 export class WslHermesInstallService {
   private lastInstallResult?: WslHermesInstallResult;
 
@@ -200,6 +210,87 @@ export class WslHermesInstallService {
       });
     }
     lastSuccessfulStage = "ensure_python";
+
+    const existingHermes = await this.tryAttachExistingHermes(runtime, hermesRoot, python.python ?? "python3");
+    steps.push(...existingHermes.steps);
+    if (existingHermes.ok && existingHermes.rootPath && existingHermes.python) {
+      const attachedRuntime = { ...runtime, managedRoot: existingHermes.rootPath };
+      await this.persistManagedRoot(existingHermes.rootPath);
+      const reprobe = await this.runtimeProbeService.probe({ runtime: attachedRuntime, persistResolvedHermesPath: true });
+      const reDoctor = await this.doctorService.diagnose({ runtime: attachedRuntime });
+      const reprobeHasHermesFailure = reprobe.issues.some((issue) =>
+        issue.severity === "error" && ["hermes_root_missing", "hermes_cli_missing", "wsl_missing", "wsl_distro_missing", "wsl_distro_unreachable", "wsl_python_missing"].includes(issue.code),
+      );
+      const doctorHasHermesFailure = reDoctor.blockingIssues.some((issue) =>
+        ["hermes_root_missing", "hermes_cli_missing", "wsl_missing", "wsl_distro_missing", "wsl_distro_unreachable", "wsl_python_missing"].includes(issue.code),
+      );
+      steps.push(installStep({
+        phase: "health_check",
+        step: "reprobe-after-import",
+        status: !reprobeHasHermesFailure ? "passed" : "failed",
+        code: "runtime_reprobed",
+        summary: `导入已有 Hermes 后 reprobe 完成：${reprobe.overallStatus}`,
+        detail: reprobeHasHermesFailure
+          ? reprobe.issues.filter((issue) => issue.severity === "error").map((issue) => `${issue.code}: ${issue.summary}`).join("\n")
+          : undefined,
+        debugContext: { overallStatus: reprobe.overallStatus, importedRoot: existingHermes.rootPath },
+      }));
+      steps.push(installStep({
+        phase: "health_check",
+        step: "redoctor-after-import",
+        status: !doctorHasHermesFailure ? "passed" : "failed",
+        code: "doctor_reran",
+        summary: `导入已有 Hermes 后 re-doctor 完成：${reDoctor.overallStatus}`,
+        detail: doctorHasHermesFailure
+          ? reDoctor.blockingIssues.map((issue) => `${issue.code}: ${issue.summary}`).join("\n")
+          : undefined,
+        debugContext: { overallStatus: reDoctor.overallStatus, importedRoot: existingHermes.rootPath },
+      }));
+      const importHealthy = !reprobeHasHermesFailure && !doctorHasHermesFailure;
+      lastSuccessfulStage = importHealthy ? "health_check" : "ensure_python";
+      return this.finalize({
+        requestedAt,
+        distroName: runtime.distro ?? "unknown",
+        hermesRoot: existingHermes.rootPath,
+        pythonResolved: existingHermes.python,
+        venvPath: existingHermes.python.includes("/.venv/bin/python") ? existingHermes.python.replace(/\/bin\/python$/, "") : undefined,
+        hermesVersion: existingHermes.version,
+        capabilityProbe: existingHermes.capabilityProbe,
+        repoReady: true,
+        installExecuted: false,
+        healthCheckPassed: importHealthy,
+        resumedFromStage,
+        lastSuccessfulStage,
+        repoStatus: {
+          state: "reused",
+          root: existingHermes.rootPath,
+          detail: `已导入 WSL 中已有 Hermes CLI：${existingHermes.cliPath}`,
+        },
+        venvStatus: {
+          state: existingHermes.python.includes("/.venv/bin/python") ? "reused" : "skipped",
+          path: existingHermes.python.includes("/.venv/bin/python") ? existingHermes.python.replace(/\/bin\/python$/, "") : undefined,
+          detail: `使用已有 Python 启动方式：${existingHermes.python}`,
+        },
+        bridgeStatus: reprobe.bridge,
+        reprobeStatus: reprobe.overallStatus,
+        reDoctorStatus: reDoctor.overallStatus,
+        failureArtifacts: this.failureArtifacts({
+          distroName: runtime.distro,
+          managedRoot: existingHermes.rootPath,
+          repoStatus: { state: "reused", root: existingHermes.rootPath },
+          venvStatus: { state: "reused", path: existingHermes.python },
+          bridgeStatus: reprobe.bridge,
+          lastSuccessfulStage,
+          recommendedRecoveryAction: importHealthy ? "none" : "retry_install",
+        }),
+        steps,
+        debugContext: {
+          managedRootPolicy: this.managedRootPolicy(existingHermes.rootPath),
+          importedCliPath: existingHermes.cliPath,
+          version: existingHermes.version,
+        },
+      });
+    }
 
     const repo = this.shouldReuseRepo(resumedFromStage, previousResult, hermesRoot)
       ? await this.reuseExistingRepo(runtime, hermesRoot)
@@ -475,6 +566,140 @@ export class WslHermesInstallService {
     );
   }
 
+  private async tryAttachExistingHermes(
+    runtime: WslDoctorReport["runtime"],
+    hermesRoot: string,
+    basePython: string,
+  ): Promise<ExistingHermesAttachResult> {
+    const candidates = await this.discoverExistingHermesCandidates(runtime, hermesRoot);
+    const failures: string[] = [];
+    for (const cliPath of candidates) {
+      const file = await this.runInDistro(runtime, `[ -f ${shellQuote(cliPath)} ] && [ -r ${shellQuote(cliPath)} ] && echo yes || echo no`, "install.wsl.existing-hermes-file");
+      if ((file.stdout || "").trim() !== "yes") {
+        failures.push(`${cliPath}: 文件不存在或不可读`);
+        continue;
+      }
+      const rootPath = dirnamePosix(cliPath);
+      const python = await this.resolveExistingHermesPython(runtime, rootPath, basePython);
+      const version = await this.runInDistro(runtime, `cd ${shellQuote(rootPath)} && ${shellQuote(python)} ${shellQuote(cliPath)} --version`, "install.wsl.existing-hermes-version");
+      const capabilities = await this.runInDistro(runtime, `cd ${shellQuote(rootPath)} && ${shellQuote(python)} ${shellQuote(cliPath)} capabilities --json`, "install.wsl.existing-hermes-capabilities");
+      const capabilityProbe = this.parseCapabilityProbe(capabilities);
+      if (version.exitCode === 0 && capabilityProbe.minimumSatisfied) {
+        return {
+          ok: true,
+          rootPath,
+          cliPath,
+          python,
+          version: version.stdout.trim(),
+          capabilityProbe,
+          steps: [installStep({
+            phase: "preflight",
+            step: "import-existing-hermes",
+            status: "passed",
+            code: "ok",
+            summary: "已发现并导入 WSL 中已有 Hermes Agent。",
+            detail: [`CLI: ${cliPath}`, `Python: ${python}`, version.stdout.trim(), capabilities.stdout.trim()].filter(Boolean).join("\n"),
+            fixHint: "已复用现有安装，本轮不会覆盖该目录。",
+          })],
+        };
+      }
+      const directVersion = await this.runInDistro(runtime, `cd ${shellQuote(rootPath)} && ${shellQuote(cliPath)} --version`, "install.wsl.existing-hermes-direct-version");
+      const directCapabilities = await this.runInDistro(runtime, `cd ${shellQuote(rootPath)} && ${shellQuote(cliPath)} capabilities --json`, "install.wsl.existing-hermes-direct-capabilities");
+      const directCapabilityProbe = this.parseCapabilityProbe(directCapabilities);
+      if (directVersion.exitCode === 0 && directCapabilityProbe.minimumSatisfied) {
+        const wrapper = await this.createAttachedHermesWrapper(runtime, cliPath, basePython);
+        if (wrapper.ok) {
+          return {
+            ok: true,
+            rootPath: wrapper.rootPath,
+            cliPath: wrapper.cliPath,
+            python: basePython,
+            version: directVersion.stdout.trim(),
+            capabilityProbe: directCapabilityProbe,
+            steps: [installStep({
+              phase: "preflight",
+              step: "import-existing-hermes",
+              status: "passed",
+              code: "ok",
+              summary: "已发现并导入 WSL 中已有 Hermes 命令。",
+              detail: [`Original CLI: ${cliPath}`, `Wrapper: ${wrapper.cliPath}`, `Python: ${basePython}`, directVersion.stdout.trim(), directCapabilities.stdout.trim()].filter(Boolean).join("\n"),
+              fixHint: "已创建轻量 wrapper 连接到现有 Hermes 命令，本轮不会覆盖原目录。",
+            })],
+          };
+        }
+        failures.push(`${cliPath}: 直接执行可用，但创建 Forge wrapper 失败：${wrapper.detail}`);
+        continue;
+      }
+      failures.push(`${cliPath}: ${version.stderr || version.stdout || `version exit ${version.exitCode}`} ${capabilities.stderr || capabilities.stdout || `capabilities exit ${capabilities.exitCode}`}`.trim());
+    }
+    return {
+      ok: false,
+      steps: [installStep({
+        phase: "preflight",
+        step: "import-existing-hermes",
+        status: "skipped",
+        code: "ok",
+        summary: candidates.length ? "未发现可直接导入的已有 Hermes，将继续安装/修复流程。" : "未发现 WSL 中已有 Hermes，将继续安装流程。",
+        detail: failures.slice(0, 8).join("\n"),
+        fixHint: candidates.length ? "如果你已有 Hermes，请确认该目录下的 hermes 能执行 capabilities --json，并满足 Forge 最低能力。" : undefined,
+      })],
+    };
+  }
+
+  private async discoverExistingHermesCandidates(runtime: WslDoctorReport["runtime"], hermesRoot: string) {
+    const rootCandidates = [
+      `${hermesRoot.replace(/\/+$/, "")}/hermes`,
+      runtime.managedRoot?.trim() ? `${runtime.managedRoot.trim().replace(/\/+$/, "")}/hermes` : undefined,
+    ].filter((item): item is string => Boolean(item));
+    const script = [
+      "set +e",
+      "{",
+      ...rootCandidates.map((candidate) => `printf '%s\\n' ${shellQuote(candidate)}`),
+      "printf '%s\\n' \"$HOME/.hermes-forge/hermes-agent/hermes\"",
+      "printf '%s\\n' \"$HOME/hermes-agent/hermes\"",
+      "printf '%s\\n' \"$HOME/Hermes Agent/hermes\"",
+      "command -v hermes 2>/dev/null || true",
+      "find \"$HOME\" -maxdepth 4 -type f -name hermes 2>/dev/null | head -20",
+      "} | awk 'NF && !seen[$0]++'",
+    ].join("\n");
+    const result = await this.runInDistro(runtime, script, "install.wsl.find-existing-hermes");
+    if (result.exitCode !== 0) return [];
+    return result.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  private async resolveExistingHermesPython(runtime: WslDoctorReport["runtime"], rootPath: string, basePython: string) {
+    const result = await this.runInDistro(
+      runtime,
+      `[ -x ${shellQuote(`${rootPath}/.venv/bin/python`)} ] && printf %s ${shellQuote(`${rootPath}/.venv/bin/python`)} || printf %s ${shellQuote(basePython)}`,
+      "install.wsl.existing-hermes-python",
+    );
+    return (result.stdout || "").trim() || basePython;
+  }
+
+  private async createAttachedHermesWrapper(runtime: WslDoctorReport["runtime"], targetCliPath: string, python: string) {
+    const home = await this.runInDistro(runtime, "printf %s \"$HOME\"", "install.wsl.attached-wrapper-home");
+    const baseHome = (home.stdout || "").trim();
+    if (!baseHome) return { ok: false, detail: home.stderr || home.stdout || "无法解析 WSL HOME" };
+    const rootPath = `${baseHome.replace(/\/+$/, "")}/.hermes-forge/attached-hermes`;
+    const cliPath = `${rootPath}/hermes`;
+    const wrapper = [
+      "#!/usr/bin/env python3",
+      "import os",
+      "import sys",
+      `TARGET = ${JSON.stringify(targetCliPath)}`,
+      "os.execv(TARGET, [TARGET, *sys.argv[1:]])",
+      "",
+    ].join("\n");
+    const create = await this.runInDistro(
+      runtime,
+      `mkdir -p ${shellQuote(rootPath)} && cat > ${shellQuote(cliPath)} <<'PY'\n${wrapper}PY\nchmod +x ${shellQuote(cliPath)} && ${shellQuote(python)} ${shellQuote(cliPath)} capabilities --json >/dev/null`,
+      "install.wsl.create-attached-wrapper",
+    );
+    return create.exitCode === 0
+      ? { ok: true, rootPath, cliPath }
+      : { ok: false, detail: create.stderr || create.stdout || `exit ${create.exitCode}` };
+  }
+
   private async reuseExistingRepo(runtime: WslDoctorReport["runtime"], hermesRoot: string): Promise<RepoEnsureResult> {
     const valid = await this.runInDistro(
       runtime,
@@ -564,6 +789,54 @@ export class WslHermesInstallService {
           summary: update.exitCode === 0 ? "已更新现有 Hermes 安装目录。" : "更新现有 Hermes 安装目录失败。",
           detail: update.stdout || update.stderr,
           fixHint: update.exitCode === 0 ? undefined : "请手动处理该 repo 的 git 状态；本轮不会删除它。",
+        })],
+      };
+    }
+    const localSource = await this.runInDistro(
+      runtime,
+      `[ -f ${shellQuote(`${hermesRoot}/hermes`)} ] && [ -f ${shellQuote(`${hermesRoot}/pyproject.toml`)} ] && echo valid || echo invalid`,
+      "install.wsl.check-local-source",
+    );
+    if ((localSource.stdout || "").trim() === "valid") {
+      return {
+        ok: true,
+        repoStatus: {
+          state: "reused",
+          root: hermesRoot,
+          detail: "复用已有 Hermes 源码目录（非 git 管理），本轮不会覆盖该目录。",
+        },
+        steps: [installStep({
+          phase: "cloning",
+          step: "reuse-local-source",
+          status: "skipped",
+          code: "ok",
+          summary: "已识别已有 Hermes 源码目录，将直接复用。",
+          detail: hermesRoot,
+          fixHint: "该目录不是 git repo，因此本轮不会自动拉取或重置源码。",
+        })],
+      };
+    }
+    const nonEmpty = await this.runInDistro(
+      runtime,
+      `find ${shellQuote(hermesRoot)} -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q . && echo yes || echo no`,
+      "install.wsl.check-root-nonempty",
+    );
+    if ((nonEmpty.stdout || "").trim() === "yes") {
+      return {
+        ok: false,
+        repoStatus: {
+          state: "invalid",
+          root: hermesRoot,
+          detail: `目录：${hermesRoot}`,
+        },
+        steps: [installStep({
+          phase: "preflight",
+          step: "validate-existing-repo",
+          status: "failed",
+          code: "repo_invalid",
+          summary: "现有 Hermes 目录不是可复用安装或源码目录，本轮不会直接覆盖。",
+          detail: `目录：${hermesRoot}`,
+          fixHint: "请在设置中改成已有 Hermes 的真实源码目录，或清空/更换该受管安装目录后重试。",
         })],
       };
     }
@@ -899,6 +1172,12 @@ function commandSummary(result: CommandResult): ManagedWslInstallerFailureComman
 function preview(value: string) {
   const text = value.trim();
   return text.length > 4000 ? `${text.slice(0, 4000)}\n...[truncated]` : text;
+}
+
+function dirnamePosix(inputPath: string) {
+  const normalized = inputPath.replace(/\/+$/, "");
+  const index = normalized.lastIndexOf("/");
+  return index > 0 ? normalized.slice(0, index) : "/";
 }
 
 function shellQuote(value: string) {

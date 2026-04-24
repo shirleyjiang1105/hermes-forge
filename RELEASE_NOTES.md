@@ -1,5 +1,41 @@
 # Release Notes
 
+## Hermes Forge v0.1.19
+
+发布日期：2026-04-24
+
+这是一次面向模型接入和 WSL 既有 Hermes 用户的紧急体验修复版本。重点解决“模型能聊天但 tool calling 检测过不了”“自定义 endpoint 无法保存/测试反馈不清楚”“已有 WSL Hermes 被误判为无效安装”等问题。
+
+### 修复内容
+
+- 模型接入检测更兼容：
+  - OpenAI-compatible / OpenRouter / 自定义 endpoint 不再只依赖单一 tool calling 探测方式。
+  - 兼容 `tools + tool_choice`、`tool_choice: required/auto`、旧版 `functions/function_call` 等常见实现差异。
+  - `/models` 返回空、400、或没有列出手填模型时，不再直接判失败，会以实际 chat/tool probe 结果为准。
+- 模型配置保存体验修复：
+  - “测试失败但模型可聊天”的配置可以保存为辅助/待确认模型，不再把用户卡死。
+  - 主模型能力通过时会自动保存并设为默认模型。
+  - 保存/测试异常会在界面上明确显示，而不是看起来点了没反应。
+- 模型配置前端交互优化：
+  - 点击“立即测试 / 保存并测试 / 自动探测”后，操作区附近会立即显示进行中反馈。
+  - 完成后直接显示测试结论、下一步建议、tool calling、context、WSL 可达性等关键信息。
+  - 操作后会自动把反馈区滚入视野，避免用户还要手动下滑查找结果。
+- WSL 既有 Hermes 接入修复：
+  - Managed WSL 安装器会优先发现并接入用户 WSL 里已有的 Hermes CLI。
+  - 现有 Hermes 目录只要能运行版本检查和 capability 检查，就会复用，不再轻易提示“无效安装”。
+  - 对非标准安装位置增加候选发现和轻量 wrapper 兼容，尽量避免覆盖用户已有环境。
+
+### 已知限制
+
+- 某些模型服务虽然兼容 Chat Completions，但如果服务端确实没有实现工具调用，只能保存为辅助模型，不能直接作为 Hermes 主 Agent 模型。
+- 自托管模型的 WSL 可达性仍取决于 Windows localhost、WSL 网络和模型服务绑定地址是否正确。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过，47 个测试文件、255 个测试。
+- `npm run build` 通过。
+
 ## Hermes Forge v0.1.18
 
 发布日期：2026-04-24

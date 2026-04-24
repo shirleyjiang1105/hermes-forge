@@ -62,12 +62,12 @@ describe("ModelConfigWizard", () => {
 
     renderWizard({ onRefresh, onSaved });
 
-    expect(screen.getByRole("button", { name: /保存并复检/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /保存并测试/ })).not.toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
 
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
     expect(testModelConnection).toHaveBeenCalledWith(expect.objectContaining({ maxTokens: 256000 }));
-    const saveButton = screen.getByRole("button", { name: /保存并复检/ });
+    const saveButton = screen.getByRole("button", { name: /保存并测试/ });
     expect(saveButton).not.toBeDisabled();
     fireEvent.click(saveButton);
 
@@ -98,6 +98,40 @@ describe("ModelConfigWizard", () => {
     });
   });
 
+  it("allows saving a reachable model as warning even when agent capability fails", async () => {
+    testModelConnection.mockResolvedValue({
+      ok: false,
+      profileId: "draft-openai_compatible",
+      sourceType: "openai_compatible",
+      agentRole: "auxiliary_model",
+      supportsTools: false,
+      contextWindow: 32000,
+      failureCategory: "tool_calling_unavailable",
+      message: "可以聊天，但 tool calling 未通过。",
+    });
+    updateModelConfig.mockResolvedValue({});
+
+    renderWizard();
+
+    const saveButton = screen.getByRole("button", { name: /保存并测试/ });
+    expect(saveButton).not.toBeDisabled();
+    fireEvent.click(saveButton);
+
+    await waitFor(() => {
+      expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({
+        defaultProfileId: undefined,
+        modelProfiles: expect.arrayContaining([
+          expect.objectContaining({
+            model: "qwen",
+            agentRole: "auxiliary_model",
+            supportsTools: false,
+            lastHealthStatus: "warning",
+          }),
+        ]),
+      }));
+    });
+  });
+
   it("keeps context length hidden and saves an internal maximum when provider does not report one", async () => {
     testModelConnection.mockResolvedValue({
       ok: true,
@@ -121,7 +155,7 @@ describe("ModelConfigWizard", () => {
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "MiniMax-M2.7" } });
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: /新增并复检/ }));
+    fireEvent.click(screen.getByRole("button", { name: /新增并测试/ }));
 
     await waitFor(() => {
       expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({
@@ -163,7 +197,7 @@ describe("ModelConfigWizard", () => {
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "qwen3-coder-plus" } });
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getAllByRole("button", { name: /新增并复检/ }).at(-1)!);
+    fireEvent.click(screen.getAllByRole("button", { name: /新增并测试/ }).at(-1)!);
 
     await waitFor(() => {
       expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({
@@ -200,10 +234,10 @@ describe("ModelConfigWizard", () => {
 
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "MiniMax-M2.7" } });
     fireEvent.change(screen.getByDisplayValue("http://127.0.0.1:8080/v1"), { target: { value: "https://api.minimaxi.com/v1" } });
-    expect(screen.getByRole("button", { name: /新增并复检/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /新增并测试/ })).not.toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: /立即测试/ }));
     expect((await screen.findAllByText("测试通过")).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: /新增并复检/ }));
+    fireEvent.click(screen.getByRole("button", { name: /新增并测试/ }));
 
     await waitFor(() => {
       expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({
@@ -224,7 +258,7 @@ describe("ModelConfigWizard", () => {
 
     expect(screen.queryByDisplayValue("temporary-model")).not.toBeInTheDocument();
     expect(screen.getByDisplayValue("http://127.0.0.1:8080/v1")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /新增并复检/ })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /新增并测试/ })).toBeDisabled();
   });
 
   it("supports editing and deleting saved model profiles", async () => {
