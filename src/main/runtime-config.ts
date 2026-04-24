@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { runCommand } from "../process/command-runner";
 import { runtimeConfigSchema } from "../shared/schemas";
+import { migrateRuntimeConfigModels } from "../shared/model-config";
 import { defaultEnginePermissions } from "../shared/types";
 import type { EngineId, RuntimeConfig } from "../shared/types";
 
@@ -66,7 +67,8 @@ const defaultConfig: RuntimeConfig = {
   ],
   updateSources: {},
   enginePaths: {},
-  startupWarmupMode: "cheap",
+  startupWarmupMode: "off",
+  startupGatewayAutoStart: false,
   enginePermissions: defaultEnginePermissions,
   hermesRuntime: {
     mode: "windows",
@@ -90,7 +92,8 @@ export class RuntimeConfigStore {
       return config;
     }
     const parsedJson = JSON.parse(raw) as RuntimeConfig & { hermesRuntime?: RuntimeConfig["hermesRuntime"] };
-    const parsed = runtimeConfigSchema.safeParse(parsedJson);
+    const migratedJson = migrateRuntimeConfigModels(parsedJson);
+    const parsed = runtimeConfigSchema.safeParse(migratedJson);
     if (!parsed.success) {
       return await defaultConfigWithPreferredRuntime();
     }
@@ -108,10 +111,14 @@ export class RuntimeConfigStore {
   }
 
   async write(config: RuntimeConfig) {
-    const parsed = runtimeConfigSchema.parse(config);
+    const parsed = runtimeConfigSchema.parse(migrateRuntimeConfigModels(config));
     await fs.mkdir(path.dirname(this.configPath), { recursive: true });
     await fs.writeFile(this.configPath, JSON.stringify(parsed, null, 2), "utf8");
     return parsed as RuntimeConfig;
+  }
+
+  getConfigPath() {
+    return this.configPath;
   }
 
   async getEnginePath(engineId: EngineId) {
@@ -138,6 +145,9 @@ export class RuntimeConfigStore {
 }
 
 async function defaultConfigWithPreferredRuntime(): Promise<RuntimeConfig> {
+  if (process.env.HERMES_FORGE_DETECT_PREFERRED_RUNTIME_ON_STARTUP !== "1") {
+    return defaultConfig;
+  }
   return {
     ...defaultConfig,
     hermesRuntime: await preferredHermesRuntime(),

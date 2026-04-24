@@ -1,5 +1,6 @@
 import path from "node:path";
 import { runCommand } from "../process/command-runner";
+import { validateWslHermesCli, type HermesCliValidationFailureKind } from "../runtime/hermes-cli-resolver";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import type { AppPaths } from "./app-paths";
 import { resolveActiveHermesHome } from "./hermes-home";
@@ -18,6 +19,7 @@ import type {
 type CapabilityProbe = NonNullable<PermissionOverview["capabilityProbe"]> & {
   support?: "native" | "legacy_compatible" | "degraded" | "unsupported";
   reason?: string;
+  failureKind?: HermesCliValidationFailureKind;
 };
 
 export async function buildPermissionOverview(input: {
@@ -110,7 +112,19 @@ async function probeCapabilities(input: {
   appPaths: AppPaths;
 }): Promise<CapabilityProbe> {
   const adapter = input.runtimeAdapterFactory(input.runtime);
-  const rootPath = adapter.toRuntimePath(await input.resolveHermesRoot());
+  let rootPath: string;
+  try {
+    rootPath = adapter.toRuntimePath(await input.resolveHermesRoot());
+  } catch (error) {
+    return classifyCapabilities({
+      cliVersion: undefined,
+      supportsLaunchMetadataArg: false,
+      supportsLaunchMetadataEnv: false,
+      supportsResume: false,
+      reason: error instanceof Error ? error.message : String(error),
+      failureKind: "file_missing",
+    });
+  }
   const hermesHome = await resolveActiveHermesHome(input.appPaths.hermesDir());
   const cliPath = input.runtime.mode === "wsl"
     ? `${rootPath.replace(/\/+$/, "")}/hermes`
@@ -124,6 +138,25 @@ async function probeCapabilities(input: {
     NO_COLOR: "1",
     FORCE_COLOR: "0",
   };
+  if (input.runtime.mode === "wsl") {
+    const validation = await validateWslHermesCli(input.runtime, cliPath);
+    if (!validation.ok) {
+      return classifyCapabilities({
+        cliVersion: validation.capabilities?.cliVersion,
+        supportsLaunchMetadataArg: validation.capabilities?.supportsLaunchMetadataArg === true,
+        supportsLaunchMetadataEnv: validation.capabilities?.supportsLaunchMetadataEnv === true,
+        supportsResume: validation.capabilities?.supportsResume === true,
+        reason: validation.message,
+        failureKind: validation.kind,
+      });
+    }
+    return classifyCapabilities({
+      cliVersion: validation.capabilities.cliVersion,
+      supportsLaunchMetadataArg: validation.capabilities.supportsLaunchMetadataArg,
+      supportsLaunchMetadataEnv: validation.capabilities.supportsLaunchMetadataEnv,
+      supportsResume: validation.capabilities.supportsResume,
+    });
+  }
   const launch = await adapter.buildHermesLaunch({
     runtime: input.runtime,
     rootPath,
@@ -178,6 +211,7 @@ function classifyCapabilities(input: {
   supportsLaunchMetadataEnv: boolean;
   supportsResume: boolean;
   reason?: string;
+  failureKind?: HermesCliValidationFailureKind;
 }): CapabilityProbe {
   const missing = [
     input.cliVersion ? undefined : "cliVersion",
@@ -193,15 +227,30 @@ function classifyCapabilities(input: {
     allowedTransports: minimumSatisfied ? ["native-arg-env"] : [],
     support: minimumSatisfied ? "native" : input.reason ? "legacy_compatible" : "unsupported",
     reason: input.reason,
+    failureKind: input.failureKind,
   };
 }
 
 function capabilityBlockReason(probe: CapabilityProbe): PermissionOverviewBlockReason {
+  const missingFile = probe.failureKind === "file_missing";
+  const permissionDenied = probe.failureKind === "permission_denied";
   return {
     code: probe.missing?.includes("cliVersion") ? "unsupported_cli_version" : "unsupported_cli_capability",
-    summary: "Hermes CLI 不满足 Forge WSL 最低能力门槛",
-    detail: `Forge WSL 主链路要求 capabilities --json、cliVersion、supportsLaunchMetadataArg、supportsLaunchMetadataEnv、supportsResume。缺失：${probe.missing?.join(", ") || "unknown"}。${probe.reason ? `原因：${probe.reason}` : ""}`,
-    fixHint: "请升级 WSL 内 Hermes CLI 到支持原生 launch metadata 和 resume capability 的版本。",
+    summary: missingFile
+      ? "Hermes Agent 未安装或路径不存在"
+      : permissionDenied
+        ? "Hermes CLI 无执行权限"
+        : "Hermes CLI 不满足 Forge WSL 最低能力门槛",
+    detail: missingFile
+      ? `capabilities --json 尚未执行。${probe.reason ?? "WSL 内 Hermes CLI 文件不存在。"}`
+      : permissionDenied
+        ? `capabilities --json 尚未执行。${probe.reason ?? "WSL 内 Hermes CLI 文件不可读取。"}`
+        : `Forge WSL 主链路要求 capabilities --json、cliVersion、supportsLaunchMetadataArg、supportsLaunchMetadataEnv、supportsResume。缺失：${probe.missing?.join(", ") || "unknown"}。${probe.reason ? `原因：${probe.reason}` : ""}`,
+    fixHint: missingFile
+      ? "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。"
+      : permissionDenied
+        ? "请在 WSL 中修复 Hermes CLI 文件权限后重试。"
+        : "请升级 WSL 内 Hermes CLI 到支持原生 launch metadata 和 resume capability 的版本。",
     debugContext: {
       capabilityProbe: probe,
       allowedTransports: ["native-arg-env"],

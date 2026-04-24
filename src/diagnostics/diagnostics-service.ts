@@ -12,6 +12,7 @@ import type { ClientInfo, DiagnosticExportResult } from "../shared/types";
 import type { ManagedWslInstallerReport, PermissionOverview } from "../shared/types";
 import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
 import type { WslDoctorReportService } from "../install/wsl-doctor-report-service";
+import { redactSensitiveValue } from "../shared/redaction";
 
 export class DiagnosticsService {
   constructor(
@@ -76,7 +77,7 @@ export class DiagnosticsService {
     const sessionMappings = await capture("sessionMappings", () => this.listSessionMappings(), []);
     const taskDiagnostics = workspaceId ? await capture("taskDiagnostics", () => this.sessionLog.summarizeRecentRuns(workspaceId, 400), []) : [];
 
-    const report = {
+    const report = redactSensitiveValue({
       createdAt,
       clientInfo: this.clientInfo(),
       setup,
@@ -96,7 +97,7 @@ export class DiagnosticsService {
       sessionMappings,
       recentEvents: events,
       diagnosticErrors,
-    };
+    });
 
     await fs.writeFile(path.join(dir, "diagnostics.json"), JSON.stringify(report, null, 2), "utf8");
     if (wslDoctor) {

@@ -1,4 +1,4 @@
-import type { ModelProfile } from "./types";
+import type { ModelProfile, ProviderId, RuntimeConfig } from "./types";
 
 export function normalizeOpenAiCompatibleBaseUrl(baseUrl?: string) {
   const trimmed = baseUrl?.trim();
@@ -25,4 +25,125 @@ export function missingSecretMessage(profile: ModelProfile) {
     return "当前配置填写了密钥引用，但对应密钥尚未保存或已失效。";
   }
   return `${profile.provider} 模型缺少可用密钥。`;
+}
+
+type LegacyModelProfile = Partial<ModelProfile> & {
+  providerId?: unknown;
+  defaultModel?: unknown;
+  default_model?: unknown;
+};
+
+type LegacyRuntimeConfig = Partial<RuntimeConfig> & {
+  defaultModelId?: unknown;
+  defaultModel?: unknown;
+  default_model?: unknown;
+  default_model_id?: unknown;
+  models?: unknown;
+};
+
+const PROVIDERS: ProviderId[] = ["openai", "anthropic", "openrouter", "gemini", "deepseek", "huggingface", "copilot", "copilot_acp", "local", "custom"];
+
+export function stableModelProfileId(input: Pick<ModelProfile, "provider" | "model"> & { baseUrl?: string }) {
+  const key = modelIdentityKey(input.provider, input.model, input.baseUrl);
+  return `model-${stableHash(key)}`;
+}
+
+export function migrateRuntimeConfigModels<T extends Partial<RuntimeConfig>>(input: T | LegacyRuntimeConfig): T & Pick<RuntimeConfig, "modelProfiles"> & { defaultModelProfileId?: string } {
+  const raw = (input ?? {}) as LegacyRuntimeConfig;
+  const rawProfiles = Array.isArray(raw.modelProfiles)
+    ? raw.modelProfiles
+    : Array.isArray(raw.models)
+      ? raw.models
+      : [];
+  const modelProfiles = dedupeProfiles(rawProfiles
+    .map((item) => normalizeLegacyModelProfile(item))
+    .filter((item): item is ModelProfile => Boolean(item)));
+  const rawDefault = firstString(
+    raw.defaultModelId,
+    raw.defaultModelProfileId,
+    raw.default_model_id,
+    raw.default_model,
+    raw.defaultModel,
+  );
+  const defaultModelProfileId = resolveDefaultModelProfileId(rawDefault, modelProfiles);
+  return {
+    ...input,
+    modelProfiles,
+    defaultModelProfileId,
+  } as T & Pick<RuntimeConfig, "modelProfiles"> & { defaultModelProfileId?: string };
+}
+
+export function resolveDefaultModelProfileId(rawDefault: string | undefined, profiles: ModelProfile[]) {
+  if (!profiles.length) return undefined;
+  const wanted = rawDefault?.trim();
+  if (!wanted) return profiles[0].id;
+  return (
+    profiles.find((item) => item.id === wanted)?.id ??
+    profiles.find((item) => modelIdentityKey(item.provider, item.model, item.baseUrl) === wanted)?.id ??
+    profiles.find((item) => stableModelProfileId(item) === wanted)?.id ??
+    profiles.find((item) => `${item.provider}:${item.model}` === wanted)?.id ??
+    profiles.find((item) => item.model === wanted)?.id ??
+    profiles.find((item) => item.name === wanted)?.id ??
+    profiles[0].id
+  );
+}
+
+function normalizeLegacyModelProfile(input: unknown): ModelProfile | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const raw = input as LegacyModelProfile;
+  const model = firstString(raw.model, raw.defaultModel, raw.default_model, raw.name);
+  if (!model) return undefined;
+  const provider = normalizeProvider(firstString(raw.provider, raw.providerId), raw.baseUrl);
+  const baseUrl = typeof raw.baseUrl === "string" && raw.baseUrl.trim() ? raw.baseUrl.trim() : undefined;
+  const profile: ModelProfile = {
+    ...raw,
+    id: typeof raw.id === "string" && raw.id.trim()
+      ? raw.id.trim()
+      : stableModelProfileId({ provider, model, baseUrl }),
+    provider,
+    model,
+    ...(baseUrl ? { baseUrl } : {}),
+  };
+  return profile;
+}
+
+function dedupeProfiles(profiles: ModelProfile[]) {
+  const byId = new Map<string, ModelProfile>();
+  for (const profile of profiles) {
+    byId.set(profile.id, profile);
+  }
+  return [...byId.values()];
+}
+
+function normalizeProvider(provider: string | undefined, baseUrl: unknown): ProviderId {
+  const normalized = provider?.trim().toLowerCase().replace(/-/g, "_");
+  if (normalized && PROVIDERS.includes(normalized as ProviderId)) return normalized as ProviderId;
+  const url = typeof baseUrl === "string" ? baseUrl.toLowerCase() : "";
+  if (url.includes("openrouter.ai")) return "openrouter";
+  if (url.includes("api.openai.com")) return "openai";
+  if (url.includes("anthropic.com")) return "anthropic";
+  if (url.includes("generativelanguage.googleapis.com")) return "gemini";
+  if (url.includes("deepseek.com")) return "deepseek";
+  if (url.includes("localhost") || url.includes("127.0.0.1")) return "custom";
+  return "custom";
+}
+
+function modelIdentityKey(provider: string, model: string, baseUrl?: string) {
+  return `${provider.trim().toLowerCase()}:${model.trim()}:${baseUrl?.trim().replace(/\/$/, "") ?? ""}`;
+}
+
+function firstString(...values: unknown[]) {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function stableHash(value: string) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
 }

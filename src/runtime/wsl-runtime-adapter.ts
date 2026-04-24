@@ -29,6 +29,13 @@ export class WslRuntimeAdapter implements RuntimeAdapter {
   async buildPythonLaunch(input: BuildHermesLaunchInput): Promise<RuntimeLaunchSpec> {
     const runtimeCwd = this.toRuntimePath(input.cwd);
     const pythonCommand = this.runtime.pythonCommand?.trim() || "python3";
+    const rootPath = input.rootPath.trim().replace(/\/+$/, "");
+    const venvPython = `${rootPath}/.venv/bin/python`;
+    const pythonArgs = input.pythonArgs.map(shellQuote).join(" ");
+    const launcher = [
+      `if [ -x ${shellQuote(venvPython)} ]; then exec ${shellQuote(venvPython)} ${pythonArgs}; fi`,
+      `exec ${shellQuote(pythonCommand)} ${pythonArgs}`,
+    ].join("; ");
     return {
       command: "wsl.exe",
       args: [
@@ -37,8 +44,9 @@ export class WslRuntimeAdapter implements RuntimeAdapter {
         runtimeCwd,
         "env",
         ...this.envArgs(input.env),
-        pythonCommand,
-        ...input.pythonArgs,
+        "bash",
+        "-lc",
+        launcher,
       ],
       cwd: process.cwd(),
       env: process.env,
@@ -116,4 +124,8 @@ export class WslRuntimeAdapter implements RuntimeAdapter {
       .filter((entry): entry is [string, string] => typeof entry[1] === "string")
       .map(([key, value]) => `${key}=${value}`);
   }
+}
+
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

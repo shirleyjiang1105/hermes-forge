@@ -89,29 +89,7 @@ export class ManagedWslInstallerService {
       return this.finalize(report);
     }
 
-    const bridgeBlock = this.hasBridgeBlock(doctor);
-    if (bridgeBlock) {
-      this.fail(report, "doctor_blocked", {
-        phase: "doctor",
-        step: "doctor",
-      status: "blocked",
-      code: "bridge_unreachable",
-      summary: "WSL 环境基本就绪，但当前无法连接 Windows Bridge。",
-      detail: bridgeBlock.detail,
-      fixHint: bridgeBlock.fixHint,
-      debugContext: bridgeBlock.debugContext,
-    }, {
-        failureStage: "doctor",
-        disposition: "manual_action_required",
-        code: "bridge_unreachable",
-      summary: "Windows Bridge 不可达，当前不建议继续安装。",
-      detail: bridgeBlock.detail,
-      fixHint: "请先重启客户端或 Bridge，再重新开始安装。",
-      nextAction: "restart_bridge_and_retry",
-      debugContext: bridgeBlock.debugContext,
-    });
-      return this.finalize(report);
-    }
+    this.recordDeferredBridgeIssue(report, doctor);
 
     this.markSuccessful(report, "doctor");
     this.push(report, "distro_ready", {
@@ -336,29 +314,7 @@ export class ManagedWslInstallerService {
       this.markSuccessful(report, "create_distro");
     }
 
-    const bridgeBlock = this.hasBridgeBlock(doctor);
-    if (bridgeBlock) {
-      this.fail(report, "hermes_install_blocked", {
-        phase: "install",
-        step: "pre-install-check",
-        status: "blocked",
-        code: "bridge_unreachable",
-        summary: bridgeBlock.summary,
-        detail: bridgeBlock.detail,
-        fixHint: bridgeBlock.fixHint,
-        debugContext: bridgeBlock.debugContext,
-      }, {
-        failureStage: "doctor",
-        disposition: "manual_action_required",
-        code: "bridge_unreachable",
-        summary: "Bridge 不可达，当前不能继续进入 Hermes 安装。",
-        detail: bridgeBlock.detail,
-        fixHint: "请先重启客户端/Bridge，再点击 install。",
-        nextAction: "restart_bridge_and_retry",
-        debugContext: bridgeBlock.debugContext,
-      }, publish);
-      return this.finalize(report);
-    }
+    this.recordDeferredBridgeIssue(report, doctor, publish);
 
     const resumeFromStage = this.determineResumeFromStage(this.lastInstallReport, doctor);
     report.resumedFromStage = resumeFromStage;
@@ -598,6 +554,23 @@ export class ManagedWslInstallerService {
 
   private hasBridgeBlock(doctor: WslDoctorReport) {
     return doctor.blockingIssues.find((issue) => issue.code === "bridge_unreachable");
+  }
+
+  private recordDeferredBridgeIssue(report: ManagedWslInstallerReport, doctor: WslDoctorReport, publish?: InstallPublisher) {
+    const bridgeBlock = this.hasBridgeBlock(doctor);
+    if (!bridgeBlock) {
+      return;
+    }
+    this.push(report, report.finalInstallerState, {
+      phase: "doctor",
+      step: "bridge-deferred",
+      status: "skipped",
+      code: "bridge_unreachable",
+      summary: "Windows Bridge 当前不可达，已跳过 Bridge 预检并继续修复 Hermes Agent。",
+      detail: bridgeBlock.detail,
+      fixHint: bridgeBlock.fixHint ?? "Hermes 修复完成后可重启客户端或手动刷新 Bridge 状态。",
+      debugContext: bridgeBlock.debugContext,
+    }, publish);
   }
 
   private resolveRepairFailure(repair: WslRepairResult, report: ManagedWslInstallerReport) {

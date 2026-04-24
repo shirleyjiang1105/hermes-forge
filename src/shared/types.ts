@@ -145,6 +145,70 @@ export type HermesSystemAuditResult = {
   message: string;
 };
 
+export type OneClickDiagnosticStatus =
+  | "pass"
+  | "warn"
+  | "fail"
+  | "fixed"
+  | "skipped";
+
+export type OneClickDiagnosticSeverity =
+  | "info"
+  | "warning"
+  | "error"
+  | "critical";
+
+export type OneClickDiagnosticItem = {
+  id: string;
+  title: string;
+  status: OneClickDiagnosticStatus;
+  severity: OneClickDiagnosticSeverity;
+  summary: string;
+  details?: string;
+  evidence?: unknown;
+  autoFixable: boolean;
+  fixed?: boolean;
+  userActionRequired?: boolean;
+  suggestedActions?: string[];
+  source?: string;
+};
+
+export type OneClickDiagnosticsReport = {
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  summary: {
+    total: number;
+    passed: number;
+    warnings: number;
+    failed: number;
+    fixed: number;
+    skipped: number;
+    unresolved: number;
+  };
+  items: OneClickDiagnosticItem[];
+};
+
+export type OneClickDiagnosticsRunOptions = {
+  autoFix?: boolean;
+  deepAudit?: boolean;
+  workspacePath?: string;
+};
+
+export type OneClickDiagnosticsStatus = {
+  running: boolean;
+  startedAt?: string;
+  finishedAt?: string;
+  stage?: string;
+  message: string;
+  lastReport?: OneClickDiagnosticsReport;
+};
+
+export type OneClickDiagnosticsExportResult = DiagnosticExportResult & {
+  oneClickReportPath?: string;
+  diagnosticsPath?: string;
+};
+
 export type WindowsToolName =
   | "windows.files.listDir"
   | "windows.files.readText"
@@ -1044,6 +1108,7 @@ export type RuntimeConfig = {
   updateSources: Partial<Record<EngineId | "client", string>>;
   enginePaths?: Partial<Record<EngineId | "client", string>>;
   startupWarmupMode?: StartupWarmupMode;
+  startupGatewayAutoStart?: boolean;
   enginePermissions?: Partial<Record<EngineId | "client", Partial<EnginePermissionPolicy>>>;
   hermesRuntime?: HermesRuntimeConfig;
 };

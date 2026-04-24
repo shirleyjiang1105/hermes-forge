@@ -102,6 +102,93 @@ describe("ManagedWslInstallerService", () => {
     await expect(fs.readFile(report.reportPath!, "utf8")).resolves.toContain("\"finalInstallerState\": \"completed\"");
   });
 
+  it("continues Hermes repair when only Windows Bridge is unreachable", async () => {
+    const bridgeDoctor: WslDoctorReport = {
+      ...doctorReport(),
+      overallStatus: "manual_setup_required",
+      blockingIssues: [
+        {
+          checkId: "bridge-access",
+          category: "bridge",
+          status: "failed",
+          code: "bridge_unreachable",
+          summary: "Windows Bridge 无法从 WSL 访问。",
+          detail: "connect ECONNREFUSED",
+          autoFixable: false,
+          fixHint: "重启客户端后刷新 Bridge 状态。",
+        },
+      ],
+      recommendedActions: ["重启客户端后刷新 Bridge 状态。"],
+    };
+    const install = vi.fn(async () => ({
+      requestedAt: new Date().toISOString(),
+      distroName: "Ubuntu",
+      hermesRoot: "/home/test/.hermes-forge/hermes-agent",
+      pythonResolved: "/home/test/.hermes-forge/hermes-agent/.venv/bin/python",
+      repoReady: true,
+      installExecuted: true,
+      healthCheckPassed: true,
+      lastSuccessfulStage: "health_check",
+      reprobeStatus: "ready",
+      reDoctorStatus: "ready_to_attach_existing_wsl",
+      steps: [
+        { phase: "health_check", step: "verify-hermes", status: "passed", code: "ok", summary: "health ok" },
+      ],
+    }));
+    const service = new ManagedWslInstallerService(
+      new AppPaths(tempRoot),
+      { diagnose: vi.fn(async () => bridgeDoctor) } as any,
+      {
+        dryRun: vi.fn(async () => ({ ...dryRunResult(), before: bridgeDoctor })),
+        repair: vi.fn(),
+      } as any,
+      { createOrAttach: vi.fn() } as any,
+      { install } as any,
+    );
+
+    const report = await service.install();
+
+    expect(install).toHaveBeenCalled();
+    expect(report.finalInstallerState).toBe("completed");
+    expect(report.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: "bridge-deferred", status: "skipped", code: "bridge_unreachable" }),
+    ]));
+  });
+
+  it("keeps install planning ready when only Windows Bridge is unreachable", async () => {
+    const bridgeDoctor: WslDoctorReport = {
+      ...doctorReport(),
+      blockingIssues: [
+        {
+          checkId: "bridge-access",
+          category: "bridge",
+          status: "failed",
+          code: "bridge_unreachable",
+          summary: "Windows Bridge 无法从 WSL 访问。",
+          autoFixable: false,
+        },
+      ],
+    };
+    const service = new ManagedWslInstallerService(
+      new AppPaths(tempRoot),
+      { diagnose: vi.fn(async () => bridgeDoctor) } as any,
+      {
+        dryRun: vi.fn(async () => ({ ...dryRunResult(), before: bridgeDoctor })),
+        repair: vi.fn(),
+      } as any,
+      { createOrAttach: vi.fn() } as any,
+      { install: vi.fn() } as any,
+    );
+
+    const report = await service.planInstall();
+
+    expect(report.finalInstallerState).toBe("hermes_install_ready");
+    expect(report.nextRecommendedStep).toBe("retry_install");
+    expect(report.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ step: "bridge-deferred", status: "skipped", code: "bridge_unreachable" }),
+    ]));
+  });
+
   it("stops at repair_planned when dependencies still need explicit repair", async () => {
     const repairPlan: WslRepairDryRunResult = {
       ...dryRunResult(),

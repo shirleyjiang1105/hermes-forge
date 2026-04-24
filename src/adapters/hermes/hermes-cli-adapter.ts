@@ -13,6 +13,7 @@ import {
   type LaunchMetadataBridge,
 } from "./hermes-launch-metadata";
 import { runCommand, streamCommand } from "../../process/command-runner";
+import { validateWslHermesCli, type HermesCliValidationFailureKind } from "../../runtime/hermes-cli-resolver";
 import type { RuntimeAdapterFactory } from "../../runtime/runtime-adapter";
 import { toWslPath as runtimeToWslPath } from "../../runtime/runtime-resolver";
 import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason, type PermissionBoundaryAudit } from "../../shared/permission-audit";
@@ -107,6 +108,7 @@ type HermesCliCapabilityProbe = {
   missing: string[];
   probeCommand: string;
   reason?: string;
+  failureKind?: HermesCliValidationFailureKind;
 };
 
 type HermesCliBlockCode = "unsupported_cli_version" | "unsupported_cli_capability" | "manual_upgrade_required";
@@ -140,7 +142,18 @@ export class HermesCliAdapter implements EngineAdapter {
 
   async healthCheck(): Promise<EngineHealth> {
     const runtime = await this.hermesRuntime();
-    const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
+    let rootPath: string;
+    try {
+      rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
+    } catch (error) {
+      return {
+        engineId: this.id,
+        label: this.label,
+        available: false,
+        mode: "cli",
+        message: error instanceof Error ? error.message : "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。",
+      };
+    }
     const cliPath = this.hermesCliPath(rootPath, runtime);
     if (runtime.mode !== "wsl" && !(await this.exists(cliPath))) {
       return {
@@ -902,64 +915,34 @@ export class HermesCliAdapter implements EngineAdapter {
         reason: "native launch metadata negotiation is only used for WSL CLI runs",
       });
     }
-    this.cliCapabilityProbe ??= this.probeCliCapabilities(runtime, rootPath);
+    this.cliCapabilityProbe = this.probeCliCapabilities(runtime, rootPath);
     return await this.cliCapabilityProbe;
   }
 
   private async probeCliCapabilities(runtime: HermesRuntimeConfig, rootPath: string): Promise<HermesCliCapabilityProbe> {
     const probeCommand = "capabilities --json";
-    const launch = await this.launchSpec(
-      runtime,
-      rootPath,
-      [this.hermesCliPath(rootPath, runtime), "capabilities", "--json"],
-      rootPath,
-      undefined,
-    );
-    const result = await runCommand(launch.command, launch.args, {
-      cwd: launch.cwd,
-      timeoutMs: 20_000,
-      env: launch.env,
-      detached: launch.detached,
+    const cliPath = this.hermesCliPath(rootPath, runtime);
+    const validation = await validateWslHermesCli(runtime, cliPath);
+    if (!validation.ok) {
+      return this.classifyCliCapabilities({
+        probed: validation.kind === "capability_unsupported",
+        cliVersion: validation.capabilities?.cliVersion,
+        supportsLaunchMetadataArg: validation.capabilities?.supportsLaunchMetadataArg === true,
+        supportsLaunchMetadataEnv: validation.capabilities?.supportsLaunchMetadataEnv === true,
+        supportsResume: validation.capabilities?.supportsResume === true,
+        probeCommand,
+        reason: validation.message,
+        failureKind: validation.kind,
+      });
+    }
+    return this.classifyCliCapabilities({
+      probed: true,
+      cliVersion: validation.capabilities.cliVersion,
+      supportsLaunchMetadataArg: validation.capabilities.supportsLaunchMetadataArg,
+      supportsLaunchMetadataEnv: validation.capabilities.supportsLaunchMetadataEnv,
+      supportsResume: validation.capabilities.supportsResume,
+      probeCommand,
     });
-    if (result.exitCode !== 0) {
-      return this.classifyCliCapabilities({
-        probed: false,
-        cliVersion: undefined,
-        supportsLaunchMetadataArg: false,
-        supportsLaunchMetadataEnv: false,
-        supportsResume: false,
-        probeCommand,
-        reason: `capability command failed with exit ${result.exitCode ?? "unknown"}: ${(result.stderr || result.stdout || "").trim() || "no output"}`,
-      });
-    }
-    try {
-      const parsed = JSON.parse(result.stdout) as {
-        cliVersion?: unknown;
-        capabilities?: {
-          supportsLaunchMetadataArg?: unknown;
-          supportsLaunchMetadataEnv?: unknown;
-          supportsResume?: unknown;
-        };
-      };
-      return this.classifyCliCapabilities({
-        probed: true,
-        cliVersion: typeof parsed.cliVersion === "string" ? parsed.cliVersion : undefined,
-        supportsLaunchMetadataArg: parsed.capabilities?.supportsLaunchMetadataArg === true,
-        supportsLaunchMetadataEnv: parsed.capabilities?.supportsLaunchMetadataEnv === true,
-        supportsResume: parsed.capabilities?.supportsResume === true,
-        probeCommand,
-      });
-    } catch (error) {
-      return this.classifyCliCapabilities({
-        probed: true,
-        cliVersion: undefined,
-        supportsLaunchMetadataArg: false,
-        supportsLaunchMetadataEnv: false,
-        supportsResume: false,
-        probeCommand,
-        reason: `capability JSON parse failed: ${error instanceof Error ? error.message : String(error)}`,
-      });
-    }
   }
 
   private classifyCliCapabilities(input: {
@@ -970,6 +953,7 @@ export class HermesCliAdapter implements EngineAdapter {
     supportsResume: boolean;
     probeCommand: string;
     reason?: string;
+    failureKind?: HermesCliValidationFailureKind;
   }): HermesCliCapabilityProbe {
     const missing = [
       input.cliVersion ? undefined : "cliVersion",
@@ -1005,10 +989,13 @@ export class HermesCliAdapter implements EngineAdapter {
       missing,
       probeCommand: input.probeCommand,
       reason: input.reason,
+      failureKind: input.failureKind,
     };
   }
 
   private cliCapabilityBlockReason(capabilities: HermesCliCapabilityProbe): HermesCliBlockReason {
+    const missingFile = capabilities.failureKind === "file_missing";
+    const permissionDenied = capabilities.failureKind === "permission_denied";
     const code: HermesCliBlockCode = capabilities.reason && !capabilities.probed
       ? "manual_upgrade_required"
       : capabilities.missing.includes("cliVersion")
@@ -1016,14 +1003,26 @@ export class HermesCliAdapter implements EngineAdapter {
         : "unsupported_cli_capability";
     return {
       code,
-      summary: "Hermes CLI 不满足 Forge WSL 最低能力门槛",
+      summary: missingFile
+        ? "Hermes Agent 未安装或路径不存在"
+        : permissionDenied
+          ? "Hermes CLI 无执行权限"
+          : "Hermes CLI 不满足 Forge WSL 最低能力门槛",
       detail: [
-        "Forge WSL 主链路现在要求 Hermes CLI 原生支持 launch metadata 和 session resume。",
+        missingFile
+          ? "capabilities --json 尚未执行，因为 WSL 内 Hermes CLI 文件不存在。"
+          : permissionDenied
+            ? "capabilities --json 尚未执行，因为 WSL 内 Hermes CLI 文件不可读取或无执行权限。"
+            : "Forge WSL 主链路现在要求 Hermes CLI 原生支持 launch metadata 和 session resume。",
         `当前能力状态：${capabilities.support}。`,
         capabilities.missing.length ? `缺失能力：${capabilities.missing.join(", ")}。` : "",
         capabilities.reason ? `探测原因：${capabilities.reason}。` : "",
       ].filter(Boolean).join(" "),
-      fixHint: "请升级 WSL 内 Hermes CLI 到支持 `hermes capabilities --json`、`--launch-metadata`、`HERMES_FORGE_LAUNCH_METADATA` 和 `--resume` 的版本后重试。",
+      fixHint: missingFile
+        ? "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。"
+        : permissionDenied
+          ? "请在 WSL 中修复 Hermes CLI 文件权限后重试。"
+          : "请升级 WSL 内 Hermes CLI 到支持 `hermes capabilities --json`、`--launch-metadata`、`HERMES_FORGE_LAUNCH_METADATA` 和 `--resume` 的版本后重试。",
       debugContext: {
         capabilityProbe: capabilities,
         allowedTransports: ["native-arg-env"],

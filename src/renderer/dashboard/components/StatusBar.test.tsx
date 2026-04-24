@@ -1,19 +1,14 @@
-import { act, render, screen } from "@testing-library/react";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { render, screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StatusBar } from "./StatusBar";
 import { useAppStore } from "../../store";
 
 describe("StatusBar", () => {
   beforeEach(() => {
     useAppStore.getState().resetStore();
-    vi.useFakeTimers();
   });
 
-  afterEach(() => {
-    vi.useRealTimers();
-  });
-
-  it("lights API and Hermes from real and fallback status sources", async () => {
+  it("lights API and Hermes from cached store status without probing Gateway", () => {
     useAppStore.setState({
       runtimeConfig: {
         hermesRuntime: { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "guarded", permissionPolicy: "bridge_guarded" },
@@ -49,40 +44,29 @@ describe("StatusBar", () => {
         },
       },
     });
+    const getGatewayStatus = vi.fn();
+    const getHermesProbe = vi.fn();
 
     window.workbenchClient = {
       ...window.workbenchClient,
-      getClientInfo: vi.fn().mockResolvedValue({
-        appVersion: "0.1.2",
-        userDataPath: "D:/temp",
-        portable: false,
-        rendererMode: "dev",
-      }),
-      getGatewayStatus: vi.fn().mockResolvedValue({
-        running: true,
-        managedRunning: true,
-        healthStatus: "running",
-        message: "Gateway 正在运行",
-        checkedAt: "2026-04-22T10:00:00.000Z",
-      }),
+      getGatewayStatus,
+      getHermesProbe,
       onClientUpdateEvent: vi.fn().mockReturnValue(() => undefined),
     };
 
     render(<StatusBar />);
 
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(300);
-    });
-
     expect(screen.getByRole("button", { name: "API 连接正常" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Hermes 已连接 · 当前运行：WSL" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Gateway 正在运行" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Gateway 状态未刷新" })).toBeInTheDocument();
     expect(screen.getByTestId("status-light-api")).toHaveClass("hermes-status-light--ok");
     expect(screen.getByTestId("status-light-hermes")).toHaveClass("hermes-status-light--ok");
-    expect(screen.getByTestId("status-light-gateway")).toHaveClass("hermes-status-light--ok");
+    expect(screen.getByTestId("status-light-gateway")).toHaveClass("hermes-status-light--idle");
+    expect(getGatewayStatus).not.toHaveBeenCalled();
+    expect(getHermesProbe).not.toHaveBeenCalled();
   });
 
-  it("uses amber for checking and warning states, and rose for errors", async () => {
+  it("uses amber for checking and warning states without polling backend", () => {
     useAppStore.setState({
       hermesProbe: {
         checkedAt: "2026-04-22T10:00:00.000Z",
@@ -97,16 +81,13 @@ describe("StatusBar", () => {
         },
       },
     });
+    const getGatewayStatus = vi.fn();
+    const getHermesProbe = vi.fn();
 
     window.workbenchClient = {
       ...window.workbenchClient,
-      getGatewayStatus: vi.fn().mockResolvedValue({
-        running: false,
-        managedRunning: false,
-        healthStatus: "error",
-        message: "Gateway 异常",
-        checkedAt: "2026-04-22T10:00:00.000Z",
-      }),
+      getGatewayStatus,
+      getHermesProbe,
       onClientUpdateEvent: vi.fn().mockReturnValue(() => undefined),
     };
 
@@ -114,11 +95,8 @@ describe("StatusBar", () => {
 
     expect(screen.getByTestId("status-light-api")).toHaveClass("hermes-status-light--warn");
     expect(screen.getByTestId("status-light-hermes")).toHaveClass("hermes-status-light--warn");
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(300);
-    });
-
-    expect(screen.getByTestId("status-light-gateway")).toHaveClass("hermes-status-light--error");
+    expect(screen.getByTestId("status-light-gateway")).toHaveClass("hermes-status-light--idle");
+    expect(getGatewayStatus).not.toHaveBeenCalled();
+    expect(getHermesProbe).not.toHaveBeenCalled();
   });
 });

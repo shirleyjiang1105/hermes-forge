@@ -16,13 +16,31 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   __resetPreferredHermesRuntimeCacheForTests();
   runCommandMock.mockReset();
+  delete process.env.HERMES_FORGE_DETECT_PREFERRED_RUNTIME_ON_STARTUP;
   await Promise.all(tempDirs.splice(0).map((dir) => fs.rm(dir, { recursive: true, force: true })));
 });
 
 describe("RuntimeConfigStore preferred runtime", () => {
-  it("defaults to WSL when WSL is available and has distros", async () => {
+  it("keeps the startup-safe Windows default unless preferred runtime detection is explicitly enabled", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "runtime-config-"));
     tempDirs.push(dir);
+
+    const store = new RuntimeConfigStore(path.join(dir, "config.json"));
+    const config = await store.read();
+
+    expect(config.hermesRuntime?.mode).toBe("windows");
+    expect(runCommandMock).not.toHaveBeenCalled();
+    expect(config.hermesRuntime?.installSource).toMatchObject({
+      sourceLabel: "pinned",
+      repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
+      commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+    });
+  });
+
+  it("defaults to WSL when explicit startup detection is enabled and WSL has distros", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "runtime-config-"));
+    tempDirs.push(dir);
+    process.env.HERMES_FORGE_DETECT_PREFERRED_RUNTIME_ON_STARTUP = "1";
     runCommandMock
       .mockResolvedValueOnce({ exitCode: 0, stdout: "Default Distribution: Ubuntu", stderr: "" } as never)
       .mockResolvedValueOnce({ exitCode: 0, stdout: "Ubuntu\n", stderr: "" } as never);
@@ -55,5 +73,27 @@ describe("RuntimeConfigStore preferred runtime", () => {
       repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
       commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
     });
+  });
+
+  it("migrates legacy model profiles with missing ids instead of dropping config", async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "runtime-config-"));
+    tempDirs.push(dir);
+    const configPath = path.join(dir, "config.json");
+    await fs.writeFile(configPath, JSON.stringify({
+      defaultModel: "gpt-5.4",
+      modelProfiles: [
+        { provider: "openai", model: "gpt-5.4", baseUrl: "https://api.openai.com/v1" },
+      ],
+      updateSources: {},
+    }), "utf8");
+    runCommandMock
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" } as never)
+      .mockResolvedValueOnce({ exitCode: 1, stdout: "", stderr: "" } as never);
+
+    const store = new RuntimeConfigStore(configPath);
+    const config = await store.read();
+
+    expect(config.modelProfiles[0].id).toMatch(/^model-/);
+    expect(config.defaultModelProfileId).toBe(config.modelProfiles[0].id);
   });
 });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import type {
   ActivityLog,
@@ -7,7 +7,8 @@ import type {
   HermesInstallEvent,
   HermesPermissionPolicyMode,
   HermesRuntimeConfig,
-  HermesSystemAuditResult,
+  OneClickDiagnosticItem,
+  OneClickDiagnosticsReport,
   HermesWindowsBridgeTestResult,
   HermesWebUiOverview,
   HermesWebUiSettings,
@@ -29,10 +30,11 @@ import { WelcomePage } from "./dashboard/WelcomePage";
 import { ToastContainer } from "./dashboard/ToastNotification";
 import { PageLoader } from "./dashboard/LoadingIndicator";
 import { ModelConfigWizard } from "./dashboard/components/panels/ModelConfigWizard";
-import { ManagedWslInstallerPanel } from "./dashboard/components/panels/ManagedWslInstallerPanel";
+import { SettingsPanel as HermesSettingsPanel } from "./dashboard/components/panels/SettingsPanel";
 import { ConfigCenterLayout, type ConfigSectionId } from "./dashboard/components/settings/ConfigCenterLayout";
 import { ToggleSwitch } from "./dashboard/components/settings/ToggleSwitch";
 import { usePermissionOverview } from "./hooks/usePermissionOverview";
+import { targetSessionForTaskEvent } from "./session-routing";
 import { useAppStore, type RecentWorkspace } from "./store";
 import { safePromiseWithFallback } from "./utils/safePromise";
 import { hasInlineLocalFilePath } from "../shared/local-file-paths";
@@ -75,10 +77,18 @@ type ConfigOverview = {
 
 type FixTarget = "model" | "hermes" | "health" | "diagnostics" | "workspace";
 
-function SettingsView(props: { overview?: ConfigOverview; initialSection?: ConfigSectionId; onBack: () => void; onRefresh: () => Promise<void>; onExportDiagnostics?: () => void }) {
+function SettingsView(props: {
+  overview?: ConfigOverview;
+  initialSection?: ConfigSectionId;
+  onBack: () => void;
+  onRefresh: () => Promise<void>;
+  onClearSession: () => void;
+  onOpenSessionFolder: () => void;
+  onExportDiagnostics?: () => void;
+}) {
   const overview = props.overview;
   const store = useAppStore();
-  const permissionOverview = usePermissionOverview({ autoLoad: true });
+  const permissionOverview = usePermissionOverview({ autoLoad: false });
   const currentRuntimeMode = ((overview?.runtimeConfig as RuntimeConfig | undefined)?.hermesRuntime?.mode
     ?? store.runtimeConfig?.hermesRuntime?.mode
     ?? "windows") === "wsl" ? "WSL" : "Windows";
@@ -103,8 +113,8 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
   const [installEvent, setInstallEvent] = useState<HermesInstallEvent | undefined>();
   const [testingBridge, setTestingBridge] = useState(false);
   const [bridgeTest, setBridgeTest] = useState<HermesWindowsBridgeTestResult | undefined>();
-  const [testingSystemAudit, setTestingSystemAudit] = useState(false);
-  const [systemAudit, setSystemAudit] = useState<HermesSystemAuditResult | undefined>();
+  const [oneClickDiagnosticsRunning, setOneClickDiagnosticsRunning] = useState(false);
+  const [oneClickDiagnostics, setOneClickDiagnostics] = useState<OneClickDiagnosticsReport | undefined>();
   const [importingHermesConfig, setImportingHermesConfig] = useState(false);
 
   function showSaveNotice(message: string) {
@@ -235,16 +245,28 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
     }
   }
 
-  async function testSystemAudit() {
-    setTestingSystemAudit(true);
+  async function runOneClickDiagnostics(autoFix = false) {
+    setOneClickDiagnosticsRunning(true);
     try {
-      const result = await window.workbenchClient.testHermesSystemAudit();
-      setSystemAudit(result);
+      const workspacePath = useAppStore.getState().workspacePath || undefined;
+      const result = await window.workbenchClient.runOneClickDiagnostics({ autoFix, workspacePath });
+      setOneClickDiagnostics(result);
+      await props.onRefresh();
+      showSaveNotice(autoFix ? "一键修复已完成并完成二次验证" : "一键诊断已完成");
+    } catch (error) {
+      showSaveNotice(error instanceof Error ? error.message : "一键诊断失败");
+    } finally {
+      setOneClickDiagnosticsRunning(false);
+    }
+  }
+
+  async function exportOneClickDiagnostics() {
+    try {
+      const workspacePath = useAppStore.getState().workspacePath || undefined;
+      const result = await window.workbenchClient.exportOneClickDiagnostics(workspacePath);
       showSaveNotice(result.message);
     } catch (error) {
-      showSaveNotice(error instanceof Error ? error.message : "Hermes 系统能力审计失败");
-    } finally {
-      setTestingSystemAudit(false);
+      showSaveNotice(error instanceof Error ? error.message : "导出诊断报告失败");
     }
   }
 
@@ -303,205 +325,13 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
       description="这里只放最关键、最常用，而且能直接影响是否能正常工作的设置。"
     >
       {activeSection === "general" ? (
-        <section className="space-y-5">
-          <SettingsSectionHeader
-            label="Hermes"
-            title="运行方式"
-            description="先看这里。你只需要决定 Hermes 在哪里运行、能不能改文件、要不要让它自动放行命令。"
-          />
-          <div className="rounded-2xl border border-emerald-100 bg-emerald-50 px-4 py-3 text-[13px] text-emerald-800">
-            <span className="font-medium">当前正在使用：</span>
-            <span className="ml-2 font-semibold">{currentRuntimeMode}</span>
-          </div>
-          <div className="grid gap-3 sm:grid-cols-3">
-            <StatusMetric label="安装位置" value={rootPath.trim() ? "已设置" : "未设置"} tone={rootPath.trim() ? "ok" : "warning"} />
-            <StatusMetric label="启动前检查" value={warmupMode === "off" ? "关闭" : warmupMode === "cheap" ? "轻量" : "完整"} tone={warmupMode === "off" ? "neutral" : "ok"} />
-            <StatusMetric label="已开启能力" value={`${Object.values(permissions).filter(Boolean).length}/${Object.keys(permissions).length}`} tone={permissions.enabled ? "ok" : "danger"} />
-          </div>
-
-          <SettingsPanelCard title="核心设置">
-            <div className="grid gap-3">
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">Hermes 在哪里运行</span>
-                <select
-                  value={runtime.mode}
-                  onChange={(event) => setRuntime({ ...runtime, mode: event.target.value === "wsl" ? "wsl" : "windows" })}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                >
-                  <option value="wsl">WSL（推荐，更稳定，适合改代码）</option>
-                  <option value="windows">Windows（没装 WSL 时再用）</option>
-                </select>
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  推荐选 WSL。大多数项目任务、安装链路和真实开发体验都会更稳定。
-                </span>
-              </label>
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">Windows 联动方式</span>
-                <select
-                  value={runtime.windowsAgentMode ?? "hermes_native"}
-                  onChange={(event) => setRuntime({ ...runtime, windowsAgentMode: event.target.value as WindowsAgentMode })}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                >
-                  <option value="hermes_native">标准联动（推荐）</option>
-                  <option value="host_tool_loop">兼容模式（老链路备用）</option>
-                  <option value="disabled">关闭 Windows 联动</option>
-                </select>
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  只有当任务需要控制 Windows 桌面、剪贴板、窗口或 PowerShell 时，才会用到这里。
-                </span>
-              </label>
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">文件访问保护</span>
-                <select
-                  value={runtime.permissionPolicy ?? "bridge_guarded"}
-                  onChange={(event) => setRuntime({ ...runtime, permissionPolicy: event.target.value as HermesPermissionPolicyMode })}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                >
-                  <option value="bridge_guarded">标准保护（推荐）</option>
-                  <option value="passthrough">尽量放开限制（高级）</option>
-                  <option value="restricted_workspace">只限工作区（实验功能）</option>
-                </select>
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  推荐保持“标准保护”。如果你只是正常写代码，不需要改这个。
-                </span>
-              </label>
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">命令审批方式</span>
-                <select
-                  value={runtime.cliPermissionMode ?? "yolo"}
-                  onChange={(event) => setRuntime({ ...runtime, cliPermissionMode: event.target.value as HermesRuntimeConfig["cliPermissionMode"] })}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                >
-                  <option value="yolo">自动放行（推荐，更顺手）</option>
-                  <option value="guarded">危险操作前提醒</option>
-                  <option value="safe">更保守的保护模式</option>
-                </select>
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  你要求默认更顺手，所以这里默认会选“自动放行（YOLO）”。
-                </span>
-              </label>
-              {runtime.mode === "wsl" ? (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <label className="block text-[12px] font-medium text-slate-500">
-                    <span className="mb-1.5 block">要用哪个 WSL</span>
-                    <input
-                      value={runtime.distro ?? ""}
-                      onChange={(event) => setRuntime({ ...runtime, distro: event.target.value || undefined })}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                      placeholder="默认发行版"
-                    />
-                    <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                      一般不用改。只有你机器上装了多个 WSL 发行版时才需要指定。
-                    </span>
-                  </label>
-                  <label className="block text-[12px] font-medium text-slate-500">
-                    <span className="mb-1.5 block">WSL 里的 Python 命令</span>
-                    <input
-                      value={runtime.pythonCommand ?? "python3"}
-                      onChange={(event) => setRuntime({ ...runtime, pythonCommand: event.target.value || "python3" })}
-                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                    />
-                    <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                      正常情况下保持 `python3` 就可以。
-                    </span>
-                  </label>
-                </div>
-              ) : null}
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">Hermes 安装目录</span>
-                <input
-                  value={rootPath}
-                  onChange={(event) => setRootPath(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                  placeholder="输入 Hermes 根路径"
-                />
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  这里是 Hermes 程序本体所在的位置，不是你的项目目录。
-                </span>
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 hover:bg-slate-50" onClick={() => void chooseHermesRoot()} type="button">
-                    选择安装目录
-                  </button>
-                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50" disabled={!rootPath.trim()} onClick={() => void openHermesRoot()} type="button">
-                    打开安装目录
-                  </button>
-                <button className="rounded-xl bg-slate-950 px-3 py-2 text-[12px] font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={Boolean(setupActionRunning)} onClick={() => void installHermesToCurrentPath()} type="button">
-                    {setupActionRunning ? "正在安装" : "安装到这个目录"}
-                  </button>
-                <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" disabled={importingHermesConfig} onClick={() => void importHermesConfig()} type="button">
-                  {importingHermesConfig ? "正在导入" : "导入以前的 Hermes 配置"}
-                </button>
-              </div>
-
-              <label className="block text-[12px] font-medium text-slate-500">
-                <span className="mb-1.5 block">启动前检查强度</span>
-                <select
-                  value={warmupMode}
-                  onChange={(event) => setWarmupMode(event.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-[13px] text-slate-800 outline-none transition focus:ring-2 focus:ring-slate-900/10"
-                >
-                  <option value="off">关闭检查（最快）</option>
-                  <option value="cheap">轻量检查（推荐）</option>
-                  <option value="real_probe">完整检查（更稳）</option>
-                </select>
-                <span className="mt-1.5 block text-[11px] leading-5 text-slate-400">
-                  推荐保持“轻量检查”。如果你最近经常遇到启动失败，再改成“完整检查”。
-                </span>
-              </label>
-
-            </div>
-          </SettingsPanelCard>
-
-          {installEvent ? (
-            <SettingsPanelCard title="Hermes 安装进度">
-              <div className="space-y-2">
-                <div className="flex items-start justify-between gap-3 text-[12px]">
-                  <div className="min-w-0">
-                    <p className="font-semibold text-slate-800">{installEvent.message}</p>
-                    {installEvent.detail ? <p className="mt-1 break-all text-slate-500">{installEvent.detail}</p> : null}
-                  </div>
-                  <span className="shrink-0 rounded-full bg-slate-100 px-2 py-1 font-semibold text-slate-600">{Math.round(installEvent.progress)}%</span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-slate-100">
-                  <div className="h-full rounded-full bg-slate-950 transition-all duration-200" style={{ width: `${Math.max(0, Math.min(100, installEvent.progress))}%` }} />
-                </div>
-              </div>
-            </SettingsPanelCard>
-          ) : null}
-
-          <SettingsPanelCard title="你允许 Hermes 做什么">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <ToggleSwitch checked={permissions.enabled} onChange={(checked) => setPermissions({ ...permissions, enabled: checked })} label="允许 Hermes 工作" description="关闭后它不会接任务。" />
-              <ToggleSwitch checked={permissions.workspaceRead} onChange={(checked) => setPermissions({ ...permissions, workspaceRead: checked })} label="允许读取项目文件" description="看代码、查配置、读 README 都靠它。" />
-              <ToggleSwitch checked={permissions.fileWrite} onChange={(checked) => setPermissions({ ...permissions, fileWrite: checked })} label="允许修改文件" description="修 bug、改代码、写文档时要开。" />
-              <ToggleSwitch checked={permissions.commandRun} onChange={(checked) => setPermissions({ ...permissions, commandRun: checked })} label="允许运行命令" description="跑测试、安装依赖、查错误时要开。" />
-              <ToggleSwitch checked={permissions.memoryRead} onChange={(checked) => setPermissions({ ...permissions, memoryRead: checked })} label="允许读取你的偏好和记忆" description="会读取 USER.md / MEMORY.md。" />
-              <ToggleSwitch checked={permissions.contextBridge} onChange={(checked) => setPermissions({ ...permissions, contextBridge: checked })} label="允许调用 Windows 能力" description="比如桌面、窗口、剪贴板、PowerShell。" />
-            </div>
-          </SettingsPanelCard>
-
-          <div className="flex justify-end">
-            <div className="flex flex-wrap gap-2">
-              <button className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-700 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60" disabled={testingBridge} onClick={() => void testBridge()} type="button">
-                {testingBridge ? "测试中" : "检查 Windows 联动是否正常"}
-              </button>
-              <button className="rounded-xl bg-slate-950 px-4 py-2 text-[13px] font-semibold text-white hover:bg-slate-800" onClick={() => void saveHermesSettings()} type="button">
-                保存这些设置
-              </button>
-            </div>
-          </div>
-          {bridgeTest ? (
-            <SettingsPanelCard title="Windows 联动检查结果">
-              <div className="space-y-2 text-[12px] text-slate-600">
-                <p className="font-semibold text-slate-800">{bridgeTest.message}</p>
-                <p>当前运行：{bridgeTest.mode === "wsl" ? "WSL" : "Windows"}</p>
-                <p>联动地址：{bridgeTest.bridgeUrl ?? "unknown"}</p>
-                <p>已检查：{bridgeTest.steps.length} 项</p>
-              </div>
-            </SettingsPanelCard>
-          ) : null}
-        </section>
+        <HermesSettingsPanel
+          onRefresh={props.onRefresh}
+          onOpenSettings={() => setActiveSection("general")}
+          onClearSession={props.onClearSession}
+          onOpenSessionFolder={props.onOpenSessionFolder}
+          onExportDiagnostics={props.onExportDiagnostics ?? (() => undefined)}
+        />
       ) : null}
 
       {activeSection === "providers" ? (
@@ -574,12 +404,12 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
           <SettingsSectionHeader
             label="Diagnostics"
             title="一键诊断与修复"
-            description="如果 Hermes 不能正常工作，先看这里。优先修掉红色阻塞项。"
+            description="统一检查 WSL、Hermes、Gateway、模型和任务锁；低风险问题可一键修复并自动复查。"
           />
           <div className="grid gap-3 sm:grid-cols-3">
-            <StatusMetric label="整体状态" value={overview?.health?.ready ? "就绪" : "需处理"} tone={overview?.health?.ready ? "ok" : "danger"} />
-            <StatusMetric label="阻塞项" value={`${overview?.health?.blocking.length ?? 0}`} tone={(overview?.health?.blocking.length ?? 0) > 0 ? "danger" : "ok"} />
-            <StatusMetric label="检查项" value={`${overview?.health?.checks.length ?? 0}`} tone="neutral" />
+            <StatusMetric label="整体状态" value={oneClickDiagnostics ? (oneClickDiagnostics.summary.failed ? "需处理" : oneClickDiagnostics.summary.warnings ? "有提醒" : "通过") : overview?.health?.ready ? "就绪" : "需处理"} tone={oneClickDiagnostics ? oneClickDiagnostics.summary.failed ? "danger" : oneClickDiagnostics.summary.warnings ? "warning" : "ok" : overview?.health?.ready ? "ok" : "danger"} />
+            <StatusMetric label="失败 / 警告" value={oneClickDiagnostics ? `${oneClickDiagnostics.summary.failed} / ${oneClickDiagnostics.summary.warnings}` : `${overview?.health?.blocking.length ?? 0} / 0`} tone={oneClickDiagnostics ? oneClickDiagnostics.summary.failed ? "danger" : oneClickDiagnostics.summary.warnings ? "warning" : "ok" : (overview?.health?.blocking.length ?? 0) > 0 ? "danger" : "ok"} />
+            <StatusMetric label="已修复 / 未解决" value={oneClickDiagnostics ? `${oneClickDiagnostics.summary.fixed} / ${oneClickDiagnostics.summary.unresolved}` : `0 / ${overview?.health?.blocking.length ?? 0}`} tone={oneClickDiagnostics?.summary.unresolved ? "warning" : "neutral"} />
           </div>
           <SettingsPanelCard title="先修这些问题">
             {(overview?.health?.blocking.length ?? 0) > 0 ? (
@@ -602,48 +432,24 @@ function SettingsView(props: { overview?: ConfigOverview; initialSection?: Confi
 
           <SettingsPanelCard title="诊断操作">
             <div className="flex flex-wrap gap-2">
-              <button className="rounded-xl bg-slate-950 px-4 py-2 text-[13px] font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={testingSystemAudit} onClick={() => void testSystemAudit()} type="button">
-                {testingSystemAudit ? "诊断中" : "一键诊断（推荐）"}
+              <button className="rounded-xl bg-slate-950 px-4 py-2 text-[13px] font-semibold text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60" disabled={oneClickDiagnosticsRunning} onClick={() => void runOneClickDiagnostics(false)} type="button">
+                {oneClickDiagnosticsRunning ? "处理中" : "一键诊断（推荐）"}
               </button>
-              <button className="rounded-xl bg-slate-950 px-4 py-2 text-[13px] font-semibold text-white hover:bg-slate-800" onClick={props.onExportDiagnostics} type="button">
-                导出详细诊断
+              <button className="rounded-xl bg-emerald-700 px-4 py-2 text-[13px] font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-60" disabled={oneClickDiagnosticsRunning} onClick={() => void runOneClickDiagnostics(true)} type="button">
+                一键修复
+              </button>
+              <button className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-700 hover:bg-slate-50" onClick={() => void exportOneClickDiagnostics()} type="button">
+                导出诊断报告
               </button>
               <button className="rounded-xl border border-slate-200 bg-white px-4 py-2 text-[13px] font-semibold text-slate-700 hover:bg-slate-50" onClick={() => void props.onRefresh()} type="button">
                 重新读取当前状态
               </button>
             </div>
+            <p className="text-[12px] leading-5 text-slate-500">
+              普通诊断不会静默执行跨目录写入测试；深度审计能力已保留给后续显式入口。
+            </p>
           </SettingsPanelCard>
-          {systemAudit ? <SystemAuditResultView result={systemAudit} /> : null}
-
-          <SettingsPanelCard title="当前状态">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <StatusMetric label="当前运行" value={runtime.mode === "wsl" ? "WSL" : "Windows"} tone="ok" />
-              <StatusMetric label="Windows 联动" value={bridge?.running ? "已启动" : "未启动"} tone={bridge?.running ? "ok" : "neutral"} />
-              <StatusMetric label="文件保护" value={permissionOverview.data?.permissionPolicy ?? runtime.permissionPolicy ?? "bridge_guarded"} tone={permissionOverview.data?.blocked ? "danger" : "ok"} />
-              <StatusMetric label="连接方式" value={permissionOverview.data?.transport ?? (runtime.mode === "wsl" ? "native-arg-env" : "windows-headless")} tone="neutral" />
-            </div>
-            <div className="rounded-xl border border-slate-100 bg-slate-50 px-4 py-3 text-[12px] text-slate-600">
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-slate-800">运行摘要</span>
-                <span>命令审批：{permissionOverview.data?.cliPermissionMode ?? runtime.cliPermissionMode ?? "yolo"}</span>
-                <span>是否阻塞：{Boolean(permissionOverview.data?.blocked) ? "是" : "否"}</span>
-                {permissionOverview.loading ? <span>refreshing...</span> : null}
-                <button className="ml-auto rounded-full bg-white px-2 py-1 font-semibold text-slate-600 ring-1 ring-slate-200" onClick={() => void permissionOverview.refresh()} type="button">
-                  刷新
-                </button>
-              </div>
-              {permissionOverview.error ? <p className="mt-1 text-rose-600">{permissionOverview.error}</p> : null}
-            </div>
-          </SettingsPanelCard>
-
-          {runtime.mode === "wsl" ? (
-            <ManagedWslInstallerPanel
-              title="WSL 安装与修复"
-              onAfterAction={props.onRefresh}
-              onExportDiagnostics={props.onExportDiagnostics}
-              onNotice={(message, detail) => showSaveNotice(detail ? `${message}：${detail}` : message)}
-            />
-          ) : null}
+          {oneClickDiagnostics ? <OneClickDiagnosticsResultView report={oneClickDiagnostics} /> : null}
 
           <SettingsPanelCard title="详细检查结果">
             <div className="space-y-3">
@@ -751,27 +557,36 @@ function SetupCheckCard(props: {
   );
 }
 
-function SystemAuditResultView(props: { result: HermesSystemAuditResult }) {
+function OneClickDiagnosticsResultView(props: { report: OneClickDiagnosticsReport }) {
   return (
-    <SettingsPanelCard title="系统能力审计结果">
+    <SettingsPanelCard title="一键诊断结果">
       <div className="space-y-3 text-[12px] text-slate-600">
-        <div className={`rounded-xl border px-3 py-3 ${props.result.ok ? "border-emerald-100 bg-emerald-50 text-emerald-800" : "border-rose-100 bg-rose-50 text-rose-800"}`}>
-          <p className="font-semibold">{props.result.message}</p>
-          <p className="mt-1 break-all text-[11px] opacity-80">workspace={props.result.workspacePath}</p>
+        <div className={`rounded-xl border px-3 py-3 ${props.report.summary.failed ? "border-rose-100 bg-rose-50 text-rose-800" : props.report.summary.warnings ? "border-amber-100 bg-amber-50 text-amber-800" : "border-emerald-100 bg-emerald-50 text-emerald-800"}`}>
+          <p className="font-semibold">
+            {props.report.summary.failed ? "诊断完成，但仍有失败项。" : props.report.summary.warnings ? "诊断完成，有需要留意的提醒。" : "诊断通过。"}
+          </p>
+          <p className="mt-1 text-[11px] opacity-80">
+            通过 {props.report.summary.passed}，警告 {props.report.summary.warnings}，失败 {props.report.summary.failed}，已修复 {props.report.summary.fixed}，未解决 {props.report.summary.unresolved}
+          </p>
         </div>
         <div className="space-y-2">
-          {props.result.steps.map((step) => (
-            <div key={step.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
+          {props.report.items.map((diagnostic) => (
+            <div key={diagnostic.id} className="rounded-xl border border-slate-100 bg-slate-50 px-3 py-3">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-semibold text-slate-800">{step.label}</span>
-                <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600">{step.status}</span>
-                {typeof step.durationMs === "number" ? <span className="text-[11px] text-slate-400">{step.durationMs}ms</span> : null}
+                <StatusDot tone={oneClickStatusTone(diagnostic.status)} />
+                <span className="font-semibold text-slate-800">{diagnostic.title}</span>
+                <span className="rounded-full bg-white px-2 py-0.5 text-[11px] font-medium text-slate-600">{oneClickStatusLabel(diagnostic.status)}</span>
+                {diagnostic.source ? <span className="text-[11px] text-slate-400">{diagnostic.source}</span> : null}
               </div>
-              <p className="mt-1 leading-5">{step.message}</p>
-              {step.artifactPath ? <p className="mt-1 break-all font-mono text-[11px] text-slate-400">{step.artifactPath}</p> : null}
-              {step.detail ? (
+              <p className="mt-1 leading-5">{diagnostic.summary}</p>
+              {diagnostic.suggestedActions?.length ? (
+                <div className="mt-2 rounded-xl bg-white/70 px-3 py-2 leading-5 text-slate-600">
+                  建议：{diagnostic.suggestedActions.join("；")}
+                </div>
+              ) : null}
+              {diagnostic.details ? (
                 <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded-md bg-slate-950/90 p-2 text-[11px] leading-4 text-slate-100">
-                  {step.detail}
+                  {diagnostic.details}
                 </pre>
               ) : null}
             </div>
@@ -780,6 +595,24 @@ function SystemAuditResultView(props: { result: HermesSystemAuditResult }) {
       </div>
     </SettingsPanelCard>
   );
+}
+
+function oneClickStatusTone(status: OneClickDiagnosticItem["status"]): "ok" | "warning" | "error" | "neutral" {
+  if (status === "fail") return "error";
+  if (status === "warn") return "warning";
+  if (status === "skipped") return "neutral";
+  return "ok";
+}
+
+function oneClickStatusLabel(status: OneClickDiagnosticItem["status"]) {
+  const labels: Record<OneClickDiagnosticItem["status"], string> = {
+    pass: "通过",
+    warn: "提醒",
+    fail: "失败",
+    fixed: "已修复",
+    skipped: "跳过",
+  };
+  return labels[status];
 }
 
 function setupStatusTone(status: SetupCheck["status"]): "ok" | "warning" | "error" | "neutral" {
@@ -835,6 +668,7 @@ function StatusDot(props: {
 function App() {
   const [configOverview, setConfigOverview] = useState<ConfigOverview | undefined>();
   const [settingsInitialSection, setSettingsInitialSection] = useState<ConfigSectionId>("general");
+  const sessionLoadSeq = useRef(0);
   const store = useAppStore();
 
   async function loadConfigOverview(workspacePath?: string) {
@@ -883,6 +717,41 @@ function App() {
       store.resolveApprovalCard(event.event.request.id, event.event.request.status);
     }
 
+    function isTerminalTaskEvent(event: TaskEventEnvelope) {
+      if (event.event.type === "result") return true;
+      if (event.event.type !== "lifecycle") return false;
+      return ["completed", "failed", "cancelled", "restored"].includes(event.event.stage);
+    }
+
+    function releaseTaskLockForTerminalEvent(event: TaskEventEnvelope) {
+      if (!isTerminalTaskEvent(event)) return;
+      const currentState = useAppStore.getState();
+      if (currentState.runningSessionId === event.taskRunId) {
+        store.setRunningSessionId(undefined);
+      }
+      if (currentState.runningTaskRunId === event.taskRunId) {
+        store.setRunningTaskRunId(undefined);
+      }
+      void refreshWorkspaceSafety();
+      window.setTimeout(() => {
+        void reconcileLockStateAfterTerminalEvent(event.taskRunId);
+      }, 1500);
+    }
+
+    async function reconcileLockStateAfterTerminalEvent(taskRunId: string) {
+      await refreshWorkspaceSafety();
+      const latest = useAppStore.getState();
+      const projection = latest.taskRunProjectionsById[taskRunId];
+      if (projection && isTerminalTaskStatus(projection.status)) {
+        if (latest.runningTaskRunId === taskRunId) store.setRunningTaskRunId(undefined);
+        if (latest.runningSessionId === taskRunId) store.setRunningSessionId(undefined);
+        const staleOwnLocks = latest.locks.filter((lock) => lock.sessionId !== taskRunId);
+        if (staleOwnLocks.length !== latest.locks.length) {
+          store.setLocks(staleOwnLocks);
+        }
+      }
+    }
+
     function flushEvents() {
       rafId = null;
       const events = pendingEvents;
@@ -900,22 +769,18 @@ function App() {
             timestamp: event.event.at,
             summary: `${event.event.title}：${event.event.detail}`,
           });
-          if (currentState.activeSessionId && currentState.runningTaskRunId === event.taskRunId) {
+          const targetSessionId = targetSessionForTaskEvent(event, currentState);
+          if (targetSessionId && currentState.runningTaskRunId === event.taskRunId) {
             void window.workbenchClient
               .updateSession({
-                id: currentState.activeSessionId,
+                id: targetSessionId,
                 status: event.event.success ? "completed" : "failed",
                 lastMessagePreview: event.event.detail.slice(0, 120),
               })
               .then((session) => store.upsertSession(session));
           }
-          if (currentState.runningSessionId === event.taskRunId) {
-            store.setRunningSessionId(undefined);
-          }
-          if (currentState.runningTaskRunId === event.taskRunId) {
-            store.setRunningTaskRunId(undefined);
-          }
         }
+        releaseTaskLockForTerminalEvent(event);
       }
     }
 
@@ -944,22 +809,18 @@ function App() {
             timestamp: event.event.at,
             summary: `${event.event.title}：${event.event.detail}`,
           });
-          if (currentState.activeSessionId && currentState.runningTaskRunId === event.taskRunId) {
+          const targetSessionId = targetSessionForTaskEvent(event, currentState);
+          if (targetSessionId && currentState.runningTaskRunId === event.taskRunId) {
             void window.workbenchClient
               .updateSession({
-                id: currentState.activeSessionId,
+                id: targetSessionId,
                 status: event.event.success ? "completed" : "failed",
                 lastMessagePreview: event.event.detail.slice(0, 120),
               })
               .then((session) => store.upsertSession(session));
           }
-          if (currentState.runningSessionId === event.taskRunId) {
-            store.setRunningSessionId(undefined);
-          }
-          if (currentState.runningTaskRunId === event.taskRunId) {
-            store.setRunningTaskRunId(undefined);
-          }
         }
+        releaseTaskLockForTerminalEvent(event);
       } else {
         pendingEvents.push(event);
         if (rafId === null) {
@@ -1015,6 +876,8 @@ function App() {
         store.setActiveSession(activeSession.id);
         store.setSessionFilesPath(activeSession.sessionFilesPath);
         store.setWorkspacePath(activeSession.workspacePath ?? "");
+        const requestId = ++sessionLoadSeq.current;
+        void loadSelectedSessionData(activeSession, requestId);
       } else {
         const newSession = await safePromiseWithFallback(
           workbenchClient.createSession("新的会话"),
@@ -1025,35 +888,16 @@ function App() {
           store.upsertSession(newSession);
           store.setActiveSession(newSession.id);
           store.setSessionFilesPath(newSession.sessionFilesPath);
+          const requestId = ++sessionLoadSeq.current;
+          void loadSelectedSessionData(newSession, requestId);
         }
       }
       
-      // ========== 第二阶段：后台并行加载（不阻塞UI） ==========
+      // ========== 第二阶段：仅加载轻量本地状态 ==========
+      // Startup must not fan out into RuntimeProbe, capabilities --json,
+      // Gateway status/start, or WebUI file scans. Those remain explicit
+      // refresh actions after the shell is interactive.
       Promise.all([
-        // 配置相关
-        safePromiseWithFallback(
-          workbenchClient.getConfigOverview(),
-          undefined,
-          { errorMessage: "获取配置概览失败" }
-        ).then((overview) => {
-          setConfigOverview(overview);
-          if (overview?.health) {
-            store.setSetupSummary(overview.health);
-          }
-          if (overview?.runtimeConfig) {
-            store.setRuntimeConfig(overview.runtimeConfig);
-          }
-        }),
-        
-        // WebUI概览
-        safePromiseWithFallback(
-          workbenchClient.getWebUiOverview(),
-          { settings: { theme: "green-light", language: "zh", sendKey: "enter", showUsage: false, showCliSessions: true }, projects: [], spaces: [], skills: [], memory: [{ id: "USER.md", label: "用户偏好", path: "", content: "", updatedAt: new Date().toISOString(), size: 0 }, { id: "MEMORY.md", label: "长期记忆", path: "", content: "", updatedAt: new Date().toISOString(), size: 0 }], crons: [], profiles: [], slashCommands: [] },
-          { errorMessage: "获取 WebUI 概览失败" }
-        ).then((overview) => {
-          store.setWebUiOverview(overview);
-        }),
-        
         // 密钥状态
         safePromiseWithFallback(
           workbenchClient.getSecretStatus(),
@@ -1071,17 +915,6 @@ function App() {
           ).then((config) => {
             store.setRuntimeConfig(config);
           }),
-          safePromiseWithFallback(
-            workbenchClient.getPermissionOverview(),
-            undefined,
-            { errorMessage: "获取权限概览失败" }
-          ).then((overview) => {
-            store.setPermissionOverview(overview);
-          }),
-          
-          // Hermes状态和设置摘要
-        refreshHermesStatus(),
-        refreshSetupSummary(),
       ]).then(() => {
         store.info("欢迎使用 Hermes 工作台", "已完成初始化");
       }).catch(() => {
@@ -1114,7 +947,20 @@ function App() {
     store.clearSelectedFiles();
     store.clearAttachments();
     store.setSessionAgentInsight(undefined);
-    
+    const requestId = ++sessionLoadSeq.current;
+    await loadSelectedSessionData(session, requestId);
+
+    // 非关键数据：后台异步加载
+    Promise.all([
+      refreshWorkspaceSafety(),
+      refreshHermesStatus(),
+      refreshSetupSummary(),
+    ]).catch(() => {
+      // 后台加载失败不影响主流程
+    });
+  }
+
+  async function loadSelectedSessionData(session: WorkSession, requestId: number) {
     // 关键数据：纯聊天会话从 sessionFilesPath 恢复事件；工作区只是可选上下文。
     const eventSourcePath = session.workspacePath || session.sessionFilesPath;
     const [events, fileTree, insight] = await Promise.all([
@@ -1140,20 +986,16 @@ function App() {
           )
         : undefined,
     ]);
-    
+
+    const latest = useAppStore.getState();
+    if (sessionLoadSeq.current !== requestId || latest.activeSessionId !== session.id) {
+      return;
+    }
+
     store.setEvents(events);
     store.rebuildSessionProjections(session.id, events);
     store.setFileTree(fileTree);
     store.setSessionAgentInsight(insight);
-    
-    // 非关键数据：后台异步加载
-    Promise.all([
-      refreshWorkspaceSafety(),
-      refreshHermesStatus(),
-      refreshSetupSummary(),
-    ]).catch(() => {
-      // 后台加载失败不影响主流程
-    });
   }
 
   async function createSession() {
@@ -1547,10 +1389,6 @@ function App() {
       store.setWorkspaceDrawerOpen(true);
       return;
     }
-    if (target === "diagnostics") {
-      void exportDiagnostics();
-      return;
-    }
     const section: ConfigSectionId = target === "model" ? "providers" : target === "hermes" ? "general" : "health";
     setSettingsInitialSection(section);
     store.setView("settings");
@@ -1571,6 +1409,8 @@ function App() {
           initialSection={settingsInitialSection}
           onBack={() => store.setView("home")}
           onRefresh={() => loadConfigOverview(useAppStore.getState().workspacePath || undefined).then(() => undefined)}
+          onClearSession={clearActiveSession}
+          onOpenSessionFolder={openActiveSessionFolder}
           onExportDiagnostics={exportDiagnostics}
         />
       ) : (

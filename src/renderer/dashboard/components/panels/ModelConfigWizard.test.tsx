@@ -1,19 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ModelConfigWizard } from "./ModelConfigWizard";
+import { stableModelProfileId } from "../../../../shared/model-config";
 
 const testModelConnection = vi.fn();
 const updateModelConfig = vi.fn();
 const saveSecret = vi.fn();
+const setDefaultModel = vi.fn();
 
 beforeEach(() => {
   testModelConnection.mockReset();
   updateModelConfig.mockReset();
   saveSecret.mockReset();
+  setDefaultModel.mockReset();
+  setDefaultModel.mockResolvedValue({ success: true, defaultModelId: "wizard-openrouter_api_key", models: [] });
   Object.assign(window, {
     workbenchClient: {
       testModelConnection,
       updateModelConfig,
+      setDefaultModel,
       saveSecret,
       discoverLocalModelSources: vi.fn(),
     },
@@ -105,9 +110,34 @@ describe("ModelConfigWizard", () => {
         modelProfiles: expect.arrayContaining([
           expect.objectContaining({ id: "wizard-openai_compatible", model: "qwen" }),
           expect.objectContaining({ id: "wizard-openrouter_api_key", model: "anthropic/claude-sonnet-4-5" }),
-          expect.objectContaining({ id: "wizard-openai_compatible-2", model: "qwen3-coder-plus" }),
+          expect.objectContaining({ id: stableModelProfileId({ provider: "custom", model: "qwen3-coder-plus", baseUrl: "http://127.0.0.1:8080/v1" }), model: "qwen3-coder-plus" }),
         ]),
       }));
+    });
+  });
+
+  it("sets an older saved profile as default through the backend API", async () => {
+    const onRefresh = vi.fn().mockResolvedValue(undefined);
+    const onSaved = vi.fn();
+    renderWizard({
+      onRefresh,
+      onSaved,
+      models: {
+        defaultProfileId: "openrouter-elephant",
+        providerProfiles: [],
+        modelProfiles: [
+          { id: "openrouter-elephant", name: "OpenRouter · elephant", provider: "openrouter", sourceType: "openrouter_api_key", model: "openrouter/elephant-alpha", baseUrl: "https://openrouter.ai/api/v1", agentRole: "primary_agent" },
+          { id: "mock-model", name: "Mock", provider: "local", sourceType: "legacy", model: "mock-model", agentRole: "auxiliary_model" },
+        ],
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "设为默认" }));
+
+    await waitFor(() => {
+      expect(setDefaultModel).toHaveBeenCalledWith("mock-model");
+      expect(onRefresh).toHaveBeenCalled();
+      expect(onSaved).toHaveBeenCalledWith("默认模型已切换");
     });
   });
 
@@ -126,6 +156,22 @@ describe("ModelConfigWizard", () => {
     expect(screen.getByText("模型名称 / Model ID")).toBeInTheDocument();
     expect(screen.getByDisplayValue("gemini-2.5-pro")).toBeInTheDocument();
     expect(screen.getByDisplayValue("https://generativelanguage.googleapis.com/v1beta")).toBeInTheDocument();
+  });
+
+  it("allows manual model IDs for provider presets with suggestions", () => {
+    renderWizard({
+      models: {
+        defaultProfileId: undefined,
+        providerProfiles: [],
+        modelProfiles: [],
+      },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "选择 provider family" }));
+    fireEvent.click(screen.getByRole("button", { name: /Gemini API Key/ }));
+    fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "gemini-custom-preview" } });
+
+    expect(screen.getByDisplayValue("gemini-custom-preview")).toBeInTheDocument();
   });
 
   it("applies custom endpoint family preset", () => {

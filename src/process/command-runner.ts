@@ -1,4 +1,5 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { redactSensitiveText } from "../shared/redaction";
 
 export type CommandResult = {
   exitCode: number | null;
@@ -20,6 +21,9 @@ export type CommandOptions = {
   detached?: boolean;
   commandId?: string;
   runtimeKind?: "windows" | "wsl";
+  maxOutputBytes?: number;
+  maxQueueEvents?: number;
+  maxLineChars?: number;
 };
 
 export type CommandDiagnostics = {
@@ -38,10 +42,13 @@ export type CommandDiagnostics = {
   spawnError?: string;
   stderrPreview: string;
   stdoutPreview: string;
-  category: "ok" | "spawn_error" | "timeout" | "cancelled" | "non_zero_exit";
+  category: "ok" | "spawn_error" | "timeout" | "cancelled" | "output_limit" | "non_zero_exit";
 };
 
 const activeChildren = new Set<ChildProcessWithoutNullStreams>();
+const DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024;
+const DEFAULT_MAX_QUEUE_EVENTS = 1000;
+const DEFAULT_MAX_LINE_CHARS = 16000;
 
 export function killActiveCommands() {
   for (const child of activeChildren) {
@@ -70,6 +77,7 @@ export function executeCommand(command: string, args: string[], options: Command
     const startedAt = new Date(startedAtMs).toISOString();
     let timedOut = false;
     let cancelled = false;
+    let outputLimited = false;
     let spawnError: string | undefined;
     const child = spawn(command, args, {
       cwd: options.cwd,
@@ -81,6 +89,9 @@ export function executeCommand(command: string, args: string[], options: Command
     activeChildren.add(child);
     let stdout = "";
     let stderr = "";
+    let stdoutBytes = 0;
+    let stderrBytes = 0;
+    const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
 
     const timer = options.timeoutMs
       ? setTimeout(() => {
@@ -96,14 +107,28 @@ export function executeCommand(command: string, args: string[], options: Command
     options.signal?.addEventListener("abort", abort, { once: true });
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout += chunk.toString("utf8");
+      stdout = appendLimitedOutput(stdout, chunk, stdoutBytes, maxOutputBytes, (bytes) => {
+        stdoutBytes = bytes;
+      }, () => {
+        outputLimited = true;
+        killProcessTree(child);
+      });
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr += chunk.toString("utf8");
+      stderr = appendLimitedOutput(stderr, chunk, stderrBytes, maxOutputBytes, (bytes) => {
+        stderrBytes = bytes;
+      }, () => {
+        outputLimited = true;
+        killProcessTree(child);
+      });
     });
     child.on("error", (error) => {
       spawnError = error.message;
-      stderr += error.message;
+      stderr = appendLimitedOutput(stderr, Buffer.from(error.message), stderrBytes, maxOutputBytes, (bytes) => {
+        stderrBytes = bytes;
+      }, () => {
+        outputLimited = true;
+      });
     });
     child.on("close", (exitCode) => {
       if (timer) {
@@ -124,7 +149,7 @@ export function executeCommand(command: string, args: string[], options: Command
         endedAt: new Date(endedAtMs).toISOString(),
         durationMs: endedAtMs - startedAtMs,
         exitCode,
-        signal: timedOut ? "timeout" : cancelled ? "abort" : undefined,
+        signal: timedOut ? "timeout" : cancelled ? "abort" : outputLimited ? "output_limit" : undefined,
         spawnError,
         stderrPreview: preview(stderr),
         stdoutPreview: preview(stdout),
@@ -134,10 +159,13 @@ export function executeCommand(command: string, args: string[], options: Command
             ? "timeout"
             : cancelled
               ? "cancelled"
-              : exitCode === 0
-                ? "ok"
-                : "non_zero_exit",
+              : outputLimited
+                ? "output_limit"
+                : exitCode === 0
+                  ? "ok"
+                  : "non_zero_exit",
       };
+      logCommandDiagnostics(diagnostics);
       resolve({ exitCode, stdout, stderr, diagnostics });
     });
   });
@@ -148,6 +176,8 @@ export async function* streamCommand(
   args: string[],
   options: CommandOptions,
 ): AsyncIterable<CommandLineEvent> {
+  const startedAtMs = Date.now();
+  const startedAt = new Date(startedAtMs).toISOString();
   const child = spawn(command, args, {
     cwd: options.cwd,
     env: { ...process.env, ...options.env },
@@ -163,14 +193,40 @@ export async function* streamCommand(
   let stdoutBuffer = "";
   let stderrBuffer = "";
   let timedOut = false;
+  let outputLimited = false;
+  let stderrPreview = "";
+  let stdoutPreview = "";
+  let totalOutputBytes = 0;
+  const maxOutputBytes = options.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+  const maxQueueEvents = options.maxQueueEvents ?? DEFAULT_MAX_QUEUE_EVENTS;
+  const maxLineChars = options.maxLineChars ?? DEFAULT_MAX_LINE_CHARS;
 
   const push = (event: CommandLineEvent) => {
+    if (queue.length >= maxQueueEvents) {
+      outputLimited = true;
+      if (!child.killed) {
+        killProcessTree(child);
+      }
+      return;
+    }
     queue.push(event);
     notify?.();
   };
 
   const flushLines = (kind: "stdout" | "stderr", chunk: Buffer) => {
+    totalOutputBytes += chunk.byteLength;
+    if (totalOutputBytes > maxOutputBytes) {
+      outputLimited = true;
+      push({ type: "stderr", line: `命令输出超过 ${Math.round(maxOutputBytes / 1024)}KB，已自动中断。` });
+      killProcessTree(child);
+      return;
+    }
     const text = (kind === "stdout" ? stdoutBuffer : stderrBuffer) + chunk.toString("utf8");
+    if (kind === "stdout") {
+      stdoutPreview = preview(`${stdoutPreview}${chunk.toString("utf8")}`);
+    } else {
+      stderrPreview = preview(`${stderrPreview}${chunk.toString("utf8")}`);
+    }
     const parts = text.split(/\r?\n/);
     const rest = parts.pop() ?? "";
     if (kind === "stdout") {
@@ -180,7 +236,7 @@ export async function* streamCommand(
     }
     for (const line of parts) {
       if (line.trim()) {
-        push({ type: kind, line });
+        push({ type: kind, line: truncateLine(line, maxLineChars) });
       }
     }
   };
@@ -203,12 +259,38 @@ export async function* streamCommand(
   child.on("error", (error) => push({ type: "stderr", line: error.message }));
   child.on("close", (exitCode) => {
     if (stdoutBuffer.trim()) {
-      push({ type: "stdout", line: stdoutBuffer.trim() });
+      push({ type: "stdout", line: truncateLine(stdoutBuffer.trim(), maxLineChars) });
     }
     if (stderrBuffer.trim()) {
-      push({ type: "stderr", line: stderrBuffer.trim() });
+      push({ type: "stderr", line: truncateLine(stderrBuffer.trim(), maxLineChars) });
     }
     push({ type: "exit", exitCode });
+    const endedAtMs = Date.now();
+    logCommandDiagnostics({
+      commandId: options.commandId ?? `${command}-${startedAtMs}`,
+      binary: command,
+      argv: [...args],
+      cwd: options.cwd,
+      runtimeKind: options.runtimeKind,
+      envRedacted: redactEnv(options.env),
+      timeoutMs: options.timeoutMs,
+      startedAt,
+      endedAt: new Date(endedAtMs).toISOString(),
+      durationMs: endedAtMs - startedAtMs,
+      exitCode,
+      signal: timedOut ? "timeout" : options.signal?.aborted ? "abort" : outputLimited ? "output_limit" : undefined,
+      stderrPreview,
+      stdoutPreview,
+      category: timedOut
+        ? "timeout"
+        : options.signal?.aborted
+          ? "cancelled"
+          : outputLimited
+            ? "output_limit"
+            : exitCode === 0
+              ? "ok"
+              : "non_zero_exit",
+    });
     done = true;
     if (timer) {
       clearTimeout(timer);
@@ -235,8 +317,35 @@ export async function* streamCommand(
 }
 
 function preview(value: string) {
-  const text = value.trim();
+  const text = redactSensitiveText(value.trim());
   return text.length > 4000 ? `${text.slice(0, 4000)}\n...[truncated]` : text;
+}
+
+function appendLimitedOutput(
+  current: string,
+  chunk: Buffer,
+  currentBytes: number,
+  maxBytes: number,
+  setBytes: (bytes: number) => void,
+  onLimit: () => void,
+) {
+  if (currentBytes >= maxBytes) {
+    onLimit();
+    return current;
+  }
+  const nextBytes = currentBytes + chunk.byteLength;
+  if (nextBytes <= maxBytes) {
+    setBytes(nextBytes);
+    return current + chunk.toString("utf8");
+  }
+  const remaining = Math.max(0, maxBytes - currentBytes);
+  setBytes(maxBytes);
+  onLimit();
+  return `${current}${chunk.subarray(0, remaining).toString("utf8")}\n...[output truncated: limit exceeded]`;
+}
+
+function truncateLine(line: string, maxChars: number) {
+  return line.length > maxChars ? `${line.slice(0, maxChars)}...[line truncated]` : line;
 }
 
 function redactEnv(env: NodeJS.ProcessEnv | undefined) {
@@ -244,9 +353,39 @@ function redactEnv(env: NodeJS.ProcessEnv | undefined) {
   const redacted: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
     if (typeof value !== "string") continue;
-    redacted[key] = /(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|KEY)/i.test(key)
+    redacted[key] = /(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTHORIZATION|COOKIE|KEY)/i.test(key)
       ? "<redacted>"
-      : value;
+      : redactSensitiveText(value);
   }
   return redacted;
+}
+
+function logCommandDiagnostics(diagnostics: CommandDiagnostics) {
+  const payload = {
+    commandId: diagnostics.commandId,
+    command: diagnostics.binary,
+    args: diagnostics.argv.map(redactArg),
+    cwd: diagnostics.cwd,
+    runtimeKind: diagnostics.runtimeKind,
+    exitCode: diagnostics.exitCode,
+    category: diagnostics.category,
+    durationMs: diagnostics.durationMs,
+    stderr: diagnostics.stderrPreview,
+    stdout: diagnostics.stdoutPreview,
+  };
+  if (diagnostics.category === "ok") {
+    console.info("[Hermes Forge] command ok", payload);
+  } else {
+    console.warn("[Hermes Forge] command failed", payload);
+  }
+}
+
+function redactArg(value: string) {
+  if (/(TOKEN|SECRET|PASSWORD|API_KEY|ACCESS_KEY|PRIVATE_KEY|AUTHORIZATION|BEARER)(=|:)/i.test(value)) {
+    return value.replace(/(=|:).+$/, "$1<redacted>");
+  }
+  if (/^[A-Za-z0-9._~+/=-]{24,}$/.test(value) && !/[\\/]/.test(value)) {
+    return "<redacted>";
+  }
+  return redactSensitiveText(value);
 }

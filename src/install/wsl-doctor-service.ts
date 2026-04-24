@@ -12,7 +12,7 @@ export class WslDoctorService {
     private readonly runtimeAdapterFactory: RuntimeAdapterFactory,
   ) {}
 
-  async diagnose(input: { workspacePath?: string; runtime?: HermesRuntimeConfig } = {}): Promise<WslDoctorReport> {
+  async diagnose(input: { workspacePath?: string; runtime?: HermesRuntimeConfig; persistResolvedHermesPath?: boolean } = {}): Promise<WslDoctorReport> {
     const config = await this.configStore.read();
     const configuredRuntime = {
       mode: config.hermesRuntime?.mode ?? "windows",
@@ -26,7 +26,11 @@ export class WslDoctorService {
       mode: "wsl" as const,
       pythonCommand: input.runtime?.pythonCommand?.trim() || configuredRuntime.pythonCommand || "python3",
     };
-    const probe = await this.runtimeProbeService.probe({ workspacePath: input.workspacePath, runtime });
+    const probe = await this.runtimeProbeService.probe({
+      workspacePath: input.workspacePath,
+      runtime,
+      persistResolvedHermesPath: input.persistResolvedHermesPath,
+    });
     const preflight = await this.runtimeAdapterFactory(runtime).preflight({ workspacePath: input.workspacePath, requireBridge: true });
     const checks = this.checks(probe, configuredRuntime, runtime, preflight.ok);
     const blockingIssues = checks.filter((check) => check.status === "failed");
@@ -81,10 +85,10 @@ export class WslDoctorService {
       check("hermes-cli", "hermes", probe.hermesCliExists ? "passed" : "failed", probe.hermesCliExists ? "hermes_cli_exists" : "hermes_cli_missing", probe.hermesCliExists ? "Hermes CLI 在 WSL runtime 下可访问。" : "Hermes CLI 在 WSL runtime 下不可访问。", {
         fixHint: probe.hermesCliExists ? undefined : "请确认 Hermes root 中存在 hermes 入口；下一阶段可做 WSL 内安装。",
       }),
-      check("bridge-reachable", "bridge", probe.bridgeReachable ? "passed" : "failed", probe.bridgeReachable ? "bridge_reachable" : "bridge_unreachable", probe.bridgeReachable ? "Windows Bridge 可从 WSL 访问。" : "Windows Bridge 无法从 WSL 访问。", {
+      check("bridge-reachable", "bridge", probe.bridgeReachable ? "passed" : "warning", probe.bridgeReachable ? "bridge_reachable" : "bridge_unreachable", probe.bridgeReachable ? "Windows Bridge 可从 WSL 访问。" : "Windows Bridge 无法从 WSL 访问；Hermes CLI 主链路会继续。", {
         autoFixable: Boolean(probe.bridge.running),
         detail: probe.bridge.message,
-        fixHint: probe.bridgeReachable ? undefined : "请确认 Bridge 已启动、host/port 已刷新，并允许防火墙访问。",
+        fixHint: probe.bridgeReachable ? undefined : "只有需要 WSL 调用 Windows host command 时才必须修复 Bridge；可重启客户端或手动刷新 Bridge 状态。",
         debugContext: { bridgeHost: probe.bridgeHost, bridgePort: probe.bridgePort },
       }),
       check("paths-resolved", "path", probe.homeResolved && probe.memoryResolved ? "passed" : "warning", probe.homeResolved && probe.memoryResolved ? "paths_resolved" : "paths_partial", probe.homeResolved && probe.memoryResolved ? "关键路径已解析。" : "部分关键路径未解析。", {

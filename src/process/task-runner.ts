@@ -565,6 +565,14 @@ export class TaskRunner {
     return false;
   }
 
+  isRunning(sessionId: string) {
+    return this.running.has(sessionId);
+  }
+
+  listRunningSessionIds() {
+    return [...this.running.keys()];
+  }
+
   async shutdown(reason = "shutdown", timeoutMs = 5000) {
     for (const [sessionId, controller] of this.running) {
       console.info("[Hermes Forge] Aborting active task during shutdown:", { sessionId, reason });

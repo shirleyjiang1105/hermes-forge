@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { testOnly } from "./hermes-existing-config-import";
+import { stableModelProfileId } from "../shared/model-config";
 
 describe("importExistingHermesConfig helpers", () => {
   it("parses top-level Hermes model block", () => {
@@ -33,7 +34,7 @@ describe("importExistingHermesConfig helpers", () => {
     );
 
     expect(profile).toMatchObject({
-      id: "wizard-deepseek",
+      id: stableModelProfileId({ provider: "custom", model: "deepseek-chat", baseUrl: "https://api.deepseek.com/v1" }),
       provider: "custom",
       baseUrl: "https://api.deepseek.com/v1",
       model: "deepseek-chat",
@@ -54,7 +55,7 @@ describe("importExistingHermesConfig helpers", () => {
     );
 
     expect(profile).toMatchObject({
-      id: "imported-anthropic",
+      id: stableModelProfileId({ provider: "anthropic", model: "claude-sonnet-4-5", baseUrl: "https://api.anthropic.com/v1" }),
       provider: "anthropic",
       model: "claude-sonnet-4-5",
       secretRef: "provider.anthropic.apiKey",

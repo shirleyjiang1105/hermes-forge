@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, DownloadCloud, Loader2, RadioTower, Server, ServerOff, ShieldCheck, Wifi, WifiOff } from "lucide-react";
 import type { ClientUpdateEvent, HermesGatewayStatus, HermesProbeSummary, HermesStatusSummary } from "../../../shared/types";
 import { useAppStore } from "../../store";
@@ -11,9 +11,9 @@ export function StatusBar() {
   const store = useAppStore();
   const [apiStatus, setApiStatus] = useState<ConnectionState>(store.clientInfo ? "connected" : "checking");
   const [hermesStatus, setHermesStatus] = useState<ConnectionState>(resolveHermesConnection(store.hermesProbe, store.hermesStatus));
-  const [gatewayStatus, setGatewayStatus] = useState<HermesGatewayStatus | undefined>();
+  const [gatewayStatus] = useState<HermesGatewayStatus | undefined>();
   const [clientUpdate, setClientUpdate] = useState<ClientUpdateEvent | undefined>();
-  const [lastChecked, setLastChecked] = useState<string | null>(null);
+  const [lastChecked] = useState<string | null>(null);
 
   useEffect(() => {
     if (store.clientInfo) {
@@ -27,61 +27,6 @@ export function StatusBar() {
       return current === "checking" || current === "disconnected" ? resolved : current;
     });
   }, [store.hermesProbe, store.hermesStatus]);
-
-  const checkApiStatus = useCallback(async () => {
-    setApiStatus(store.clientInfo ? "connected" : "checking");
-
-    if (!window.workbenchClient || typeof window.workbenchClient.getClientInfo !== "function") {
-      setApiStatus(store.clientInfo ? "connected" : "disconnected");
-      return;
-    }
-
-    try {
-      const result = await window.workbenchClient.getClientInfo();
-      setApiStatus(result && typeof result === "object" ? "connected" : "disconnected");
-    } catch (error) {
-      console.error("API check failed:", error);
-      setApiStatus(store.clientInfo ? "connected" : "disconnected");
-    }
-  }, [store.clientInfo]);
-
-  const checkHermesStatus = useCallback(async () => {
-    setHermesStatus(resolveHermesConnection(store.hermesProbe, store.hermesStatus));
-
-    if (!window.workbenchClient || typeof window.workbenchClient.getHermesProbe !== "function") {
-      setHermesStatus(resolveHermesConnection(store.hermesProbe, store.hermesStatus));
-      return;
-    }
-
-    try {
-      const probe = await window.workbenchClient.getHermesProbe();
-      setHermesStatus(resolveHermesConnection(probe, store.hermesStatus));
-    } catch (error) {
-      console.error("Hermes check failed:", error);
-      setHermesStatus(resolveHermesConnection(store.hermesProbe, store.hermesStatus));
-    }
-  }, [store.hermesProbe, store.hermesStatus]);
-
-  const checkAllStatus = useCallback(async () => {
-    const gateway = await window.workbenchClient?.getGatewayStatus?.().catch(() => undefined);
-    setGatewayStatus(gateway);
-    await Promise.all([checkApiStatus(), checkHermesStatus()]);
-    setLastChecked(new Date().toLocaleTimeString("zh-CN"));
-  }, [checkApiStatus, checkHermesStatus]);
-
-  useEffect(() => {
-    const initialTimer = window.setTimeout(() => {
-      void checkAllStatus();
-    }, 250);
-    const interval = window.setInterval(() => {
-      void checkAllStatus();
-    }, 10000);
-
-    return () => {
-      window.clearTimeout(initialTimer);
-      window.clearInterval(interval);
-    };
-  }, [checkAllStatus]);
 
   useEffect(() => window.workbenchClient?.onClientUpdateEvent?.((event) => setClientUpdate(event)), []);
 
@@ -204,7 +149,7 @@ function hermesIcon(status: ConnectionState) {
 }
 
 function gatewayTooltip(status?: HermesGatewayStatus) {
-  if (!status) return "正在检查 Gateway";
+  if (!status) return "Gateway 状态未刷新";
   return status.autoStartMessage || status.message || "Gateway 状态未知";
 }
 

@@ -22,7 +22,7 @@ export class RuntimeResolver {
     runtime: HermesRuntimeConfig;
     workspacePath?: string;
   }): Promise<RuntimePathResolution> {
-    const hermesRoot = await this.resolveHermesRoot();
+    const hermesRoot = await this.resolveHermesRoot().catch(() => input.runtime.managedRoot ?? "");
     const activeHermesHome = await resolveActiveHermesHome(this.appPaths.hermesDir());
     const appUserDataPath = descriptor("app-user-data", this.appPaths.baseDir(), "windows-app", true, false, false, "Electron app userData directory.");
     const profileHermesPath = descriptor("profile-hermes", activeHermesHome, "windows-app", true, true, false, "Desktop-managed Hermes profile directory currently used by runtime.");
@@ -126,7 +126,7 @@ export function parseCommandLine(raw: string): ParsedCommand | undefined {
 export function toWslPath(inputPath: string) {
   const normalized = inputPath.trim();
   if (!normalized) return normalized;
-  if (/^\/(?:home|mnt|tmp|var|usr|opt|etc)\b/i.test(normalized)) {
+  if (/^\/(?:bin|boot|dev|etc|home|lib|lib64|mnt|opt|proc|root|run|sbin|srv|sys|tmp|usr|var)\b/i.test(normalized)) {
     return normalized;
   }
   const uncMatch = normalized.match(/^\\\\wsl\$\\[^\\]+\\(.+)$/i);

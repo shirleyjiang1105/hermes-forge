@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { AlertCircle, CheckCircle2, ChevronDown, Cloud, KeyRound, Loader2, Network, PlugZap, Server, ShieldCheck, Sparkles } from "lucide-react";
 import type { LocalModelDiscoveryResult, ModelCapabilityRole, ModelConnectionTestResult, ModelSourceType } from "../../../../shared/types";
+import { stableModelProfileId } from "../../../../shared/model-config";
 import { cn } from "../../DashboardPrimitives";
 
 type ModelSummary = {
@@ -410,11 +411,17 @@ export function ModelConfigWizard(props: {
         maxTokens: maxTokens.trim() ? Number(maxTokens.trim()) : undefined,
       });
       setTestResult(health);
-      const profileId = editingProfileId ?? buildProfileId(sourceType, props.models.modelProfiles);
+      const nextProviderId = providerIdForSource(sourceType);
+      const profileId = editingProfileId ?? buildProfileId({
+        provider: nextProviderId,
+        model: model.trim(),
+        baseUrl: baseUrl.trim(),
+        existingProfiles: props.models.modelProfiles,
+      });
       const nextProfile = {
         id: profileId,
         name: friendlyProfileName(sourceType, model.trim()),
-        provider: providerIdForSource(sourceType),
+        provider: nextProviderId,
         sourceType,
         authMode: provider.authModeToStore,
         model: model.trim(),
@@ -452,30 +459,55 @@ export function ModelConfigWizard(props: {
 
   async function setDefaultProfile(profileId: string) {
     const profile = props.models.modelProfiles.find((item) => item.id === profileId);
-    if (profile?.agentRole && profile.agentRole !== "primary_agent") {
+    console.info("[Hermes Forge] default model click", {
+      clickedModel: profile,
+      clickedModelId: profileId,
+      previousDefaultModelId: props.models.defaultProfileId,
+    });
+    if (!profileId?.trim()) {
       setTestResult({
         ok: false,
-        profileId: profile.id,
-        sourceType: profile.sourceType ?? inferSourceType(profile.provider, profile.baseUrl),
-        message: "这个模型当前只适合作为辅助模型，不能直接切换成 Hermes 主模型。",
-        agentRole: profile.agentRole,
-        failureCategory: "tool_calling_unavailable",
-        recommendedFix: "请先把它重新测试到主模型标准，或改选支持工具调用和更高上下文的模型。",
+        profileId: "",
+        sourceType: "legacy",
+        message: "这个模型缺少稳定 ID，无法设为默认。请先重新保存一次模型配置。",
+        failureCategory: "manual_action_required",
+        recommendedFix: "点击编辑并保存模型，系统会补齐稳定 ID。",
       });
       return;
     }
-    await window.workbenchClient.updateModelConfig({
-      defaultProfileId: profileId,
-      modelProfiles: props.models.modelProfiles,
-    });
+    if (!profile) {
+      setTestResult({
+        ok: false,
+        profileId,
+        sourceType: "legacy",
+        message: "模型列表里没有找到这个配置，无法设为默认。",
+        failureCategory: "manual_action_required",
+        recommendedFix: "请重新检测配置或重新导入旧配置。",
+      });
+      return;
+    }
+    const result = await window.workbenchClient.setDefaultModel(profileId);
+    if (!result.success) {
+      setTestResult({
+        ok: false,
+        profileId,
+        sourceType: profile.sourceType ?? inferSourceType(profile.provider, profile.baseUrl),
+        message: result.message ?? "默认模型切换失败。",
+        failureCategory: "manual_action_required",
+        recommendedFix: result.code === "HERMES_SYNC_FAILED"
+          ? "配置已保存但 Hermes 同步失败，请重新检测环境或重启 Gateway。"
+          : "请重新检测配置后再试。",
+      });
+      return;
+    }
     await props.onRefresh();
-    props.onSaved("默认模型已切换");
+    props.onSaved(result.message ?? "默认模型已切换");
   }
 
   async function deleteProfile(profileId: string) {
     const nextProfiles = props.models.modelProfiles.filter((item) => item.id !== profileId);
     await window.workbenchClient.updateModelConfig({
-      defaultProfileId: props.models.defaultProfileId,
+      defaultModelId: props.models.defaultProfileId === profileId ? nextProfiles[0]?.id : props.models.defaultProfileId,
       modelProfiles: nextProfiles,
     });
     await props.onRefresh();
@@ -588,30 +620,17 @@ export function ModelConfigWizard(props: {
                 <span className="text-[12px] font-medium text-slate-500">模型名称 / Model ID</span>
                 <span className="text-[11px] text-slate-400">{provider.providerMode === "select" ? "建议先从列表选，再按需手填" : "优先从测试结果选择，也可手填"}</span>
               </div>
-              {provider.providerMode === "select" && modelOptions.length ? (
-                <select
-                  aria-label="添加模型名称"
-                  value={model}
-                  onChange={(event) => updateModel(event.target.value)}
-                  className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
-                >
-                  {modelOptions.map((item) => <option key={item} value={item}>{item}</option>)}
-                </select>
-              ) : (
-                <>
-                  <input
-                    aria-label="添加模型名称"
-                    list="hermes-model-options"
-                    value={model}
-                    onChange={(event) => updateModel(event.target.value)}
-                    className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
-                    placeholder={provider.modelPlaceholder}
-                  />
-                  <datalist id="hermes-model-options">
-                    {modelOptions.map((item) => <option key={item} value={item} />)}
-                  </datalist>
-                </>
-              )}
+              <input
+                aria-label="添加模型名称"
+                list="hermes-model-options"
+                value={model}
+                onChange={(event) => updateModel(event.target.value)}
+                className="h-12 w-full bg-white px-4 font-mono text-[15px] text-slate-900 outline-none transition focus:bg-slate-50"
+                placeholder={provider.modelPlaceholder}
+              />
+              <datalist id="hermes-model-options">
+                {modelOptions.map((item) => <option key={item} value={item} />)}
+              </datalist>
             </div>
 
             {provider.family === "Custom Endpoint 型" ? (
@@ -689,7 +708,7 @@ export function ModelConfigWizard(props: {
                         <button className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 hover:bg-slate-50" onClick={() => editProfile(profile.id)} type="button">
                           编辑
                         </button>
-                        <button className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-[12px] font-semibold text-rose-600 hover:bg-rose-50 disabled:cursor-not-allowed disabled:opacity-40" disabled={isDefault} onClick={() => void deleteProfile(profile.id)} type="button">
+                        <button className="rounded-xl border border-rose-200 bg-white px-3 py-2 text-[12px] font-semibold text-rose-600 hover:bg-rose-50" onClick={() => void deleteProfile(profile.id)} type="button">
                           删除
                         </button>
                       </div>
@@ -985,8 +1004,9 @@ function inferSourceType(provider: string, baseUrl?: string): ModelSourceType {
   return "openai_compatible";
 }
 
-function buildProfileId(sourceType: ModelSourceType, existingProfiles: OverviewModels["modelProfiles"]) {
-  const base = `wizard-${sourceType}`;
+function buildProfileId(input: { provider: ReturnType<typeof providerIdForSource>; model: string; baseUrl?: string; existingProfiles: OverviewModels["modelProfiles"] }) {
+  const base = stableModelProfileId({ provider: input.provider, model: input.model, baseUrl: input.baseUrl });
+  const existingProfiles = input.existingProfiles;
   if (!existingProfiles.some((item) => item.id === base)) {
     return base;
   }

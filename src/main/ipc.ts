@@ -31,6 +31,7 @@ import type { ClientAutoUpdateService } from "../updater/client-auto-update-serv
 import type { UpdateService } from "../updater/update-service";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import type { ManagedWslInstallerService } from "../install/managed-wsl-installer-service";
+import type { OneClickDiagnosticsOrchestrator } from "./diagnostics/one-click-diagnostics-orchestrator";
 import { importExistingHermesConfig } from "./hermes-existing-config-import";
 import { buildPermissionOverview } from "./permission-overview-service";
 import {
@@ -65,7 +66,7 @@ import type {
   SponsorOverview,
 } from "../shared/types";
 import { resolveEnginePermissions } from "../shared/types";
-import { normalizeOpenAiCompatibleBaseUrl } from "../shared/model-config";
+import { migrateRuntimeConfigModels, normalizeOpenAiCompatibleBaseUrl } from "../shared/model-config";
 
 const quickTextFileInputSchema = z.object({
   fileName: z.string().trim().max(120).optional(),
@@ -76,6 +77,11 @@ const setupDependencyRepairIdSchema = z.enum(["git", "python", "hermes_pyyaml", 
 const installHermesOptionsSchema = z.object({
   rootPath: z.string().trim().min(1).max(1000).optional(),
 }).optional();
+const oneClickDiagnosticsRunOptionsSchema = z.object({
+  autoFix: z.boolean().optional(),
+  deepAudit: z.boolean().optional(),
+  workspacePath: workspacePathInputSchema.optional(),
+});
 const sponsorSubmitInputSchema = z.object({
   supporterId: z.string().trim().min(1).max(48),
   message: z.string().trim().max(1000).optional(),
@@ -162,6 +168,7 @@ export type IpcServices = {
   approvalService: ApprovalService;
   runtimeAdapterFactory: RuntimeAdapterFactory;
   managedWslInstallerService: ManagedWslInstallerService;
+  oneClickDiagnosticsOrchestrator: OneClickDiagnosticsOrchestrator;
   clientInfo: () => ClientInfo;
 };
 
@@ -601,9 +608,6 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.testHermesSystemAudit, () => services.hermesSystemAuditService.test());
   ipcMain.handle(IpcChannels.getConfigOverview, async (_event, workspacePath?: string) => {
     const runtimeConfig = await services.configStore.read();
-    await syncCurrentWindowsBridgeConfig(runtimeConfig).catch((error) => {
-      console.warn("[Hermes Forge] Failed to refresh Windows bridge config for overview:", error);
-    });
     const secretRefs = new Set<string>();
     for (const profile of runtimeConfig.modelProfiles) {
       if (profile.secretRef) secretRefs.add(profile.secretRef);
@@ -617,7 +621,6 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
       ...(await services.secretVault.getSecretMeta(ref) ?? {}),
     })));
     const hermesPath = await services.configStore.getEnginePath("hermes");
-    const health = await services.setupService.getSummary(workspacePath);
     const modelSummary = summarizeModelSource(runtimeConfig);
     return {
       runtimeConfig,
@@ -642,7 +645,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         summary: modelSummary,
       },
       secrets,
-      health,
+      health: undefined,
     };
   });
   ipcMain.handle(IpcChannels.updateHermesConfig, async (_event, input) => {
@@ -710,19 +713,85 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.updateModelConfig, async (_event, input) => {
     const parsed = z.object({
       defaultProfileId: z.string().max(120).optional(),
+      defaultModelId: z.string().max(120).optional(),
       modelProfiles: z.array(z.any()).optional(),
       providerProfiles: z.array(z.any()).optional(),
     }).parse(input);
     const config = await services.configStore.read();
-    return writeRuntimeConfigWithModelSync({
+    return writeRuntimeConfigWithModelSync(migrateRuntimeConfigModels({
       ...config,
-      defaultModelProfileId: parsed.defaultProfileId ?? config.defaultModelProfileId,
+      defaultModelProfileId: parsed.defaultModelId ?? parsed.defaultProfileId ?? config.defaultModelProfileId,
       modelProfiles: parsed.modelProfiles ?? config.modelProfiles,
       providerProfiles: parsed.providerProfiles ?? config.providerProfiles,
-    }, true);
+    }), true);
+  });
+  ipcMain.handle(IpcChannels.setDefaultModel, async (_event, input) => {
+    const parsed = z.object({ modelId: z.string().trim().max(120).optional() }).parse(input);
+    const previous = migrateRuntimeConfigModels(await services.configStore.read());
+    const clicked = parsed.modelId;
+    const configPath = services.configStore.getConfigPath();
+    console.info("[Hermes Forge] set default model clicked", {
+      clickedModelId: clicked,
+      previousDefaultModelId: previous.defaultModelProfileId,
+      configPath,
+    });
+    if (!clicked) {
+      return { success: false, code: "MODEL_ID_MISSING", message: "模型缺少稳定 ID，无法设为默认。", defaultModelId: previous.defaultModelProfileId, models: previous.modelProfiles };
+    }
+    const profile = previous.modelProfiles.find((item) => item.id === clicked);
+    console.info("[Hermes Forge] set default model target", { clickedModel: profile, clickedModelId: clicked });
+    if (!profile) {
+      return { success: false, code: "MODEL_NOT_FOUND", message: `没有找到模型：${clicked}`, defaultModelId: previous.defaultModelProfileId, models: previous.modelProfiles };
+    }
+    const next = migrateRuntimeConfigModels({
+      ...previous,
+      defaultModelProfileId: clicked,
+    });
+    let saved: RuntimeConfig;
+    try {
+      saved = await services.configStore.write(next);
+      console.info("[Hermes Forge] set default model save result", {
+        configPath,
+        previousDefaultModelId: previous.defaultModelProfileId,
+        nextDefaultModelId: saved.defaultModelProfileId,
+        saveResult: "ok",
+      });
+    } catch (error) {
+      console.error("[Hermes Forge] set default model save failed", { configPath, error });
+      return { success: false, code: "CONFIG_SAVE_FAILED", message: error instanceof Error ? error.message : "模型配置保存失败。", defaultModelId: previous.defaultModelProfileId, models: previous.modelProfiles };
+    }
+    let reloaded = saved;
+    try {
+      reloaded = await services.configStore.read();
+      console.info("[Hermes Forge] set default model reload result", {
+        defaultModelId: reloaded.defaultModelProfileId,
+        modelCount: reloaded.modelProfiles.length,
+      });
+    } catch (error) {
+      console.warn("[Hermes Forge] set default model reload failed", { configPath, error });
+    }
+    let syncWarning: string | undefined;
+    try {
+      const sync = await services.hermesModelSyncService.syncRuntimeConfig(reloaded);
+      if (sync.synced) await restartGatewayIfRunning(services);
+      await syncCurrentWindowsBridgeConfig(reloaded).catch((error) => {
+        console.warn("[Hermes Forge] Failed to sync Windows bridge config after model default change:", error);
+      });
+      console.info("[Hermes Forge] set default model Hermes sync result", sync);
+    } catch (error) {
+      syncWarning = error instanceof Error ? error.message : "Hermes 运行时同步失败。";
+      console.warn("[Hermes Forge] set default model Hermes sync failed after config save", { configPath, error });
+    }
+    return {
+      success: true,
+      defaultModelId: reloaded.defaultModelProfileId,
+      models: reloaded.modelProfiles,
+      code: syncWarning ? "HERMES_SYNC_DEFERRED" : undefined,
+      message: syncWarning ? `默认模型已保存；Hermes/Bridge 同步稍后重试。${syncWarning}` : undefined,
+    };
   });
   ipcMain.handle(IpcChannels.saveRuntimeConfig, (_event, config) =>
-    writeRuntimeConfigWithModelSync(runtimeConfigSchema.parse(config)),
+    writeRuntimeConfigWithModelSync(runtimeConfigSchema.parse(migrateRuntimeConfigModels(config as Partial<RuntimeConfig>))),
   );
   ipcMain.handle(IpcChannels.discoverLocalModelSources, async (): Promise<LocalModelDiscoveryResult> => {
     return discoverCustomEndpointSources();
@@ -771,6 +840,13 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     return { ref: parsed, exists: await services.secretVault.hasSecret(parsed) };
   });
   ipcMain.handle(IpcChannels.exportDiagnostics, (_event, workspacePath?: string) => services.diagnosticsService.export(workspacePath));
+  ipcMain.handle(IpcChannels.oneClickDiagnosticsRun, (_event, input) =>
+    services.oneClickDiagnosticsOrchestrator.run(oneClickDiagnosticsRunOptionsSchema.parse(input ?? {})),
+  );
+  ipcMain.handle(IpcChannels.oneClickDiagnosticsExport, (_event, workspacePath?: string) =>
+    services.oneClickDiagnosticsOrchestrator.exportLatest(workspacePath),
+  );
+  ipcMain.handle(IpcChannels.oneClickDiagnosticsStatus, () => services.oneClickDiagnosticsOrchestrator.getStatus());
 }
 
 async function readSponsorOverview(appPaths: AppPaths): Promise<SponsorOverview> {

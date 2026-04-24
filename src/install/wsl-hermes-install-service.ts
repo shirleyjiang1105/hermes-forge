@@ -315,26 +315,39 @@ export class WslHermesInstallService {
 
     const verify = await this.verifyHermesInstall(runtime, hermesRoot, installPython);
     steps.push(...verify.steps);
-    const reprobe = await this.runtimeProbeService.probe({ runtime });
+    const reprobe = await this.runtimeProbeService.probe({ runtime, persistResolvedHermesPath: true });
     const reDoctor = await this.doctorService.diagnose({ runtime });
+    const hermesVerified = verify.ok && verify.capabilityProbe?.minimumSatisfied !== false;
+    const reprobeHasHermesFailure = reprobe.issues.some((issue) =>
+      issue.severity === "error" && ["hermes_root_missing", "hermes_cli_missing", "wsl_missing", "wsl_distro_missing", "wsl_distro_unreachable", "wsl_python_missing"].includes(issue.code),
+    );
+    const doctorHasHermesFailure = reDoctor.blockingIssues.some((issue) =>
+      ["hermes_root_missing", "hermes_cli_missing", "wsl_missing", "wsl_distro_missing", "wsl_distro_unreachable", "wsl_python_missing"].includes(issue.code),
+    );
     steps.push(installStep({
       phase: "health_check",
       step: "reprobe-after-install",
-      status: reprobe.overallStatus === "ready" || reprobe.overallStatus === "degraded" ? "passed" : "failed",
+      status: hermesVerified && !reprobeHasHermesFailure ? "passed" : "failed",
       code: "runtime_reprobed",
       summary: `安装后 reprobe 完成：${reprobe.overallStatus}`,
-      debugContext: { overallStatus: reprobe.overallStatus },
+      detail: reprobeHasHermesFailure
+        ? reprobe.issues.filter((issue) => issue.severity === "error").map((issue) => `${issue.code}: ${issue.summary}`).join("\n")
+        : undefined,
+      debugContext: { overallStatus: reprobe.overallStatus, hermesVerified },
     }));
     steps.push(installStep({
       phase: "health_check",
       step: "redoctor-after-install",
-      status: reDoctor.overallStatus === "ready_to_attach_existing_wsl" || reDoctor.overallStatus === "repair_needed" ? "passed" : "failed",
+      status: hermesVerified && !doctorHasHermesFailure ? "passed" : "failed",
       code: "doctor_reran",
       summary: `安装后 re-doctor 完成：${reDoctor.overallStatus}`,
-      debugContext: { overallStatus: reDoctor.overallStatus },
+      detail: doctorHasHermesFailure
+        ? reDoctor.blockingIssues.map((issue) => `${issue.code}: ${issue.summary}`).join("\n")
+        : undefined,
+      debugContext: { overallStatus: reDoctor.overallStatus, hermesVerified },
     }));
 
-    if (!verify.ok || (reDoctor.overallStatus !== "ready_to_attach_existing_wsl" && reDoctor.overallStatus !== "repair_needed")) {
+    if (!hermesVerified || reprobeHasHermesFailure || doctorHasHermesFailure) {
       failedCommand = verify.failedCommand;
       return this.finalize({
         requestedAt,

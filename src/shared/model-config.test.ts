@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { normalizeOpenAiCompatibleBaseUrl, requiresStoredSecret } from "./model-config";
+import { migrateRuntimeConfigModels, normalizeOpenAiCompatibleBaseUrl, requiresStoredSecret, stableModelProfileId } from "./model-config";
 import type { ModelProfile } from "./types";
 
 describe("model config helpers", () => {
@@ -18,5 +18,23 @@ describe("model config helpers", () => {
 
     expect(requiresStoredSecret(profile)).toBe(false);
     expect(requiresStoredSecret({ ...profile, secretRef: "provider.local.apiKey" })).toBe(true);
+  });
+
+  it("migrates legacy models to stable ids and a canonical default profile id", () => {
+    const migrated = migrateRuntimeConfigModels({
+      defaultModel: "openrouter/elephant-alpha",
+      modelProfiles: [
+        { provider: "local", model: "mock-model" },
+        { provider: "openrouter", model: "openrouter/elephant-alpha", baseUrl: "https://openrouter.ai/api/v1" },
+      ],
+    });
+
+    const expectedId = stableModelProfileId({
+      provider: "openrouter",
+      model: "openrouter/elephant-alpha",
+      baseUrl: "https://openrouter.ai/api/v1",
+    });
+    expect(migrated.modelProfiles.map((item) => item.id)).toContain(expectedId);
+    expect(migrated.defaultModelProfileId).toBe(expectedId);
   });
 });

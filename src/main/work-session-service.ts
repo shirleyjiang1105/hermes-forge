@@ -5,11 +5,12 @@ import type { AppPaths } from "./app-paths";
 import type { WorkSession } from "../shared/types";
 
 const DEFAULT_SESSION_TITLE = "新的会话";
+const DEFAULT_SESSION_LIST_LIMIT = 80;
 
 export class WorkSessionService {
   constructor(private readonly appPaths: AppPaths) {}
 
-  async list(includeArchived = false): Promise<WorkSession[]> {
+  async list(includeArchived = false, limit = DEFAULT_SESSION_LIST_LIMIT): Promise<WorkSession[]> {
     await fs.mkdir(this.appPaths.sessionsRootDir(), { recursive: true });
     const entries = await fs.readdir(this.appPaths.sessionsRootDir(), { withFileTypes: true }).catch(() => []);
     const sessions = await Promise.all(
@@ -20,7 +21,8 @@ export class WorkSessionService {
     return sessions
       .filter((session): session is WorkSession => Boolean(session))
       .filter((session) => includeArchived || session.status !== "archived")
-      .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+      .sort((a, b) => Number(Boolean(b.pinned)) - Number(Boolean(a.pinned)) || new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, Math.max(1, Math.min(limit, DEFAULT_SESSION_LIST_LIMIT)));
   }
 
   async ensureDefault(): Promise<WorkSession> {

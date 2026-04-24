@@ -4,6 +4,7 @@ import path from "node:path";
 import type { AppPaths } from "./app-paths";
 import { runCommand } from "../process/command-runner";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import { validateWslHermesCli } from "../runtime/hermes-cli-resolver";
 import type { RuntimeProbeService } from "../runtime/runtime-probe-service";
 import { summarizePreflightFailure } from "../runtime/runtime-preflight";
 import type { SecretVault } from "../auth/secret-vault";
@@ -197,6 +198,7 @@ export class HermesConnectorService {
   private gatewayBackoffUntil?: string;
   private gatewayAutoStartState: HermesGatewayStatus["autoStartState"] = "idle";
   private gatewayAutoStartMessage = "等待自动启动。";
+  private gatewayStartPromise?: Promise<HermesGatewayActionResult>;
   private weixinQrProcess?: ChildProcessWithoutNullStreams;
   private weixinQrStatus: WeixinQrLoginStatus = { running: false, phase: "idle", message: "请点击开始扫码获取微信二维码。" };
   private weixinQrLineBuffer = "";
@@ -356,7 +358,65 @@ export class HermesConnectorService {
     };
   }
 
+  async checkPreflight(): Promise<{
+    ok: boolean;
+    message: string;
+    root?: string;
+    runtimeMode?: NonNullable<RuntimeConfig["hermesRuntime"]>["mode"];
+    distro?: string;
+    label?: string;
+    status: HermesGatewayStatus;
+    debugContext?: Record<string, unknown>;
+  }> {
+    const status = await this.status();
+    let root: string;
+    try {
+      root = await this.resolveHermesRoot();
+    } catch (error) {
+      return {
+        ok: false,
+        status,
+        message: error instanceof Error ? error.message : "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。",
+      };
+    }
+    const runtime = await this.runtimeContext(root);
+    if (!runtime.ok) {
+      return {
+        ok: false,
+        root,
+        status,
+        message: runtime.message,
+        debugContext: runtime.debugContext,
+      };
+    }
+    const preflight = await this.preflightGatewayRuntime(runtime);
+    return {
+      ok: preflight.ok,
+      root,
+      runtimeMode: runtime.runtime.mode,
+      distro: runtime.runtime.distro,
+      label: runtime.label,
+      status,
+      message: preflight.ok ? "Gateway 启动前检查通过。" : preflight.message,
+    };
+  }
+
   async start(options: { forceReplace?: boolean } = {}): Promise<HermesGatewayActionResult> {
+    if (this.gatewayStartPromise) {
+      return this.gatewayStartPromise;
+    }
+    const promise = this.startInternal(options);
+    this.gatewayStartPromise = promise;
+    try {
+      return await promise;
+    } finally {
+      if (this.gatewayStartPromise === promise) {
+        this.gatewayStartPromise = undefined;
+      }
+    }
+  }
+
+  private async startInternal(options: { forceReplace?: boolean } = {}): Promise<HermesGatewayActionResult> {
     const current = await this.status();
     if (current.running && !options.forceReplace) {
       this.gatewayAutoStartState = "running";
@@ -373,15 +433,53 @@ export class HermesConnectorService {
         message: `Gateway 正在退避期，请在 ${this.gatewayBackoffUntil} 后重试。`,
       };
     }
-    const root = await this.resolveHermesRoot();
+    let root: string;
+    try {
+      root = await this.resolveHermesRoot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。";
+      this.gatewayAutoStartState = "failed";
+      this.gatewayAutoStartMessage = message;
+      return {
+        ok: false,
+        status: { ...current, running: false, healthStatus: "error", message, lastError: message, checkedAt: new Date().toISOString() },
+        message,
+      };
+    }
     const runtime = await this.runtimeContext(root);
     this.gatewayAutoStartState = "starting";
     this.gatewayAutoStartMessage = "正在启动 Gateway...";
+    if (!runtime.ok) {
+      this.gatewayAutoStartState = "failed";
+      this.gatewayAutoStartMessage = runtime.message;
+      return {
+        ok: false,
+        status: { ...current, running: false, healthStatus: "error", message: runtime.message, lastError: runtime.message, checkedAt: new Date().toISOString() },
+        message: runtime.message,
+      };
+    }
     await this.clearGatewayRuntimeMarkers();
     const hermesEnv = await this.readEnvValues();
-    const launch = runtime.ok
-      ? await this.gatewayLaunchFromRuntime(runtime, hermesEnv)
-      : await this.legacyGatewayLaunch(root, hermesEnv, runtime.message);
+    const preflight = await this.preflightGatewayRuntime(runtime);
+    if (!preflight.ok) {
+      this.gatewayAutoStartState = "failed";
+      this.gatewayAutoStartMessage = preflight.message;
+      return {
+        ok: false,
+        status: { ...current, running: false, healthStatus: "error", message: preflight.message, lastError: preflight.message, checkedAt: new Date().toISOString() },
+        message: preflight.message,
+      };
+    }
+    const launch = await this.gatewayLaunchFromRuntime(runtime, hermesEnv);
+    console.info("[Hermes Forge] Gateway launch", {
+      command: launch.command,
+      args: launch.args,
+      cwd: launch.cwd,
+      label: launch.label,
+      runtimeMode: runtime.runtime.mode,
+      distro: runtime.runtime.distro,
+      hermesRoot: runtime.root,
+    });
     const child = spawn(launch.command, launch.args, {
       cwd: launch.cwd,
       env: launch.env,
@@ -452,6 +550,9 @@ export class HermesConnectorService {
   }
 
   async restart(): Promise<HermesGatewayActionResult> {
+    if (this.gatewayStartPromise) {
+      return this.gatewayStartPromise;
+    }
     await this.stop();
     return this.start({ forceReplace: true });
   }
@@ -1181,6 +1282,52 @@ export class HermesConnectorService {
     };
   }
 
+  private async preflightGatewayRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>): Promise<{ ok: true } | { ok: false; message: string }> {
+    const runtimeRoot = runtime.adapter.toRuntimePath(runtime.root);
+    const cliPath = runtime.runtime.mode === "wsl" ? `${runtimeRoot.replace(/\/+$/, "")}/hermes` : path.join(runtime.root, "hermes");
+    if (runtime.runtime.mode === "wsl") {
+      const validation = await validateWslHermesCli(runtime.runtime, cliPath);
+      console.info("[Hermes Forge] Gateway WSL preflight", {
+        distro: runtime.runtime.distro,
+        hermesRoot: runtimeRoot,
+        cliPath,
+        ok: validation.ok,
+        command: validation.command,
+        exitCode: validation.result?.exitCode,
+        stderr: validation.result?.stderr,
+      });
+      if (!validation.ok) {
+        return { ok: false, message: validation.message };
+      }
+      return { ok: true };
+    }
+    const launch = await runtime.adapter.buildHermesLaunch({
+      runtime: runtime.runtime,
+      rootPath: runtimeRoot,
+      pythonArgs: [cliPath, "capabilities", "--json"],
+      cwd: runtime.root,
+      env: { ...PYTHON_ENV, PYTHONPATH: runtimeRoot },
+    });
+    const result = await runCommand(launch.command, launch.args, {
+      cwd: launch.cwd,
+      timeoutMs: 20_000,
+      env: launch.env,
+      commandId: "connector.gateway.preflight.capabilities",
+      runtimeKind: runtime.runtime.mode,
+    });
+    console.info("[Hermes Forge] Gateway preflight", {
+      command: launch.command,
+      args: launch.args,
+      cwd: launch.cwd,
+      runtimeMode: runtime.runtime.mode,
+      exitCode: result.exitCode,
+      stderr: result.stderr,
+    });
+    return result.exitCode === 0
+      ? { ok: true }
+      : { ok: false, message: `Gateway 启动前 capabilities --json 检查失败：${result.stderr || result.stdout || `exit ${result.exitCode ?? "unknown"}`}` };
+  }
+
   private async gatewayLaunchFromRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>, hermesEnv: Record<string, string>) {
     const runtimeRoot = runtime.adapter.toRuntimePath(runtime.root);
     const cliPath = runtime.runtime.mode === "wsl" ? `${runtimeRoot.replace(/\/+$/, "")}/hermes` : path.join(runtime.root, "hermes");
@@ -1233,6 +1380,19 @@ export class HermesConnectorService {
       cwd: root,
       env: PYTHON_ENV,
     };
+  }
+
+  private async gatewayStatusFallback(root: string, reason: string) {
+    const config = await this.readRuntimeConfig?.().catch(() => undefined);
+    if (config?.hermesRuntime?.mode === "wsl") {
+      return {
+        command: "wsl.exe",
+        args: ["--", "bash", "-lc", "printf %s \"$1\" >&2; exit 1", "bash", reason],
+        cwd: process.cwd(),
+        env: process.env,
+      };
+    }
+    return this.legacyGatewayStatusLaunch(root);
   }
 
   private async preflightWeixinDependenciesWithRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>): Promise<WeixinQrLoginStatus | undefined> {
@@ -1340,7 +1500,7 @@ export class HermesConnectorService {
         cwd: root,
         env: { ...PYTHON_ENV, PYTHONPATH: runtime.adapter.toRuntimePath(root) },
       })
-      : await this.legacyGatewayStatusLaunch(root);
+      : await this.gatewayStatusFallback(root, runtime.message);
     const result = await runCommand(launch.command, launch.args, {
       cwd: launch.cwd,
       timeoutMs: 10000,

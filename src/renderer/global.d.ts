@@ -30,6 +30,10 @@ import type {
   HermesWebUiSettings,
   ModelConnectionTestResult,
   ManagedWslInstallerIpcResult,
+  OneClickDiagnosticsExportResult,
+  OneClickDiagnosticsReport,
+  OneClickDiagnosticsRunOptions,
+  OneClickDiagnosticsStatus,
   LocalModelDiscoveryResult,
   QuickTextFileInput,
   QuickTextFileResult,
@@ -202,6 +206,7 @@ declare global {
       testHermesSystemAudit(): Promise<HermesSystemAuditResult>;
       updateHermesConfig(input: unknown): Promise<RuntimeConfig>;
       updateModelConfig(input: unknown): Promise<RuntimeConfig>;
+      setDefaultModel(modelId: string): Promise<{ success: boolean; code?: string; message?: string; defaultModelId?: string; models?: RuntimeConfig["modelProfiles"] }>;
       saveRuntimeConfig(config: RuntimeConfig): Promise<RuntimeConfig>;
       testModelConnection(input?: string | Record<string, unknown>): Promise<ModelConnectionTestResult>;
       discoverLocalModelSources(): Promise<LocalModelDiscoveryResult>;
@@ -211,6 +216,9 @@ declare global {
       deleteSecret(ref: string): Promise<{ ref: string; existed: boolean }>;
       hasSecret(ref: string): Promise<SecretRefStatus>;
       exportDiagnostics(workspacePath?: string): Promise<DiagnosticExportResult>;
+      runOneClickDiagnostics(options?: OneClickDiagnosticsRunOptions): Promise<OneClickDiagnosticsReport>;
+      exportOneClickDiagnostics(workspacePath?: string): Promise<OneClickDiagnosticsExportResult>;
+      getOneClickDiagnosticsStatus(): Promise<OneClickDiagnosticsStatus>;
       onTaskEvent(callback: (event: TaskEventEnvelope) => void): () => void;
     };
   }

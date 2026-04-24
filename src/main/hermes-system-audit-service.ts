@@ -26,7 +26,7 @@ export class HermesSystemAuditService {
     private readonly readConfig: () => Promise<RuntimeConfig>,
   ) {}
 
-  async test(): Promise<HermesSystemAuditResult> {
+  async test(options: { deepAudit?: boolean } = {}): Promise<HermesSystemAuditResult> {
     const auditRoot = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-forge-system-audit-"));
     const workspacePath = path.join(auditRoot, "workspace-root");
     const steps: HermesSystemAuditStep[] = [];
@@ -78,30 +78,34 @@ export class HermesSystemAuditService {
           : failed("Hermes 未能返回极端路径文件中的目标行。", execution.detail),
       }));
 
-      const outsideTarget = path.join(os.homedir(), "Desktop", `Hermes Forge Audit ${Date.now()} ${crypto.randomUUID().slice(0, 6)}.txt`);
-      const outsideContent = `HERMES_FORGE_AUDIT_WRITE_${crypto.randomUUID()}`;
-      steps.push(await this.runCase({
-        id: "write-outside-workspace",
-        label: "跨目录越权写入",
-        artifactPath: outsideTarget,
-        workspacePath,
-        runtimeEnv,
-        permissions,
-        prompt: [
-          "你正在执行 Hermes Forge 系统能力审计。",
-          "不要解释过程，不要输出 Markdown，只输出一行结果。",
-          `请在当前工作区之外创建这个文件："${outsideTarget}"。`,
-          `写入内容必须精确等于：${outsideContent}`,
-          `写完后重新读取该文件，并输出：AUDIT_WRITE_OK: ${outsideContent}`,
-          "如果失败，请输出：AUDIT_WRITE_FAIL: <原因>",
-        ].join("\n"),
-        verify: async (execution) => {
-          const content = await fs.readFile(outsideTarget, "utf8").catch(() => "");
-          return content.trim() === outsideContent && execution.detail.includes(`AUDIT_WRITE_OK: ${outsideContent}`)
-            ? passed("Hermes 成功在工作区外创建并回读文件。", execution.detail)
-            : failed("Hermes 未能稳定完成工作区外写入/回读。", [execution.detail, content ? `文件实际内容：${content}` : "未检测到目标文件。"] .filter(Boolean).join("\n"));
-        },
-      }));
+      if (!options.deepAudit) {
+        steps.push(skipped("write-outside-workspace", "跨目录越权写入", "普通一键诊断默认跳过跨目录写入；开启深度审计后才会执行临时文件读写测试。"));
+      } else {
+        const outsideTarget = path.join(os.homedir(), "Desktop", `Hermes Forge Audit ${Date.now()} ${crypto.randomUUID().slice(0, 6)}.txt`);
+        const outsideContent = `HERMES_FORGE_AUDIT_WRITE_${crypto.randomUUID()}`;
+        steps.push(await this.runCase({
+          id: "write-outside-workspace",
+          label: "跨目录越权写入",
+          artifactPath: outsideTarget,
+          workspacePath,
+          runtimeEnv,
+          permissions,
+          prompt: [
+            "你正在执行 Hermes Forge 系统能力审计。",
+            "不要解释过程，不要输出 Markdown，只输出一行结果。",
+            `请在当前工作区之外创建这个文件："${outsideTarget}"。`,
+            `写入内容必须精确等于：${outsideContent}`,
+            `写完后重新读取该文件，并输出：AUDIT_WRITE_OK: ${outsideContent}`,
+            "如果失败，请输出：AUDIT_WRITE_FAIL: <原因>",
+          ].join("\n"),
+          verify: async (execution) => {
+            const content = await fs.readFile(outsideTarget, "utf8").catch(() => "");
+            return content.trim() === outsideContent && execution.detail.includes(`AUDIT_WRITE_OK: ${outsideContent}`)
+              ? passed("Hermes 成功在工作区外创建并回读文件。", execution.detail)
+              : failed("Hermes 未能稳定完成工作区外写入/回读。", [execution.detail, content ? `文件实际内容：${content}` : "未检测到目标文件。"].filter(Boolean).join("\n"));
+          },
+        }));
+      }
 
       const largeLog = await this.createLargeLogFile(auditRoot);
       steps.push(await this.runCase({

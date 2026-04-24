@@ -14,6 +14,10 @@ import type {
   HermesStatusSummary,
   ModelConnectionTestResult,
   ManagedWslInstallerIpcResult,
+  OneClickDiagnosticsExportResult,
+  OneClickDiagnosticsReport,
+  OneClickDiagnosticsRunOptions,
+  OneClickDiagnosticsStatus,
   LocalModelDiscoveryResult,
   QuickTextFileInput,
   QuickTextFileResult,
@@ -219,6 +223,7 @@ const api = {
     ipcRenderer.invoke(IpcChannels.testHermesSystemAudit) as Promise<HermesSystemAuditResult>,
   updateHermesConfig: (input: unknown) => ipcRenderer.invoke(IpcChannels.updateHermesConfig, input) as Promise<RuntimeConfig>,
   updateModelConfig: (input: unknown) => ipcRenderer.invoke(IpcChannels.updateModelConfig, input) as Promise<RuntimeConfig>,
+  setDefaultModel: (modelId: string) => ipcRenderer.invoke(IpcChannels.setDefaultModel, { modelId }) as Promise<{ success: boolean; code?: string; message?: string; defaultModelId?: string; models?: RuntimeConfig["modelProfiles"] }>,
   saveRuntimeConfig: (config: RuntimeConfig) =>
     ipcRenderer.invoke(IpcChannels.saveRuntimeConfig, config) as Promise<RuntimeConfig>,
   testModelConnection: (input?: string | Record<string, unknown>) =>
@@ -234,6 +239,12 @@ const api = {
   hasSecret: (ref: string) => ipcRenderer.invoke(IpcChannels.hasSecret, ref) as Promise<SecretRefStatus>,
   exportDiagnostics: (workspacePath?: string) =>
     ipcRenderer.invoke(IpcChannels.exportDiagnostics, workspacePath) as Promise<DiagnosticExportResult>,
+  runOneClickDiagnostics: (options?: OneClickDiagnosticsRunOptions) =>
+    ipcRenderer.invoke(IpcChannels.oneClickDiagnosticsRun, options) as Promise<OneClickDiagnosticsReport>,
+  exportOneClickDiagnostics: (workspacePath?: string) =>
+    ipcRenderer.invoke(IpcChannels.oneClickDiagnosticsExport, workspacePath) as Promise<OneClickDiagnosticsExportResult>,
+  getOneClickDiagnosticsStatus: () =>
+    ipcRenderer.invoke(IpcChannels.oneClickDiagnosticsStatus) as Promise<OneClickDiagnosticsStatus>,
   onTaskEvent: (callback: (event: TaskEventEnvelope) => void) => {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: TaskEventEnvelope) => callback(payload);
     ipcRenderer.on(IpcChannels.taskEvent, wrapped);

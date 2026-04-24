@@ -2,12 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AppPaths } from "./app-paths";
 import type { EngineEvent, SessionAgentInsightUsage, TaskEventEnvelope } from "../shared/types";
-
-const SECRET_PATTERNS = [
-  /sk-[A-Za-z0-9_-]{12,}/g,
-  /Bearer\s+[A-Za-z0-9._-]+/gi,
-  /-----BEGIN [A-Z ]+PRIVATE KEY-----[\s\S]*?-----END [A-Z ]+PRIVATE KEY-----/g,
-];
+import { redactSensitiveValue } from "../shared/redaction";
 
 export class SessionLog {
   constructor(private readonly appPaths: AppPaths) {}
@@ -141,8 +136,6 @@ export class SessionLog {
   }
 
   redact<T>(value: T): T {
-    const raw = JSON.stringify(value);
-    const safe = SECRET_PATTERNS.reduce((text, pattern) => text.replace(pattern, "[REDACTED]"), raw);
-    return JSON.parse(safe) as T;
+    return redactSensitiveValue(value);
   }
 }

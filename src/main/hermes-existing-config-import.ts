@@ -6,7 +6,7 @@ import type { SecretVault } from "../auth/secret-vault";
 import type { HermesConnectorService } from "./hermes-connector-service";
 import type { RuntimeConfigStore } from "./runtime-config";
 import type { HermesConnectorPlatformId, HermesExistingConfigImportResult, ModelProfile, ProviderId } from "../shared/types";
-import { normalizeOpenAiCompatibleBaseUrl } from "../shared/model-config";
+import { normalizeOpenAiCompatibleBaseUrl, stableModelProfileId } from "../shared/model-config";
 
 type HermesModelBlock = {
   provider?: string;
@@ -134,7 +134,8 @@ function buildImportedModelProfile(envValues: Record<string, string>, modelBlock
   const secretRef = resolveImportedModelSecretRef(envValues, sourceType, provider, baseUrl);
 
   return {
-    id: buildImportedProfileId(sourceType, provider),
+    id: stableModelProfileId({ provider, model, baseUrl }),
+    name: friendlyImportedProfileName(provider, model),
     provider,
     model,
     ...(baseUrl ? { baseUrl } : {}),
@@ -168,11 +169,6 @@ function providerForImportedSource(sourceType: string): ProviderId {
   return "custom";
 }
 
-function buildImportedProfileId(sourceType: string, provider: ProviderId) {
-  if (provider === "anthropic") return "imported-anthropic";
-  return `wizard-${sourceType}`;
-}
-
 function resolveImportedModelSecretRef(envValues: Record<string, string>, sourceType: string, provider: ProviderId, baseUrl?: string) {
   const secret = resolveImportedModelSecret(envValues, provider, baseUrl);
   if (!secret) return undefined;
@@ -189,6 +185,11 @@ function resolveImportedModelSecretRef(envValues: Record<string, string>, source
   if (sourceType === "zhipu") return "provider.zhipu.apiKey";
   if (sourceType === "local_openai") return "provider.local.apiKey";
   return "provider.custom.apiKey";
+}
+
+function friendlyImportedProfileName(provider: ProviderId, model: string) {
+  if (provider === "custom") return `Imported · ${model}`;
+  return `${provider} · ${model}`;
 }
 
 function resolveImportedModelSecret(envValues: Record<string, string>, provider: ProviderId, baseUrl?: string) {

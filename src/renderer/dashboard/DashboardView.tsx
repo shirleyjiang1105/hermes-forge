@@ -1,4 +1,3 @@
-import { useEffect, useRef } from "react";
 import { PanelLeftOpen } from "lucide-react";
 import type { SessionMetaPatch, WorkSession } from "../../shared/types";
 import { useAppStore } from "../store";
@@ -46,8 +45,6 @@ export function DashboardView(props: {
     .map((taskRunId) => store.taskRunProjectionsById[taskRunId])
     .filter((run): run is NonNullable<typeof run> => Boolean(run));
 
-  const hasRefreshed = useRef(false);
-
   function toggleInspector() {
     const nextOpen = !store.inspectorOpen;
     store.setInspectorOpen(nextOpen);
@@ -59,18 +56,6 @@ export function DashboardView(props: {
     store.setAgentPanelOpen(nextOpen);
     if (nextOpen) store.setInspectorOpen(false);
   }
-
-  useEffect(() => {
-    if (hasRefreshed.current) return;
-    hasRefreshed.current = true;
-    
-    // 延迟500ms再加载，让UI先渲染
-    const timer = setTimeout(() => {
-      void props.onRefreshWebUiOverview?.();
-    }, 500);
-    
-    return () => clearTimeout(timer);
-  }, []);
 
   return (
     <section className="absolute inset-0 flex overflow-hidden bg-[#f6f8fb] text-slate-900">

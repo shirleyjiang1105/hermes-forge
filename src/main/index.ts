@@ -2,7 +2,6 @@ import { app, BrowserWindow } from "electron";
 import path from "node:path";
 import { AppPaths } from "./app-paths";
 import { AutoHotkeyService } from "./autohotkey-service";
-import { resolveActiveHermesHome } from "./hermes-home";
 import { registerIpcHandlers } from "./ipc";
 import { RuntimeConfigStore } from "./runtime-config";
 import { RuntimeEnvResolver } from "./runtime-env-resolver";
@@ -21,7 +20,6 @@ import { buildPermissionOverview } from "./permission-overview-service";
 import { FileTreeService } from "../file-manager/file-tree-service";
 import { HermesConnectorService } from "./hermes-connector-service";
 import { HermesModelSyncService } from "./hermes-model-sync";
-import { syncHermesWindowsMcpConfig } from "./hermes-native-mcp-config";
 import { HermesWebUiService } from "./hermes-webui-service";
 import { ModelRuntimeProxyService } from "./model-runtime-proxy";
 import { MemoryBudgeter } from "../memory/memory-budgeter";
@@ -40,6 +38,7 @@ import { resolveEnginePermissions } from "../shared/types";
 import { NativeRuntimeAdapter } from "../runtime/native-runtime-adapter";
 import { RuntimeProbeService } from "../runtime/runtime-probe-service";
 import { RuntimeResolver as HermesRuntimeResolver } from "../runtime/runtime-resolver";
+import { resolveHermesCliForRuntime } from "../runtime/hermes-cli-resolver";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import { ShutdownPipeline } from "../runtime/runtime-diagnostics";
 import { WslRuntimeAdapter } from "../runtime/wsl-runtime-adapter";
@@ -52,6 +51,7 @@ import { WslDistroService } from "../install/wsl-distro-service";
 import { WslHermesInstallService } from "../install/wsl-hermes-install-service";
 import { WslRepairService } from "../install/wsl-repair-service";
 import { ManagedWslInstallerService } from "../install/managed-wsl-installer-service";
+import { OneClickDiagnosticsOrchestrator } from "./diagnostics/one-click-diagnostics-orchestrator";
 
 const portableRoot = process.env.PORTABLE_EXECUTABLE_DIR;
 const isPortable = Boolean(portableRoot);
@@ -61,78 +61,6 @@ const isSystemAuditMode = process.argv.includes("--system-audit") || process.env
 let mainWindow: BrowserWindow | undefined;
 let windowsControlBridge: WindowsControlBridge | undefined;
 let shutdownStarted = false;
-
-async function syncWindowsBridgeConfig(input: {
-  appPaths: AppPaths;
-  configStore: RuntimeConfigStore;
-  bridge?: WindowsControlBridge;
-  runtimeAdapterFactory: RuntimeAdapterFactory;
-}) {
-  const config = await input.configStore.read();
-  const runtime = {
-    mode: config.hermesRuntime?.mode ?? "windows",
-    distro: config.hermesRuntime?.distro?.trim() || undefined,
-    pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
-    windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-  };
-  const permissions = resolveEnginePermissions(config, "hermes");
-  const bridge = permissions.enabled && permissions.contextBridge && runtime.windowsAgentMode !== "disabled"
-    ? input.bridge
-    : undefined;
-  if (bridge) {
-    await bridge.start();
-  }
-  const host = await input.runtimeAdapterFactory(runtime).getBridgeAccessHost();
-  const hermesHome = await resolveActiveHermesHome(input.appPaths.hermesDir());
-  return syncHermesWindowsMcpConfig({
-    runtime,
-    hermesHome,
-    bridge: bridge?.accessForHost(host),
-  });
-}
-
-function scheduleStartupWarmup(input: {
-  hermes: HermesCliAdapter;
-  configStore: RuntimeConfigStore;
-  runtimeEnvResolver: RuntimeEnvResolver;
-}) {
-  setTimeout(() => {
-    void runStartupWarmup(input);
-  }, 1200);
-}
-
-async function runStartupWarmup(input: {
-  hermes: HermesCliAdapter;
-  configStore: RuntimeConfigStore;
-  runtimeEnvResolver: RuntimeEnvResolver;
-}) {
-  const config = await input.configStore.read().catch(() => undefined);
-  const mode = config?.startupWarmupMode ?? "cheap";
-  if (mode === "off") return;
-
-  await input.hermes.healthCheck().catch(() => undefined);
-  if (mode === "real_probe") {
-    await input.runtimeEnvResolver.resolve(config?.defaultModelProfileId).catch(() => undefined);
-  }
-}
-
-function scheduleStartupGateway(input: {
-  hermesConnectorService: HermesConnectorService;
-}) {
-  setTimeout(() => {
-    void runStartupGateway(input);
-  }, 1800);
-}
-
-async function runStartupGateway(input: {
-  hermesConnectorService: HermesConnectorService;
-}) {
-  try {
-    await input.hermesConnectorService.autoStartIfConfigured();
-  } catch (error) {
-    console.warn("[Hermes Forge] Gateway auto-start crashed:", error);
-  }
-}
 
 app.whenReady().then(async () => {
   app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
@@ -161,9 +89,20 @@ app.whenReady().then(async () => {
   const configStore = new RuntimeConfigStore(appPaths.runtimeConfigPath());
   const resolveHermesRoot = async () => {
     const config = await configStore.read();
-    return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
-      ? config.hermesRuntime.managedRoot.trim()
-      : configStore.getEnginePath("hermes");
+    const runtime = {
+      mode: config.hermesRuntime?.mode ?? "windows",
+      distro: config.hermesRuntime?.distro?.trim() || undefined,
+      pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
+      managedRoot: config.hermesRuntime?.managedRoot?.trim() || undefined,
+      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
+      cliPermissionMode: config.hermesRuntime?.cliPermissionMode ?? "yolo",
+      permissionPolicy: config.hermesRuntime?.permissionPolicy ?? "bridge_guarded",
+      installSource: config.hermesRuntime?.installSource,
+    };
+    if (runtime.mode === "wsl") {
+      return (await resolveHermesCliForRuntime(configStore, runtime)).rootPath;
+    }
+    return configStore.getEnginePath("hermes");
   };
   const hermesRuntimeResolver = new HermesRuntimeResolver(appPaths, resolveHermesRoot);
   const approvalService = new ApprovalService(appPaths);
@@ -189,7 +128,6 @@ app.whenReady().then(async () => {
     () => app.getVersion(),
     windowsToolExecutor,
   );
-  await windowsControlBridge.start();
   const runtimeProbeService = new RuntimeProbeService(configStore, hermesRuntimeResolver, windowsControlBridge, fetch);
   const runtimeAdapterFactory: RuntimeAdapterFactory = (runtime) =>
     runtime.mode === "wsl"
@@ -242,12 +180,9 @@ app.whenReady().then(async () => {
   const modelRuntimeProxyService = new ModelRuntimeProxyService();
   const runtimeEnvResolver = new RuntimeEnvResolver(configStore, secretVault, modelRuntimeProxyService);
   const hermesModelSyncService = new HermesModelSyncService(runtimeEnvResolver, () => appPaths.hermesDir());
-  await hermesModelSyncService.syncRuntimeConfig(await configStore.read()).catch((error) => {
-    console.warn("[Hermes Forge] Model sync during startup failed:", error);
-  });
-  await syncWindowsBridgeConfig({ appPaths, configStore, bridge: windowsControlBridge, runtimeAdapterFactory }).catch((error) => {
-    console.warn("[Hermes Forge] Windows bridge sync during startup failed:", error);
-  });
+  // Startup must stay lightweight: model/bridge synchronization can touch WSL,
+  // Hermes files, or local bridge processes, so it is deferred to explicit UI
+  // actions and config-save paths.
   const hermesSystemAuditService = new HermesSystemAuditService(
     appPaths,
     hermes,
@@ -394,6 +329,18 @@ app.whenReady().then(async () => {
     () => mainWindow,
     hermesToolLoopRunner,
   );
+  const activeOneClickDiagnosticsOrchestrator = new OneClickDiagnosticsOrchestrator(
+    configStore,
+    setupService,
+    runtimeProbeService,
+    wslDoctorService,
+    hermesConnectorService,
+    hermesModelSyncService,
+    hermesSystemAuditService,
+    diagnosticsService,
+    workspaceLock,
+    taskRunner,
+  );
 
   registerIpcHandlers(mainWindow, {
     appPaths,
@@ -422,6 +369,7 @@ app.whenReady().then(async () => {
     approvalService,
     runtimeAdapterFactory,
     managedWslInstallerService,
+    oneClickDiagnosticsOrchestrator: activeOneClickDiagnosticsOrchestrator,
     clientInfo: () => ({
       appVersion: app.getVersion(),
       userDataPath,
@@ -430,9 +378,9 @@ app.whenReady().then(async () => {
     }),
   });
 
-  scheduleStartupWarmup({ hermes, configStore, runtimeEnvResolver });
-  scheduleStartupGateway({ hermesConnectorService });
-  clientAutoUpdateService.scheduleStartupCheck(5000);
+  // Heavy startup probes are intentionally disabled by default. Users can still
+  // refresh Hermes status, run setup checks, or start Gateway from the UI.
+  clientAutoUpdateService.scheduleStartupCheck(30000);
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
