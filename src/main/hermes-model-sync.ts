@@ -3,7 +3,9 @@ import os from "node:os";
 import path from "node:path";
 import { resolveActiveHermesHome } from "./hermes-home";
 import type { RuntimeEnvResolver } from "./runtime-env-resolver";
-import type { EngineRuntimeEnv, ModelProfile, ProviderId, RuntimeConfig } from "../shared/types";
+import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
+import { runCommand } from "../process/command-runner";
+import type { EngineRuntimeEnv, ModelProfile, ModelRole, ProviderId, RuntimeConfig } from "../shared/types";
 
 const MANAGED_ENV_START = "# >>> Hermes Forge Model Runtime >>>";
 const MANAGED_ENV_END = "# <<< Hermes Forge Model Runtime <<<";
@@ -15,6 +17,7 @@ export type HermesModelSyncResult = {
   profileId?: string;
   model?: string;
   provider?: string;
+  roles?: Partial<Record<ModelRole, { profileId: string; model: string; provider: string; baseUrl?: string; wslReachable?: boolean; wslProbeMessage?: string; consumedByHermes?: boolean; syncNote?: string }>>;
   configPath: string;
   envPath: string;
 };
@@ -29,28 +32,56 @@ export class HermesModelSyncService {
   constructor(
     private readonly runtimeEnvResolver: RuntimeEnvResolver,
     private readonly hermesHomeBase: () => string = () => path.join(os.homedir(), ".hermes"),
+    private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
   ) {}
 
   async syncRuntimeConfig(config: RuntimeConfig): Promise<HermesModelSyncResult> {
     const hermesHome = await this.activeHermesHome();
     const configPath = path.join(hermesHome, "config.yaml");
     const envPath = path.join(hermesHome, ".env");
-    const profile = selectDefaultProfile(config);
-    if (!profile || !profile.model.trim()) {
+    const chatProfile = selectRoleProfile(config, "chat");
+    if (!chatProfile || !chatProfile.model.trim()) {
       return { ok: true, synced: false, skippedReason: "missing-model-profile", configPath, envPath };
     }
-    if (profile.provider === "local") {
-      return { ok: true, synced: false, skippedReason: "local-placeholder-model", profileId: profile.id, configPath, envPath };
+    if (chatProfile.provider === "local") {
+      return { ok: true, synced: false, skippedReason: "local-placeholder-model", profileId: chatProfile.id, configPath, envPath };
     }
 
-    const runtimeEnv = await this.runtimeEnvResolver.resolveFromConfig(config, profile.id);
-    const provider = toHermesProvider(profile.provider);
+    const chatRuntimeEnv = await this.runtimeEnvResolver.resolveFromConfig(config, chatProfile.id, "chat");
+    const provider = toHermesProvider(chatProfile.provider);
     const modelConfig: HermesModelConfig = {
       provider,
-      model: runtimeEnv.model,
-      baseUrl: runtimeEnv.baseUrl,
+      model: chatRuntimeEnv.model,
+      baseUrl: await this.toRuntimeReachableBaseUrl(config, chatRuntimeEnv.baseUrl),
     };
-    const modelEnv = buildModelEnv(runtimeEnv, provider);
+    const roles: NonNullable<HermesModelSyncResult["roles"]> = {
+      chat: {
+        profileId: chatRuntimeEnv.profileId,
+        model: chatRuntimeEnv.model,
+        provider,
+        baseUrl: modelConfig.baseUrl,
+        consumedByHermes: true,
+        ...(await this.probeWslRole(config, hermesHome, modelConfig.baseUrl)),
+      },
+    };
+    const envBlocks = [await this.buildRoleEnv(config, "chat", chatRuntimeEnv, provider)];
+    const codingProfile = selectRoleProfile(config, "coding_plan");
+    if (codingProfile && codingProfile.id !== chatProfile.id && codingProfile.provider !== "local") {
+      const codingRuntimeEnv = await this.runtimeEnvResolver.resolveFromConfig(config, codingProfile.id, "coding_plan");
+      const codingProvider = toHermesProvider(codingProfile.provider);
+      const codingEnv = await this.buildRoleEnv(config, "coding_plan", codingRuntimeEnv, codingProvider);
+      envBlocks.push(codingEnv);
+      roles.coding_plan = {
+        profileId: codingRuntimeEnv.profileId,
+        model: codingRuntimeEnv.model,
+        provider: codingProvider,
+        baseUrl: codingEnv.HERMES_CODING_PLAN_BASE_URL ?? codingRuntimeEnv.baseUrl,
+        consumedByHermes: false,
+        syncNote: "已写入 Hermes Forge 托管配置；当前 Hermes Agent 未读取 HERMES_CODING_PLAN_*，不会自动切换 Coding Plan runtime。",
+        ...(await this.probeWslRole(config, hermesHome, codingEnv.HERMES_CODING_PLAN_BASE_URL ?? codingRuntimeEnv.baseUrl)),
+      };
+    }
+    const modelEnv = Object.assign({}, ...envBlocks);
 
     await fs.mkdir(hermesHome, { recursive: true });
     const existingConfig = await fs.readFile(configPath, "utf8").catch(() => "");
@@ -68,9 +99,10 @@ export class HermesModelSyncService {
     return {
       ok: true,
       synced: true,
-      profileId: profile.id,
-      model: runtimeEnv.model,
+      profileId: chatProfile.id,
+      model: chatRuntimeEnv.model,
       provider,
+      roles,
       configPath,
       envPath,
     };
@@ -79,12 +111,78 @@ export class HermesModelSyncService {
   private async activeHermesHome() {
     return await resolveActiveHermesHome(this.hermesHomeBase());
   }
+
+  private async buildRoleEnv(config: RuntimeConfig, role: ModelRole, runtimeEnv: EngineRuntimeEnv, hermesProvider: string) {
+    const reachableBaseUrl = await this.toRuntimeReachableBaseUrl(config, runtimeEnv.baseUrl);
+    return buildModelEnv({ ...runtimeEnv, baseUrl: reachableBaseUrl }, hermesProvider, role);
+  }
+
+  private async toRuntimeReachableBaseUrl(config: RuntimeConfig, baseUrl?: string) {
+    if (!baseUrl || config.hermesRuntime?.mode !== "wsl") return baseUrl;
+    const parsed = new URL(baseUrl);
+    if (!["127.0.0.1", "localhost", "::1"].includes(parsed.hostname)) return baseUrl;
+    const adapter = this.runtimeAdapterFactory?.(config.hermesRuntime);
+    if (!adapter) return baseUrl;
+    parsed.hostname = await adapter.getBridgeAccessHost();
+    return parsed.toString().replace(/\/$/, "");
+  }
+
+  private async probeWslRole(config: RuntimeConfig, hermesHome: string, baseUrl?: string) {
+    if (!baseUrl || config.hermesRuntime?.mode !== "wsl" || !this.runtimeAdapterFactory) return {};
+    const adapter = this.runtimeAdapterFactory(config.hermesRuntime);
+    const rootPath = adapter.toRuntimePath(hermesHome);
+    const script = [
+      "import sys, urllib.error, urllib.request",
+      "url = sys.argv[1].rstrip('/') + '/models'",
+      "req = urllib.request.Request(url, headers={'Authorization': 'Bearer hermes-forge-local-proxy-key'})",
+      "try:",
+      "    with urllib.request.urlopen(req, timeout=8) as resp:",
+      "        sys.exit(0 if 200 <= resp.status < 300 else 3)",
+      "except urllib.error.HTTPError as exc:",
+      "    print('HTTP %s' % exc.code)",
+      "    sys.exit(4 if exc.code in (401, 403) else 3)",
+      "except Exception as exc:",
+      "    print(str(exc))",
+      "    sys.exit(2)",
+    ].join("\n");
+    try {
+      const launch = await adapter.buildPythonLaunch({
+        runtime: config.hermesRuntime,
+        rootPath,
+        cwd: rootPath,
+        pythonArgs: ["-c", script, baseUrl],
+        env: {
+          PYTHONUTF8: "1",
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUNBUFFERED: "1",
+        },
+      });
+      const result = await runCommand(launch.command, launch.args, {
+        cwd: launch.cwd,
+        timeoutMs: 12_000,
+        env: launch.env,
+        detached: launch.detached,
+        runtimeKind: "wsl",
+        commandId: "hermes-model-sync.wsl-role-probe",
+      });
+      return result.exitCode === 0
+        ? { wslReachable: true, wslProbeMessage: `WSL 可访问 ${baseUrl}` }
+        : { wslReachable: false, wslProbeMessage: result.stderr || result.stdout || `WSL 访问 ${baseUrl} 失败。` };
+    } catch (error) {
+      return {
+        wslReachable: false,
+        wslProbeMessage: error instanceof Error ? error.message : `WSL 访问 ${baseUrl} 失败。`,
+      };
+    }
+  }
 }
 
-function selectDefaultProfile(config: RuntimeConfig): ModelProfile | undefined {
+function selectRoleProfile(config: RuntimeConfig, role: ModelRole): ModelProfile | undefined {
+  const roleProfileId = config.modelRoleAssignments?.[role] ?? (role === "chat" ? config.defaultModelProfileId : undefined);
   return (
-    config.modelProfiles.find((item) => item.id === config.defaultModelProfileId) ??
-    config.modelProfiles[0]
+    config.modelProfiles.find((item) => item.id === roleProfileId) ??
+    (role === "chat" ? config.modelProfiles.find((item) => item.id === config.defaultModelProfileId) : undefined) ??
+    (role === "chat" ? config.modelProfiles[0] : undefined)
   );
 }
 
@@ -99,10 +197,23 @@ function toHermesProvider(provider: ProviderId) {
   return provider;
 }
 
-function buildModelEnv(runtimeEnv: EngineRuntimeEnv, hermesProvider: string) {
+function buildModelEnv(runtimeEnv: EngineRuntimeEnv, hermesProvider: string, role: ModelRole = "chat") {
+  if (role === "coding_plan") {
+    const env: Record<string, string> = {
+      HERMES_FORGE_CODING_PLAN_MODEL_PROFILE_ID: runtimeEnv.profileId,
+      HERMES_CODING_PLAN_PROVIDER: hermesProvider,
+      HERMES_CODING_PLAN_MODEL: runtimeEnv.model,
+      HERMES_CODING_PLAN_BASE_URL: runtimeEnv.baseUrl ?? "",
+      HERMES_CODING_PLAN_API_KEY: runtimeEnv.env.OPENAI_API_KEY ?? runtimeEnv.env.AI_API_KEY ?? runtimeEnv.env.ANTHROPIC_API_KEY ?? "",
+    };
+    return Object.fromEntries(
+      Object.entries(env).filter((entry): entry is [string, string] => Boolean(entry[1]?.trim())),
+    );
+  }
   const env: Record<string, string> = {
     HERMES_INFERENCE_PROVIDER: hermesProvider,
     HERMES_FORGE_MODEL_PROFILE_ID: runtimeEnv.profileId,
+    HERMES_FORGE_CHAT_MODEL_PROFILE_ID: role === "chat" ? runtimeEnv.profileId : "",
     AI_PROVIDER: runtimeEnv.provider,
     AI_MODEL: runtimeEnv.model,
     OPENAI_MODEL: runtimeEnv.model,

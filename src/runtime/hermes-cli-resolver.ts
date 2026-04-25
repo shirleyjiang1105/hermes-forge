@@ -171,6 +171,17 @@ export async function validateWslHermesCli(
   const command = `wsl.exe ${args.join(" ")}`;
   if (result.exitCode !== 0) {
     const output = (result.stderr || result.stdout || "").trim();
+    const fallback = await probeHermesVersionAsFallback(runtime, cliPath, pythonCommand, rootPath);
+    if (fallback) {
+      return {
+        ok: false,
+        kind: "capability_unsupported",
+        message: fallback.message,
+        command: fallback.command,
+        result: fallback.result,
+        capabilities: fallback.capabilities,
+      };
+    }
     return {
       ok: false,
       kind: "capability_failed",
@@ -374,4 +385,65 @@ function formatCapabilityFailureMessage(exitCode: number | null | undefined, out
 function detectMissingPythonModule(output: string) {
   const match = output.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/i);
   return match?.[1];
+}
+
+async function probeHermesVersionAsFallback(
+  runtime: HermesRuntimeConfig,
+  cliPath: string,
+  pythonCommand: string,
+  rootPath: string,
+): Promise<{ capabilities: NonNullable<ResolvedHermesCli["capabilities"]>; command: string; result: CommandResult; message: string } | undefined> {
+  const versionArgs = [
+    ...wslDistroArgs(runtime),
+    "--",
+    "bash",
+    "-lc",
+    `cd ${shellQuote(rootPath)} && exec ${shellQuote(pythonCommand)} ${shellQuote(cliPath)} --version`,
+  ];
+  const versionResult = await runCommand("wsl.exe", versionArgs, {
+    cwd: process.cwd(),
+    timeoutMs: 20_000,
+    commandId: "hermes-cli.validate.version-fallback",
+    runtimeKind: "wsl",
+  });
+  if (versionResult.exitCode !== 0) {
+    return undefined;
+  }
+  const version = parseHermesVersion(versionResult.stdout);
+  if (!version || !isAtLeastVersion(version, "0.11.0")) {
+    return undefined;
+  }
+  return {
+    capabilities: {
+      cliVersion: version,
+      supportsLaunchMetadataArg: false,
+      supportsLaunchMetadataEnv: false,
+      supportsResume: true,
+      raw: versionResult.stdout,
+    },
+    command: `wsl.exe ${versionArgs.join(" ")}`,
+    result: versionResult,
+    message: `检测到 Hermes CLI ${version}（官方 v0.11.0+），但该版本不支持 Forge 所需的 launch metadata 能力（--launch-metadata / HERMES_FORGE_LAUNCH_METADATA）。请使用兼容版本（Mahiruxia/hermes-agent fork 或打了 patch 的 v0.11.0）。`,
+  };
+}
+
+function parseHermesVersion(output: string): string | undefined {
+  const match = output.trim().match(/(?:hermes\s+v?|v?)(\d+\.\d+(?:\.\d+(?:[-+.]?\w+)?)?)/i);
+  return match?.[1];
+}
+
+function isAtLeastVersion(version: string, min: string): boolean {
+  const parse = (v: string) => v.split(/[.-]/).map((n) => {
+    const int = parseInt(n, 10);
+    return Number.isNaN(int) ? 0 : int;
+  });
+  const a = parse(version);
+  const b = parse(min);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const ai = a[i] ?? 0;
+    const bi = b[i] ?? 0;
+    if (ai > bi) return true;
+    if (ai < bi) return false;
+  }
+  return true;
 }

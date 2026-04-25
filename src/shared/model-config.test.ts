@@ -37,4 +37,20 @@ describe("model config helpers", () => {
     expect(migrated.modelProfiles.map((item) => item.id)).toContain(expectedId);
     expect(migrated.defaultModelProfileId).toBe(expectedId);
   });
+
+  it("mirrors the legacy default model into the chat role assignment", () => {
+    const migrated = migrateRuntimeConfigModels({
+      defaultModelProfileId: "kimi-main",
+      modelProfiles: [
+        { id: "kimi-main", provider: "custom", model: "moonshot-v1-128k", baseUrl: "https://api.moonshot.cn/v1" },
+        { id: "doubao-coding", provider: "custom", model: "doubao-coding", baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3" },
+      ],
+      modelRoleAssignments: { coding_plan: "doubao-coding" },
+    });
+
+    expect(migrated.modelRoleAssignments).toMatchObject({
+      chat: "kimi-main",
+      coding_plan: "doubao-coding",
+    });
+  });
 });

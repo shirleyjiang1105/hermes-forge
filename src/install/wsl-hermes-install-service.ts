@@ -18,10 +18,25 @@ import {
 } from "./managed-wsl-recovery-types";
 
 const DEFAULT_HERMES_REPO_URL = "https://github.com/NousResearch/hermes-agent.git";
+/**
+ * Pinned fork source: Mahiruxia/hermes-agent@codex/launch-metadata-capabilities
+ *
+ * Reason: Official NousResearch/hermes-agent v0.11.0 does NOT support:
+ *   - `hermes capabilities --json`
+ *   - `--launch-metadata <path>` CLI arg
+ *   - `HERMES_FORGE_LAUNCH_METADATA` env var
+ *
+ * These capabilities are required for Forge WSL integration (workspace context,
+ * selected files, attachments, session resume). The fork rebases v0.11.0
+ * features on top of the launch-metadata patch.
+ *
+ * To upgrade: rebase the `codex/launch-metadata-capabilities` branch onto
+ * the latest official v0.11.0 tag, then update this commit hash.
+ */
 const DEFAULT_PINNED_SOURCE = {
   repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
   branch: "codex/launch-metadata-capabilities",
-  commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+  commit: "0537bad534a7ce43d683f06f8ebdf7ff9dfb4816",
   sourceLabel: "pinned" as const,
 };
 
@@ -1072,7 +1087,22 @@ export class WslHermesInstallService {
   private async verifyHermesInstall(runtime: WslDoctorReport["runtime"], hermesRoot: string, python: string): Promise<VerifyResult> {
     const version = await this.runInDistro(runtime, `${python} ${shellQuote(`${hermesRoot}/hermes`)} --version`, "install.wsl.hermes-version");
     const capabilities = await this.runInDistro(runtime, `${python} ${shellQuote(`${hermesRoot}/hermes`)} capabilities --json`, "install.wsl.hermes-capabilities");
-    const capabilityProbe = this.parseCapabilityProbe(capabilities);
+    let capabilityProbe = this.parseCapabilityProbe(capabilities);
+    // Detect official v0.11.0+ which lacks capabilities --json but supports --resume
+    if (!capabilityProbe.minimumSatisfied && version.exitCode === 0) {
+      const detectedVersion = parseHermesVersion(version.stdout);
+      if (detectedVersion && isAtLeastVersion(detectedVersion, "0.11.0")) {
+        capabilityProbe = {
+          minimumSatisfied: false,
+          cliVersion: detectedVersion,
+          supportsLaunchMetadataArg: false,
+          supportsLaunchMetadataEnv: false,
+          supportsResume: true,
+          missing: ["supportsLaunchMetadataArg", "supportsLaunchMetadataEnv"],
+        };
+      }
+    }
+    const isV011 = capabilityProbe.cliVersion && isAtLeastVersion(capabilityProbe.cliVersion, "0.11.0") && !capabilityProbe.supportsLaunchMetadataArg;
     return {
       ok: version.exitCode === 0 && capabilityProbe.minimumSatisfied,
       version: version.stdout.trim(),
@@ -1084,7 +1114,11 @@ export class WslHermesInstallService {
         code: version.exitCode === 0 && capabilityProbe.minimumSatisfied ? "ok" : "hermes_healthcheck_failed",
         summary: version.exitCode === 0 && capabilityProbe.minimumSatisfied ? "Hermes 版本与能力检查通过。" : "Hermes 版本与能力检查未通过。",
         detail: `${version.stdout || version.stderr}\n${capabilities.stdout || capabilities.stderr}`.trim(),
-        fixHint: version.exitCode === 0 && capabilityProbe.minimumSatisfied ? undefined : "请检查 WSL repo/commit、venv、pip install，以及 capabilities --json / --launch-metadata / --resume 是否可用。",
+        fixHint: version.exitCode === 0 && capabilityProbe.minimumSatisfied
+          ? undefined
+          : isV011
+            ? `检测到 Hermes CLI ${capabilityProbe.cliVersion}（官方 v0.11.0+）。该版本原生不支持 Forge 所需的 launch metadata 能力。请切换到兼容版本（Mahiruxia/hermes-agent fork）或为官方 v0.11.0 打上 launch-metadata patch。`
+            : "请检查 WSL repo/commit、venv、pip install，以及 capabilities --json / --launch-metadata / --resume 是否可用。",
       })],
       capabilityProbe,
     };
@@ -1110,14 +1144,15 @@ export class WslHermesInstallService {
   }
 
   private parseCapabilityProbe(result: CommandResult) {
+    const base = {
+      cliVersion: undefined as string | undefined,
+      supportsLaunchMetadataArg: false,
+      supportsLaunchMetadataEnv: false,
+      supportsResume: false,
+      missing: [] as string[],
+    };
     if (result.exitCode !== 0) {
-      return {
-        minimumSatisfied: false,
-        supportsLaunchMetadataArg: false,
-        supportsLaunchMetadataEnv: false,
-        supportsResume: false,
-        missing: ["capabilities --json"],
-      };
+      return { ...base, minimumSatisfied: false, missing: ["capabilities --json"] };
     }
     try {
       const parsed = JSON.parse(result.stdout) as {
@@ -1145,13 +1180,7 @@ export class WslHermesInstallService {
       if (!probe.supportsResume) probe.missing.push("supportsResume");
       return probe;
     } catch {
-      return {
-        minimumSatisfied: false,
-        supportsLaunchMetadataArg: false,
-        supportsLaunchMetadataEnv: false,
-        supportsResume: false,
-        missing: ["capability_json_parse"],
-      };
+      return { ...base, minimumSatisfied: false, missing: ["capability_json_parse"] };
     }
   }
 
@@ -1256,6 +1285,27 @@ function dirnamePosix(inputPath: string) {
   const normalized = inputPath.replace(/\/+$/, "");
   const index = normalized.lastIndexOf("/");
   return index > 0 ? normalized.slice(0, index) : "/";
+}
+
+function parseHermesVersion(output: string): string | undefined {
+  const match = output.trim().match(/(?:hermes\s+v?|v?)(\d+\.\d+(?:\.\d+(?:[-+.]?\w+)?)?)/i);
+  return match?.[1];
+}
+
+function isAtLeastVersion(version: string, min: string): boolean {
+  const parse = (v: string) => v.split(/[.-]/).map((n) => {
+    const int = parseInt(n, 10);
+    return Number.isNaN(int) ? 0 : int;
+  });
+  const a = parse(version);
+  const b = parse(min);
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    const ai = a[i] ?? 0;
+    const bi = b[i] ?? 0;
+    if (ai > bi) return true;
+    if (ai < bi) return false;
+  }
+  return true;
 }
 
 function shellQuote(value: string) {

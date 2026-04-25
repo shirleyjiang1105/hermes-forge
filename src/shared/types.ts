@@ -879,6 +879,14 @@ export type ModelProfile = {
   lastHealthCheckAt?: string;
   lastHealthStatus?: "ready" | "warning" | "failed";
   lastHealthSummary?: string;
+  /**
+   * CC Switch 模式：直接配置对象。
+   * 如果存在，runtime-env-resolver 直接透传 settingsConfig.env，
+   * 不再走 toEnv() 的分支转换逻辑。
+   */
+  settingsConfig?: {
+    env: Record<string, string>;
+  };
 };
 
 export type ContextSource = {
@@ -940,6 +948,8 @@ export type EngineRuntimeEnv = {
   profileId: string;
   provider: ModelProfile["provider"];
   model: string;
+  role?: ModelRole;
+  sourceType?: ModelSourceType;
   baseUrl?: string;
   providerProfileId?: string;
   executionMode?: EngineExecutionMode;
@@ -1108,6 +1118,7 @@ export type HermesStatusSummary = {
 
 export type RuntimeConfig = {
   defaultModelProfileId?: string;
+  modelRoleAssignments?: Partial<Record<ModelRole, string>>;
   modelProfiles: ModelProfile[];
   providerProfiles?: ModelProviderProfile[];
   updateSources: Partial<Record<EngineId | "client", string>>;
@@ -1125,6 +1136,7 @@ export type SetupFixAction =
   | "configure_model"
   | "open_settings"
   | "install_hermes"
+  | "update_hermes"
   | "install_git"
   | "install_python"
   | "install_hermes_dependency"
@@ -1211,6 +1223,25 @@ export type ModelSourceType =
   | "gemini_api_key"
   | "deepseek_api_key"
   | "huggingface_api_key"
+  | "dashscope_api_key"
+  | "baidu_wenxin_api_key"
+  | "zhipu_api_key"
+  | "spark_api_key"
+  | "moonshot_api_key"
+  | "baichuan_api_key"
+  | "minimax_api_key"
+  | "yi_api_key"
+  | "hunyuan_api_key"
+  | "siliconflow_api_key"
+  | "volcengine_ark_api_key"
+  | "volcengine_coding_api_key"
+  | "dashscope_coding_api_key"
+  | "zhipu_coding_api_key"
+  | "baidu_qianfan_coding_api_key"
+  | "tencent_token_plan_api_key"
+  | "tencent_hunyuan_token_plan_api_key"
+  | "minimax_token_plan_api_key"
+  | "kimi_coding_api_key"
   | "gemini_oauth"
   | "anthropic_local_credentials"
   | "github_copilot"
@@ -1235,9 +1266,31 @@ export type ModelAuthMode =
   | "optional_api_key";
 
 export type ModelCapabilityRole = "provider_only" | "auxiliary_model" | "primary_agent";
+export type ModelRole = "chat" | "coding_plan" | "apply" | "autocomplete";
+export type RuntimeCompatibility = "runtime" | "proxy" | "connection_only";
+export type ModelProviderGroup = "recommended" | "international" | "china" | "local";
+
+export type ModelSourceDefinition = {
+  sourceType: ModelSourceType;
+  family: ModelProviderFamily;
+  authMode: ModelAuthMode;
+  label: string;
+  provider: ProviderId;
+  baseUrl?: string;
+  keyOptional?: boolean;
+  modelPlaceholder: string;
+  presetModels?: string[];
+  group?: ModelProviderGroup;
+  description?: string;
+  keywords?: string[];
+  badge?: string;
+  requiredAuthFields?: Array<"api_key" | "secret_key" | "api_password">;
+  roleCapabilities?: ModelRole[];
+  runtimeCompatibility?: RuntimeCompatibility;
+};
 
 export type ModelHealthCheckStep = {
-  id: "auth" | "models" | "chat" | "agent_capability" | "wsl_network";
+  id: "auth" | "models" | "chat" | "agent_capability" | "runtime" | "wsl_network";
   label: string;
   ok: boolean;
   message: string;
@@ -1258,6 +1311,8 @@ export type ModelConnectionTestResult = {
   supportsTools?: boolean;
   supportsVision?: boolean;
   agentRole?: ModelCapabilityRole;
+  runtimeCompatibility?: RuntimeCompatibility;
+  roleCompatibility?: Partial<Record<ModelRole, { ok: boolean; message: string }>>;
   wslReachable?: boolean;
   wslProbeUrl?: string;
   authResolved?: boolean;

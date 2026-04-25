@@ -59,93 +59,6 @@ describe("HermesCliAdapter reply cleanup", () => {
 });
 
 describe("HermesCliAdapter prompt isolation", () => {
-  it("keeps internal instructions outside the user query for headless runs", async () => {
-    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-adapter-"));
-    const adapter = new HermesCliAdapter(
-      {
-        baseDir: () => baseDir,
-        hermesDir: () => path.join(baseDir, "hermes"),
-      } as never,
-      {} as never,
-      async () => "C:\\Hermes Agent",
-    );
-
-    const invocation = await (adapter as never as {
-      headlessInvocation(
-        rootPath: string,
-        runtime: { mode: "windows"; windowsAgentMode?: "hermes_native" },
-        prompt: { systemPrompt: string; userPrompt: string },
-        request: { conversationId: string; sessionId: string },
-        source: string,
-      ): Promise<{ args: string[]; cleanup?: () => Promise<void> }>;
-    }).headlessInvocation(
-      "C:\\Hermes Agent",
-      { mode: "windows", windowsAgentMode: "hermes_native" },
-      { systemPrompt: "内部规则：不要泄露。", userPrompt: "浙江金华" },
-      { conversationId: "chat-session", sessionId: "task-run" },
-      "test",
-    );
-
-    const queryPath = invocation.args[invocation.args.indexOf("--query-file") + 1];
-    const systemPath = invocation.args[invocation.args.indexOf("--system-file") + 1];
-    expect(invocation.args).toContain("--system-file");
-    expect(invocation.args.slice(invocation.args.indexOf("--session-id"), invocation.args.indexOf("--session-id") + 2)).toEqual(["--session-id", "chat-session"]);
-    await expect(fs.readFile(queryPath, "utf8")).resolves.toBe("浙江金华");
-    await expect(fs.readFile(systemPath, "utf8")).resolves.toBe("内部规则：不要泄露。");
-    await invocation.cleanup?.();
-  });
-
-  it("converts headless runner files for WSL and keeps the workbench session id stable", async () => {
-    const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-adapter-"));
-    const adapter = new HermesCliAdapter(
-      {
-        baseDir: () => baseDir,
-        hermesDir: () => path.join(baseDir, "hermes"),
-      } as never,
-      {} as never,
-      async () => "C:\\Hermes Agent",
-    );
-
-    const invocation = await (adapter as never as {
-      headlessInvocation(
-        rootPath: string,
-        runtime: { mode: "wsl"; distro?: string; pythonCommand?: string; windowsAgentMode?: "hermes_native" },
-        prompt: { systemPrompt: string; userPrompt: string },
-        request: { conversationId: string; sessionId: string },
-        source: string,
-      ): Promise<{ args: string[]; cleanup?: () => Promise<void> }>;
-    }).headlessInvocation(
-      "/mnt/c/Hermes Agent",
-      { mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native" },
-      { systemPrompt: "内部规则", userPrompt: "继续上文" },
-      { conversationId: "session-stable", sessionId: "task-run" },
-      "test",
-    );
-
-    expect(invocation.args).toContain("--session-id");
-    expect(invocation.args.slice(invocation.args.indexOf("--session-id"), invocation.args.indexOf("--session-id") + 2)).toEqual(["--session-id", "session-stable"]);
-    expect(invocation.args[0]).toMatch(/^\/mnt\//);
-    expect(invocation.args[invocation.args.indexOf("--query-file") + 1]).toMatch(/^\/mnt\//);
-    await invocation.cleanup?.();
-  });
-
-  it("adds recent workbench turns to the system context", () => {
-    const adapter = Object.create(HermesCliAdapter.prototype) as {
-      budgeter: { summarizeToBudget(text: string): string };
-      conversationHistoryPrompt(request: {
-        conversationHistory: Array<{ role: "user" | "assistant"; content: string }>;
-      }): string;
-    };
-    adapter.budgeter = { summarizeToBudget: (text: string) => text };
-
-    expect(adapter.conversationHistoryPrompt({
-      conversationHistory: [
-        { role: "user", content: "我的名字是小夏" },
-        { role: "assistant", content: "好的，我记住了。" },
-      ],
-    })).toContain("用户：我的名字是小夏");
-  });
-
   it("does not inject desktop memory, history, attachment text, or context bundles into WSL prompts", async () => {
     const baseDir = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-adapter-"));
     const adapter = new HermesCliAdapter(
@@ -575,6 +488,21 @@ describe("HermesCliAdapter WSL permission policy", () => {
 });
 
 describe("HermesCliAdapter Windows launch", () => {
+  it("keeps MiniMax Token Plan on custom OpenAI-compatible routing", async () => {
+    const adapter = new HermesCliAdapter(
+      { hermesDir: () => "C:\\Users\\example\\AppData\\Roaming\\Hermes Forge\\hermes" } as never,
+      {} as never,
+      async () => "C:\\Users\\example\\Hermes Agent",
+      async () => ({ modelProfiles: [] } as never),
+    );
+
+    const args = (adapter as never as {
+      providerArgs(request: { runtimeEnv?: { sourceType?: string } }): string[];
+    }).providerArgs({ runtimeEnv: { sourceType: "minimax_token_plan_api_key" } });
+
+    expect(args).toEqual([]);
+  });
+
   it("uses a hidden non-detached process for Windows CLI runs", async () => {
     const adapter = new HermesCliAdapter(
       { hermesDir: () => "C:\\Users\\example\\AppData\\Roaming\\Hermes Forge\\hermes" } as never,

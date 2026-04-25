@@ -5,6 +5,7 @@ import { resolveActiveHermesHome } from "../main/hermes-home";
 import type { AppPaths } from "../main/app-paths";
 import type { RuntimeConfigStore } from "../main/runtime-config";
 import type { EngineAdapter } from "../adapters/engine-adapter";
+import type { SecretVault } from "../auth/secret-vault";
 import { runCommand } from "../process/command-runner";
 import type {
   EngineMaintenanceResult,
@@ -69,6 +70,7 @@ export class SetupService {
       runtimeProbe ? this.wingetCheckFromProbe(runtimeProbe) : await this.checkWinget(),
       ...(runtimeProbe?.runtimeMode === "wsl" ? [this.wslCheckFromProbe(runtimeProbe)] : []),
       runtimeProbe ? this.hermesCheckFromProbe(runtimeProbe) : await this.checkHermes(),
+      await this.checkHermesAgentCompatibility(),
       await this.checkHermesPythonPackageWithRuntime(runtimeProbe, "hermes-pyyaml", "Hermes 配置依赖", "yaml", "PyYAML", {
         description: "Hermes CLI 读取 config.yaml 时需要 PyYAML；缺失时会出现 No module named 'yaml'。",
         recommendedAction: "点击修复 Hermes 依赖，或手动执行 python -m pip install --upgrade PyYAML。",
@@ -1178,8 +1180,104 @@ export class SetupService {
       return false;
     }
   }
-}
 
-type SecretVault = {
-  hasSecret(ref: string): Promise<boolean>;
-};
+  async checkHermesAgentCompatibility(): Promise<SetupCheck> {
+    const config = await this.configStore.read();
+    const runtimeMode = config.hermesRuntime?.mode ?? "windows";
+    if (runtimeMode === "wsl") {
+      return {
+        id: "hermes-agent-compat",
+        label: "Hermes Agent 兼容性",
+        status: "ok",
+        message: "WSL 模式由安装器管理兼容性。",
+        blocking: false,
+      };
+    }
+
+    const hermesRoot = await this.configStore.getEnginePath("hermes");
+    if (!hermesRoot || !(await this.exists(hermesRoot))) {
+      return {
+        id: "hermes-agent-compat",
+        label: "Hermes Agent 兼容性",
+        status: "ok",
+        message: "未检测到 Hermes 安装，跳过兼容性检查。",
+        blocking: false,
+      };
+    }
+
+    const script = `
+import json, sys, inspect
+sys.path.insert(0, r"""${hermesRoot}""")
+try:
+    from run_agent import AIAgent
+    sig = inspect.signature(AIAgent.__init__)
+    params = set(sig.parameters.keys())
+    required = {"skip_context_files", "quiet_mode", "session_id", "platform", "ephemeral_system_prompt"}
+    missing = sorted(required - params)
+    has_run_conversation = hasattr(AIAgent, "run_conversation") and callable(getattr(AIAgent, "run_conversation", None))
+    print(json.dumps({
+        "compatible": len(missing) == 0 and has_run_conversation,
+        "missing": missing,
+        "has_run_conversation": has_run_conversation
+    }))
+except Exception as e:
+    print(json.dumps({"compatible": False, "error": str(e)}))
+`;
+    const result = await runCommand("python", ["-c", script], {
+      cwd: hermesRoot,
+      env: {
+        PYTHONUTF8: "1",
+        PYTHONIOENCODING: "utf-8",
+        PYTHONPATH: `${hermesRoot}${path.delimiter}${process.env.PYTHONPATH ?? ""}`,
+        NO_COLOR: "1",
+      },
+      timeoutMs: 15_000,
+    });
+
+    let parsed: { compatible: boolean; missing?: string[]; has_run_conversation?: boolean; error?: string } | undefined;
+    try {
+      const line = result.stdout.trim().split("\\n").filter(Boolean).pop() ?? "";
+      parsed = JSON.parse(line) as typeof parsed;
+    } catch {
+      parsed = undefined;
+    }
+
+    const compatible = parsed?.compatible ?? false;
+    const hasRunConversation = parsed?.has_run_conversation ?? false;
+    const missing = parsed?.missing ?? [];
+
+    if (!hasRunConversation) {
+      return {
+        id: "hermes-agent-compat",
+        label: "Hermes Agent 兼容性",
+        status: "missing",
+        message: `当前 Hermes Agent 缺少 v0.2.0 所需的关键能力：AIAgent.run_conversation 不存在。`,
+        description: "Forge v0.2.0 需要 Hermes Agent 支持 run_conversation 方法以及 skip_context_files、quiet_mode 等参数。",
+        recommendedAction: "请更新 Hermes Agent 到最新版本。",
+        fixAction: "update_hermes",
+        blocking: true,
+      };
+    }
+
+    if (!compatible && missing.length > 0) {
+      return {
+        id: "hermes-agent-compat",
+        label: "Hermes Agent 兼容性",
+        status: "warning",
+        message: `Hermes Agent 可以运行，但缺少 v0.2.0 推荐参数：${missing.join("、")}。`,
+        description: "Forge v0.2.0 重构后依赖这些参数实现最佳体验（如 Hermes 自主管理记忆、流式事件等）。",
+        recommendedAction: "建议更新 Hermes Agent 到最新版本以获得完整功能。",
+        fixAction: "update_hermes",
+        blocking: false,
+      };
+    }
+
+    return {
+      id: "hermes-agent-compat",
+      label: "Hermes Agent 兼容性",
+      status: "ok",
+      message: "Hermes Agent 与 Forge v0.2.0 完全兼容。",
+      blocking: false,
+    };
+  }
+}

@@ -67,6 +67,25 @@ export const modelSourceTypeSchema = z.enum([
   "gemini_api_key",
   "deepseek_api_key",
   "huggingface_api_key",
+  "dashscope_api_key",
+  "baidu_wenxin_api_key",
+  "zhipu_api_key",
+  "spark_api_key",
+  "moonshot_api_key",
+  "baichuan_api_key",
+  "minimax_api_key",
+  "yi_api_key",
+  "hunyuan_api_key",
+  "siliconflow_api_key",
+  "volcengine_ark_api_key",
+  "volcengine_coding_api_key",
+  "dashscope_coding_api_key",
+  "zhipu_coding_api_key",
+  "baidu_qianfan_coding_api_key",
+  "tencent_token_plan_api_key",
+  "tencent_hunyuan_token_plan_api_key",
+  "minimax_token_plan_api_key",
+  "kimi_coding_api_key",
   "gemini_oauth",
   "anthropic_local_credentials",
   "github_copilot",
@@ -78,6 +97,8 @@ export const modelSourceTypeSchema = z.enum([
   "openai_compatible",
   "legacy",
 ]);
+
+export const modelRoleSchema = z.enum(["chat", "coding_plan", "apply", "autocomplete"]);
 
 export const modelProfileSchema = z.object({
   id: z.string().trim().min(1).max(120),
@@ -96,6 +117,9 @@ export const modelProfileSchema = z.object({
   lastHealthCheckAt: z.string().trim().max(80).optional(),
   lastHealthStatus: z.enum(["ready", "warning", "failed"]).optional(),
   lastHealthSummary: z.string().trim().max(1000).optional(),
+  settingsConfig: z.object({
+    env: z.record(z.string().trim().min(1).max(200), z.string().trim().max(2000)),
+  }).optional(),
 });
 
 export const modelOptionSchema = z.object({
@@ -148,7 +172,19 @@ export const hermesRuntimeSchema = z.object({
 
 export const runtimeConfigSchema = z.object({
   defaultModelProfileId: z.string().max(120).optional(),
-  modelProfiles: z.array(modelProfileSchema),
+  modelRoleAssignments: z.partialRecord(modelRoleSchema, z.string().trim().min(1).max(120)).optional(),
+  modelProfiles: z.array(z.any()).transform((arr) => {
+    const valid: Array<z.infer<typeof modelProfileSchema>> = [];
+    for (const item of arr) {
+      const parsed = modelProfileSchema.safeParse(item);
+      if (parsed.success) {
+        valid.push(parsed.data);
+      } else {
+        console.warn("[RuntimeConfigSchema] Dropped invalid model profile:", parsed.error.flatten(), item);
+      }
+    }
+    return valid;
+  }),
   providerProfiles: z.array(modelProviderProfileSchema).optional(),
   updateSources: z.record(z.string(), z.string().url()).default({}),
   enginePaths: z.record(z.string(), z.string().trim().min(1).max(1000)).optional(),
@@ -158,10 +194,29 @@ export const runtimeConfigSchema = z.object({
   hermesRuntime: hermesRuntimeSchema.default({ mode: "wsl", pythonCommand: "python3", windowsAgentMode: "hermes_native", cliPermissionMode: "yolo", permissionPolicy: "bridge_guarded", workerMode: "off" }),
 }).transform((config) => ({
   ...config,
+  defaultModelProfileId: config.modelRoleAssignments?.chat ?? config.defaultModelProfileId,
+  modelRoleAssignments: normalizeModelRoleAssignments(config.modelRoleAssignments, config.defaultModelProfileId, config.modelProfiles),
   updateSources: pickHermesRecord(config.updateSources),
   enginePaths: config.enginePaths ? pickHermesRecord(config.enginePaths) : undefined,
   enginePermissions: config.enginePermissions ? pickHermesRecord(config.enginePermissions) : undefined,
 }));
+
+function normalizeModelRoleAssignments(
+  assignments: Partial<Record<z.infer<typeof modelRoleSchema>, string>> | undefined,
+  defaultModelProfileId: string | undefined,
+  profiles: Array<{ id: string }>,
+) {
+  const ids = new Set(profiles.map((profile) => profile.id));
+  const next: Partial<Record<z.infer<typeof modelRoleSchema>, string>> = {};
+  for (const [role, profileId] of Object.entries(assignments ?? {}) as Array<[z.infer<typeof modelRoleSchema>, string | undefined]>) {
+    if (profileId && ids.has(profileId)) next[role] = profileId;
+  }
+  if (!next.chat && defaultModelProfileId && ids.has(defaultModelProfileId)) {
+    next.chat = defaultModelProfileId;
+  }
+  if (!next.chat && profiles[0]) next.chat = profiles[0].id;
+  return Object.keys(next).length ? next : undefined;
+}
 
 function pickHermesRecord<T>(record: Record<string, T>) {
   const next: Partial<Record<"hermes" | "client", T>> = {};

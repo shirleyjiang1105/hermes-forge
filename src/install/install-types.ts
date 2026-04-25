@@ -58,7 +58,7 @@ export type InstallStrategyResult = HermesInstallResult & {
   plan?: InstallPlan;
 };
 
-export type InstallStrategyUpdateResult = EngineMaintenanceResult & {
+export type InstallStrategyUpdateResult = HermesInstallResult & {
   plan?: InstallPlan;
 };
 

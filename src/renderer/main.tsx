@@ -352,6 +352,20 @@ function SettingsView(props: {
       return;
     }
 
+    if (check.fixAction === "update_hermes") {
+      setSetupActionRunning(check.id);
+      try {
+        const result = await window.workbenchClient.updateHermes();
+        await props.onRefresh();
+        showSaveNotice(result.message);
+      } catch (error) {
+        showSaveNotice(error instanceof Error ? error.message : "Hermes 更新失败");
+      } finally {
+        setSetupActionRunning(undefined);
+      }
+      return;
+    }
+
     if (check.fixAction === "configure_model") {
       setActiveSection("providers");
       showSaveNotice("请在模型提供商中补齐默认模型配置");
@@ -522,9 +536,9 @@ function SettingsView(props: {
 function SettingsSectionHeader(props: { label: string; title: string; description: string }) {
   return (
     <div>
-      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400">{props.label}</p>
-      <h2 className="mt-2 text-[24px] font-semibold tracking-tight text-slate-950">{props.title}</h2>
-      <p className="mt-2 text-[14px] leading-6 text-slate-500">{props.description}</p>
+      <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{props.label}</p>
+      <h2 className="mt-3 text-[25px] font-semibold tracking-[-0.01em] text-slate-950">{props.title}</h2>
+      <p className="mt-3 text-[14px] leading-7 text-slate-500">{props.description}</p>
     </div>
   );
 }
@@ -705,6 +719,7 @@ function setupFixButtonLabel(check: SetupCheck) {
   if (check.autoFixId === "hermes_python_dotenv") return "修复 Hermes 依赖";
   if (check.autoFixId === "weixin_aiohttp") return "修复微信依赖";
   if (check.fixAction === "install_hermes") return "自动安装 Hermes";
+  if (check.fixAction === "update_hermes") return "更新 Hermes Agent";
   if (check.fixAction === "configure_model") return "打开模型配置";
   if (check.fixAction === "configure_hermes" || check.fixAction === "open_settings") return "打开常规设置";
   return "";
@@ -898,6 +913,18 @@ function App() {
       unsubscribe();
       if (rafId !== null) cancelAnimationFrame(rafId);
     };
+  }, []);
+
+  useEffect(() => {
+    if (!window.workbenchClient || typeof window.workbenchClient.onHermesAgentCompatibilityWarning !== "function") {
+      return;
+    }
+    const unsubscribe = window.workbenchClient.onHermesAgentCompatibilityWarning((event) => {
+      if (!event.compatible) {
+        store.warning("Hermes Agent 建议更新", event.message);
+      }
+    });
+    return () => unsubscribe();
   }, []);
 
   async function bootstrap() {

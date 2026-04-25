@@ -1,4 +1,4 @@
-import type { ModelProfile, ProviderId, RuntimeConfig } from "./types";
+import type { ModelProfile, ModelRole, ProviderId, RuntimeConfig } from "./types";
 
 export function normalizeOpenAiCompatibleBaseUrl(baseUrl?: string) {
   const trimmed = baseUrl?.trim();
@@ -48,7 +48,7 @@ export function stableModelProfileId(input: Pick<ModelProfile, "provider" | "mod
   return `model-${stableHash(key)}`;
 }
 
-export function migrateRuntimeConfigModels<T extends Partial<RuntimeConfig>>(input: T | LegacyRuntimeConfig): T & Pick<RuntimeConfig, "modelProfiles"> & { defaultModelProfileId?: string } {
+export function migrateRuntimeConfigModels<T extends Partial<RuntimeConfig>>(input: T | LegacyRuntimeConfig): T & Pick<RuntimeConfig, "modelProfiles"> & { defaultModelProfileId?: string; modelRoleAssignments?: RuntimeConfig["modelRoleAssignments"] } {
   const raw = (input ?? {}) as LegacyRuntimeConfig;
   const rawProfiles = Array.isArray(raw.modelProfiles)
     ? raw.modelProfiles
@@ -61,15 +61,18 @@ export function migrateRuntimeConfigModels<T extends Partial<RuntimeConfig>>(inp
   const rawDefault = firstString(
     raw.defaultModelId,
     raw.defaultModelProfileId,
+    raw.modelRoleAssignments?.chat,
     raw.default_model_id,
     raw.default_model,
     raw.defaultModel,
   );
   const defaultModelProfileId = resolveDefaultModelProfileId(rawDefault, modelProfiles);
+  const modelRoleAssignments = normalizeRoleAssignments(raw.modelRoleAssignments, defaultModelProfileId, modelProfiles);
   return {
     ...input,
     modelProfiles,
     defaultModelProfileId,
+    modelRoleAssignments,
   } as T & Pick<RuntimeConfig, "modelProfiles"> & { defaultModelProfileId?: string };
 }
 
@@ -105,6 +108,20 @@ function normalizeLegacyModelProfile(input: unknown): ModelProfile | undefined {
     ...(baseUrl ? { baseUrl } : {}),
   };
   return profile;
+}
+
+function normalizeRoleAssignments(raw: unknown, defaultModelProfileId: string | undefined, profiles: ModelProfile[]) {
+  const ids = new Set(profiles.map((profile) => profile.id));
+  const next: Partial<Record<ModelRole, string>> = {};
+  if (raw && typeof raw === "object") {
+    for (const role of ["chat", "coding_plan", "apply", "autocomplete"] as const) {
+      const value = (raw as Partial<Record<ModelRole, unknown>>)[role];
+      if (typeof value === "string" && ids.has(value)) next[role] = value;
+    }
+  }
+  if (!next.chat && defaultModelProfileId && ids.has(defaultModelProfileId)) next.chat = defaultModelProfileId;
+  if (!next.chat && profiles[0]) next.chat = profiles[0].id;
+  return Object.keys(next).length ? next : undefined;
 }
 
 function dedupeProfiles(profiles: ModelProfile[]) {

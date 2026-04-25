@@ -1,6 +1,6 @@
 import type { SecretVault } from "../auth/secret-vault";
 import type { RuntimeConfigStore } from "./runtime-config";
-import type { EngineRuntimeEnv, ModelProfile, RuntimeConfig } from "../shared/types";
+import type { EngineRuntimeEnv, ModelProfile, ModelRole, RuntimeConfig } from "../shared/types";
 import { normalizeOpenAiCompatibleBaseUrl } from "../shared/model-config";
 import type { ModelRuntimeProxyService } from "./model-runtime-proxy";
 
@@ -20,10 +20,24 @@ export class RuntimeEnvResolver {
     return this.resolveFromConfig(config, modelProfileId);
   }
 
-  async resolveFromConfig(config: RuntimeConfig, modelProfileId?: string): Promise<EngineRuntimeEnv> {
+  async resolveRole(role: ModelRole): Promise<EngineRuntimeEnv> {
+    const config = await this.configStore.read();
+    return this.resolveRoleFromConfig(config, role);
+  }
+
+  async resolveRoleFromConfig(config: RuntimeConfig, role: ModelRole): Promise<EngineRuntimeEnv> {
+    const profileId = config.modelRoleAssignments?.[role] ?? (role === "chat" ? config.defaultModelProfileId : undefined);
+    if (!profileId && role !== "chat") {
+      throw new Error(`${role} 角色尚未分配模型。`);
+    }
+    return this.resolveFromConfig(config, profileId, role);
+  }
+
+  async resolveFromConfig(config: RuntimeConfig, modelProfileId?: string, role?: ModelRole): Promise<EngineRuntimeEnv> {
+    const requestedProfileId = modelProfileId ?? config.defaultModelProfileId;
     const profile =
-      config.modelProfiles.find((item) => item.id === (modelProfileId ?? config.defaultModelProfileId)) ??
-      config.modelProfiles[0];
+      config.modelProfiles.find((item) => item.id === requestedProfileId) ??
+      (role && role !== "chat" ? undefined : config.modelProfiles[0]);
 
     if (!profile) {
       throw new Error("缺少模型配置，无法生成运行环境。");
@@ -36,6 +50,8 @@ export class RuntimeEnvResolver {
       profileId: profile.id,
       provider: profile.provider,
       model: profile.model,
+      role,
+      sourceType: profile.sourceType,
       baseUrl,
       providerProfileId: providerProfile?.id,
       env: this.toEnv({ ...profile, baseUrl }, secret),
@@ -44,6 +60,18 @@ export class RuntimeEnvResolver {
   }
 
   private toEnv(profile: ModelProfile, secret?: string): Record<string, string> {
+    // CC Switch 直接模式：settingsConfig 存在时直接透传，不再走 legacy 分支转换
+    if (profile.settingsConfig?.env) {
+      return applyTemplateValues(profile.settingsConfig.env, {
+        api_key: secret ?? "",
+        base_url: profile.baseUrl ?? "",
+        model: profile.model ?? "",
+      });
+    }
+    return this.legacyToEnv(profile, secret);
+  }
+
+  private legacyToEnv(profile: ModelProfile, secret?: string): Record<string, string> {
     const env: Record<string, string> = {
       AI_PROVIDER: profile.provider,
       AI_MODEL: profile.model,
@@ -55,7 +83,79 @@ export class RuntimeEnvResolver {
       env.ANTHROPIC_BASE_URL = profile.baseUrl;
     }
 
+    if (profile.sourceType) {
+      env.HERMES_FORGE_MODEL_SOURCE_TYPE = profile.sourceType;
+    }
+
+    if (profile.sourceType === "kimi_coding_api_key") {
+      env.AI_PROVIDER = "custom";
+      env.KIMI_BASE_URL = profile.baseUrl ?? "https://api.kimi.com/coding/v1";
+      if (secret) {
+        env.KIMI_API_KEY = secret;
+        env.OPENAI_API_KEY = secret;
+        env.AI_API_KEY = secret;
+      }
+      return env;
+    }
+
+    if (profile.sourceType === "minimax_token_plan_api_key") {
+      env.AI_PROVIDER = "custom";
+      env.MINIMAX_BASE_URL = profile.baseUrl ?? "https://api.minimaxi.com/v1";
+      env.OPENAI_BASE_URL = profile.baseUrl ?? "https://api.minimaxi.com/v1";
+      if (secret) {
+        env.MINIMAX_API_KEY = secret;
+        env.OPENAI_API_KEY = secret;
+        env.AI_API_KEY = secret;
+      }
+      return env;
+    }
+
+    if (profile.sourceType === "minimax_api_key") {
+      env.AI_PROVIDER = "custom";
+      env.MINIMAX_BASE_URL = profile.baseUrl ?? "https://api.minimax.chat/v1";
+      env.OPENAI_BASE_URL = profile.baseUrl ?? "https://api.minimax.chat/v1";
+      if (secret) {
+        env.MINIMAX_API_KEY = secret;
+        env.OPENAI_API_KEY = secret;
+        env.AI_API_KEY = secret;
+      }
+      return env;
+    }
+
+    if (profile.sourceType === "zhipu_coding_api_key") {
+      env.AI_PROVIDER = "custom";
+      env.GLM_BASE_URL = profile.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
+      if (secret) {
+        env.GLM_API_KEY = secret;
+        env.ZAI_API_KEY = secret;
+        env.OPENAI_API_KEY = secret;
+        env.AI_API_KEY = secret;
+      }
+      return env;
+    }
+
+    if (profile.sourceType === "dashscope_coding_api_key") {
+      env.AI_PROVIDER = "custom";
+      env.DASHSCOPE_BASE_URL = profile.baseUrl ?? "https://coding-intl.dashscope.aliyuncs.com/v1";
+      if (secret) {
+        env.DASHSCOPE_API_KEY = secret;
+        env.OPENAI_API_KEY = secret;
+        env.AI_API_KEY = secret;
+      }
+      return env;
+    }
+
     if (profile.provider === "local") {
+      return env;
+    }
+
+    if (profile.sourceType === "baidu_wenxin_api_key") {
+      if (secret) {
+        env.HERMES_FORGE_BAIDU_CREDENTIAL = secret;
+        env.AI_API_KEY = "hermes-forge-local-proxy-key";
+        env.OPENAI_API_KEY = "hermes-forge-local-proxy-key";
+      }
+      env.AI_PROVIDER = "custom";
       return env;
     }
 
@@ -109,4 +209,18 @@ export class RuntimeEnvResolver {
 
     return env;
   }
+}
+
+/** CC Switch 式模板变量替换：将 env 对象中的 ${var} 占位符替换为实际值 */
+function applyTemplateValues(
+  env: Record<string, string>,
+  values: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, template] of Object.entries(env)) {
+    result[key] = template.replace(/\$\{(\w+)\}/g, (_match, varName) =>
+      values[varName] !== undefined ? values[varName] : _match,
+    );
+  }
+  return result;
 }

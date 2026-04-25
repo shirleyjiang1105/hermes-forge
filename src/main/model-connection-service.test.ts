@@ -5,7 +5,8 @@ vi.mock("../process/command-runner", () => ({
 }));
 
 import { runCommand } from "../process/command-runner";
-import { testModelConnection } from "./model-connection-service";
+import { defaultProviderRegistry } from "./model-providers/registry";
+import { inferSourceType, testModelConnection } from "./model-connection-service";
 
 const runCommandMock = vi.mocked(runCommand);
 
@@ -230,6 +231,7 @@ describe("model-connection-service", () => {
     ["Zhipu", "https://open.bigmodel.cn/api/paas/v4", "glm-4.6"],
     ["SiliconFlow", "https://api.siliconflow.cn/v1", "Qwen/Qwen3-Coder"],
     ["Volcengine", "https://ark.cn-beijing.volces.com/api/v3", "doubao-seed-1-6"],
+    ["Volcengine Coding", "https://ark.cn-beijing.volces.com/api/coding/v3", "doubao-coding"],
     ["Tencent Hunyuan", "https://hunyuan.cloud.tencent.com/v1", "hunyuan-turbos-latest"],
   ])("accepts manually typed coding provider models when %s does not expose /models", async (_label, baseUrl, model) => {
     const fetchMock = vi.mocked(fetch);
@@ -259,6 +261,87 @@ describe("model-connection-service", () => {
     expect(result.normalizedBaseUrl).toBe(baseUrl);
     expect(result.agentRole).toBe("primary_agent");
     expect(result.healthChecks?.find((item) => item.id === "models")?.message).toContain("已跳过发现");
+  });
+
+  it("infers Volcengine coding endpoint separately from normal Ark API", () => {
+    expect(inferSourceType("custom", "https://ark.cn-beijing.volces.com/api/coding/v3")).toBe("volcengine_coding_api_key");
+    expect(inferSourceType("custom", "https://ark.cn-beijing.volces.com/api/v3")).toBe("volcengine_ark_api_key");
+  });
+
+  it("exposes real Coding Plan providers from backend definitions", () => {
+    const definitions = defaultProviderRegistry.definitions();
+    const codingProviders = definitions.filter((item) => item.roleCapabilities?.includes("coding_plan"));
+
+    expect(codingProviders.map((item) => item.sourceType)).toEqual(expect.arrayContaining([
+      "volcengine_coding_api_key",
+      "dashscope_coding_api_key",
+      "zhipu_coding_api_key",
+      "baidu_qianfan_coding_api_key",
+      "tencent_token_plan_api_key",
+      "tencent_hunyuan_token_plan_api_key",
+      "minimax_token_plan_api_key",
+    ]));
+    expect(codingProviders.map((item) => item.sourceType)).not.toContain("kimi_coding_api_key");
+    expect(definitions.find((item) => item.sourceType === "kimi_coding_api_key")).toMatchObject({
+      roleCapabilities: [],
+      runtimeCompatibility: "connection_only",
+    });
+    expect(codingProviders).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceType: "dashscope_coding_api_key",
+        baseUrl: "https://coding-intl.dashscope.aliyuncs.com/v1",
+        runtimeCompatibility: "runtime",
+      }),
+      expect.objectContaining({
+        sourceType: "zhipu_coding_api_key",
+        baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+        runtimeCompatibility: "runtime",
+      }),
+      expect.objectContaining({
+        sourceType: "minimax_token_plan_api_key",
+        baseUrl: "https://api.minimaxi.com/v1",
+        runtimeCompatibility: "runtime",
+      }),
+    ]));
+  });
+
+  it("infers coding-plan URLs before their general API providers", () => {
+    expect(inferSourceType("custom", "https://coding-intl.dashscope.aliyuncs.com/v1")).toBe("dashscope_coding_api_key");
+    expect(inferSourceType("custom", "https://dashscope.aliyuncs.com/compatible-mode/v1")).toBe("dashscope_api_key");
+    expect(inferSourceType("custom", "https://open.bigmodel.cn/api/coding/paas/v4")).toBe("zhipu_coding_api_key");
+    expect(inferSourceType("custom", "https://open.bigmodel.cn/api/paas/v4")).toBe("zhipu_api_key");
+    expect(inferSourceType("custom", "https://qianfan.baidubce.com/v2/coding")).toBe("baidu_qianfan_coding_api_key");
+    expect(inferSourceType("custom", "https://api.kimi.com/coding/v1")).toBe("kimi_coding_api_key");
+  });
+
+  it("marks tested coding-plan endpoints as coding_plan runtime compatible", async () => {
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: "models endpoint disabled" }), { status: 404 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ choices: [{ message: { tool_calls: [{ id: "call_1" }] } }] }), { status: 200 }));
+
+    const result = await testModelConnection({
+      draft: {
+        sourceType: "zhipu_coding_api_key",
+        baseUrl: "https://open.bigmodel.cn/api/coding/paas/v4",
+        model: "GLM-5.1",
+        maxTokens: 256000,
+        secretRef: "provider.zhipu-coding.apiKey",
+      },
+      config: { modelProfiles: [], updateSources: {}, hermesRuntime: { mode: "windows" } } as never,
+      secretVault: secretVault({
+        hasSecret: async () => true,
+        readSecret: async () => "test-key",
+      }),
+      runtimeAdapterFactory: runtimeAdapterFactory(),
+      resolveHermesRoot: async () => "D:\\Hermes Agent",
+    });
+
+    expect(result.ok).toBe(true);
+    expect(result.runtimeCompatibility).toBe("runtime");
+    expect(result.roleCompatibility?.coding_plan?.ok).toBe(true);
+    expect(result.roleCompatibility?.chat?.ok).toBe(false);
   });
 
   it("still fails OpenAI-compatible model discovery on auth errors", async () => {

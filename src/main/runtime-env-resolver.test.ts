@@ -94,4 +94,157 @@ describe("RuntimeEnvResolver", () => {
     expect(runtime.baseUrl).toBe("http://127.0.0.1:49001/v1");
     expect(runtime.env.OPENAI_API_KEY).toBe("hermes-forge-local-proxy-key");
   });
+
+  it("keeps Volcengine coding plan profiles on the coding endpoint URL", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "doubao-coding",
+      modelProfiles: [{
+        id: "doubao-coding",
+        provider: "custom",
+        sourceType: "volcengine_coding_api_key",
+        baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        model: "doubao-coding",
+        secretRef: "provider.volcengine-coding.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async () => "ark-key" } as never,
+    );
+
+    const runtime = await resolver.resolve();
+
+    expect(runtime.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/coding/v3");
+    expect(runtime.env).toMatchObject({
+      AI_PROVIDER: "custom",
+      AI_MODEL: "doubao-coding",
+      AI_BASE_URL: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      OPENAI_BASE_URL: "https://ark.cn-beijing.volces.com/api/coding/v3",
+      OPENAI_API_KEY: "ark-key",
+    });
+  });
+
+  it("exports Kimi Coding provider-specific env so Hermes does not fall back to Moonshot", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "kimi-coding",
+      modelProfiles: [{
+        id: "kimi-coding",
+        provider: "custom",
+        sourceType: "kimi_coding_api_key",
+        baseUrl: "https://api.kimi.com/coding/v1",
+        model: "kimi-k2.6",
+        secretRef: "provider.kimi-coding.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async () => "sk-kimi-test" } as never,
+    );
+
+    const runtime = await resolver.resolve();
+
+    expect(runtime.env).toMatchObject({
+      AI_PROVIDER: "custom",
+      AI_MODEL: "kimi-k2.6",
+      KIMI_API_KEY: "sk-kimi-test",
+      KIMI_BASE_URL: "https://api.kimi.com/coding/v1",
+      OPENAI_API_KEY: "sk-kimi-test",
+      OPENAI_BASE_URL: "https://api.kimi.com/coding/v1",
+    });
+  });
+
+  it("exports MiniMax provider-specific env so Hermes sends Authorization", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "minimax-token-plan",
+      modelProfiles: [{
+        id: "minimax-token-plan",
+        provider: "custom",
+        sourceType: "minimax_token_plan_api_key",
+        baseUrl: "https://api.minimaxi.com/v1",
+        model: "MiniMax-M2.7",
+        secretRef: "provider.minimax-token-plan.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async () => "sk-minimax-test" } as never,
+    );
+
+    const runtime = await resolver.resolve();
+
+    expect(runtime.env).toMatchObject({
+      AI_PROVIDER: "custom",
+      AI_MODEL: "MiniMax-M2.7",
+      MINIMAX_API_KEY: "sk-minimax-test",
+      MINIMAX_BASE_URL: "https://api.minimaxi.com/v1",
+      OPENAI_API_KEY: "sk-minimax-test",
+      OPENAI_BASE_URL: "https://api.minimaxi.com/v1",
+    });
+  });
+
+  it("resolves chat and Coding Plan roles to independent model URLs", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "kimi-main",
+      modelRoleAssignments: {
+        chat: "kimi-main",
+        coding_plan: "doubao-coding",
+      },
+      modelProfiles: [
+        {
+          id: "kimi-main",
+          provider: "custom",
+          sourceType: "moonshot_api_key",
+          baseUrl: "https://api.moonshot.cn/v1",
+          model: "moonshot-v1-128k",
+          secretRef: "provider.moonshot.apiKey",
+        },
+        {
+          id: "doubao-coding",
+          provider: "custom",
+          sourceType: "volcengine_coding_api_key",
+          baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+          model: "doubao-coding",
+          secretRef: "provider.volcengine-coding.apiKey",
+        },
+      ],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async (ref: string) => ref.includes("coding") ? "coding-key" : "kimi-key" } as never,
+    );
+
+    const chat = await resolver.resolveRoleFromConfig(config, "chat");
+    const coding = await resolver.resolveRoleFromConfig(config, "coding_plan");
+
+    expect(chat.baseUrl).toBe("https://api.moonshot.cn/v1");
+    expect(chat.env.OPENAI_API_KEY).toBe("kimi-key");
+    expect(coding.baseUrl).toBe("https://ark.cn-beijing.volces.com/api/coding/v3");
+    expect(coding.env.OPENAI_API_KEY).toBe("coding-key");
+  });
+
+  it("does not fall back to the chat model when a non-chat role is unassigned", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "chat-main",
+      modelRoleAssignments: { chat: "chat-main" },
+      modelProfiles: [{
+        id: "chat-main",
+        provider: "custom",
+        sourceType: "moonshot_api_key",
+        baseUrl: "https://api.moonshot.cn/v1",
+        model: "moonshot-v1-128k",
+        secretRef: "provider.moonshot.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async () => "kimi-key" } as never,
+    );
+
+    await expect(resolver.resolveRoleFromConfig(config, "coding_plan")).rejects.toThrow("coding_plan 角色尚未分配模型");
+  });
 });

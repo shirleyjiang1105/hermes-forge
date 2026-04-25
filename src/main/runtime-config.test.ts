@@ -33,7 +33,7 @@ describe("RuntimeConfigStore preferred runtime", () => {
     expect(config.hermesRuntime?.installSource).toMatchObject({
       sourceLabel: "pinned",
       repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
-      commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+      commit: "0537bad534a7ce43d683f06f8ebdf7ff9dfb4816",
     });
   });
 
@@ -53,7 +53,7 @@ describe("RuntimeConfigStore preferred runtime", () => {
     expect(config.hermesRuntime?.installSource).toMatchObject({
       sourceLabel: "pinned",
       repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
-      commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+      commit: "0537bad534a7ce43d683f06f8ebdf7ff9dfb4816",
     });
   });
 
@@ -72,7 +72,7 @@ describe("RuntimeConfigStore preferred runtime", () => {
     expect(config.hermesRuntime?.installSource).toMatchObject({
       sourceLabel: "pinned",
       repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
-      commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+      commit: "0537bad534a7ce43d683f06f8ebdf7ff9dfb4816",
     });
   });
 

@@ -7,9 +7,6 @@ import type { AppPaths } from "../main/app-paths";
 import type { RuntimeEnvResolver } from "../main/runtime-env-resolver";
 import type { SessionLog } from "../main/session-log";
 import type { SessionAgentInsightService } from "../main/session-agent-insight-service";
-import type { WindowsNativeIntentService, WindowsNativeIntentResult } from "../main/windows-native-intent-service";
-import type { HermesToolLoopRunner } from "./hermes-tool-loop-runner";
-import type { MemoryBroker } from "../memory/memory-broker";
 import type { SnapshotManager } from "./snapshot-manager";
 import type { TaskPreflightService } from "./task-preflight-service";
 import type { WorkspaceLock } from "./workspace-lock";
@@ -53,7 +50,6 @@ export class TaskRunner {
 
   constructor(
     private readonly appPaths: AppPaths,
-    private readonly memoryBroker: MemoryBroker,
     private readonly workspaceLock: WorkspaceLock,
     private readonly snapshotManager: SnapshotManager,
     private readonly preflightService: TaskPreflightService,
@@ -62,9 +58,22 @@ export class TaskRunner {
     private readonly sessionLog: SessionLog,
     private readonly sessionAgentInsightService: SessionAgentInsightService,
     private readonly getMainWindow: () => BrowserWindow | undefined,
-    private readonly hermesToolLoopRunner?: HermesToolLoopRunner,
-    private readonly windowsNativeIntentService?: WindowsNativeIntentService,
   ) {}
+
+  private cliOwnedContextBundle(workspaceId: string): ContextBundle {
+    return {
+      id: `cli-${Date.now()}`,
+      workspaceId,
+      policy: "isolated",
+      readonly: true,
+      maxCharacters: 0,
+      usedCharacters: 0,
+      sources: [],
+      summary: "Windows 原生模式：Hermes 自行管理记忆与上下文。",
+      createdAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
+    };
+  }
 
   async start(input: StartTaskInput): Promise<TaskStartResult> {
     const startAt = Date.now();
@@ -78,18 +87,6 @@ export class TaskRunner {
 
     await this.publishStage(workspaceId, workSessionId, taskRunId, actualEngine, "preflight", "正在执行 Hermes 运行前检查。");
     await this.publishStep(workspaceId, workSessionId, taskRunId, actualEngine, "stage-preflight-entered", false, "已进入 Hermes 运行前检查阶段。");
-
-    const earlyNative = await this.tryStartWindowsNativeFastPath(input, attachments, {
-      startAt,
-      targetPath,
-      workspaceId,
-      workSessionId,
-      sessionId: taskRunId,
-      actualEngine,
-    });
-    if (earlyNative) {
-      return earlyNative;
-    }
 
     const preflightAt = Date.now();
     await this.preflightService.assertCanStart(input, actualEngine, workspaceId);
@@ -110,9 +107,8 @@ export class TaskRunner {
       this.runtimeEnvResolver.readConfig(),
     ]);
     const runtimeMode = runtimeConfig.hermesRuntime?.mode ?? "windows";
-    const contextBundle = runtimeMode === "wsl"
-      ? this.cliOwnedContextBundle(workspaceId)
-      : await this.memoryBroker.prepareContextBundle(contextRequest);
+    // Windows / WSL 统一让 Hermes 自己管理上下文与记忆，Forge 不再注入。
+    const contextBundle = this.cliOwnedContextBundle(workspaceId);
     await this.publishStep(
       workspaceId,
       workSessionId,
@@ -120,9 +116,7 @@ export class TaskRunner {
       actualEngine,
       "context-complete",
       true,
-      runtimeMode === "wsl"
-        ? `Hermes WSL CLI 将自行处理 session/memory，上下文预注入已关闭，耗时 ${Date.now() - contextAt}ms。`
-        : `Hermes 运行环境和 MEMORY.md 上下文已准备，耗时 ${Date.now() - contextAt}ms。`,
+      `Hermes 将自行处理 session/memory，上下文预注入已关闭，耗时 ${Date.now() - contextAt}ms。`,
     );
     this.metrics.get(taskRunId)!.contextMs = Date.now() - contextAt;
 
@@ -217,47 +211,6 @@ export class TaskRunner {
       permissions,
     };
 
-    const windowsAgentMode = runtimeConfig.hermesRuntime?.windowsAgentMode ?? "hermes_native";
-    if (runtimeMode !== "wsl" && windowsAgentMode === "host_tool_loop" && this.hermesToolLoopRunner?.canRun()) {
-      void this.consumeToolLoopRun(runRequest, controller, workSessionId);
-      await this.publishStep(workspaceId, workSessionId, sessionId, actualEngine, "tool-loop-dispatched", true, `任务已交给宿主 Hermes Tool Loop fallback，启动链路总耗时 ${Date.now() - startAt}ms。`);
-      return {
-        taskRunId: sessionId,
-        workSessionId,
-        workspaceId,
-        contextBundle,
-        snapshotId: snapshot.snapshotId,
-        runtime: {
-          engineId: actualEngine,
-          runtimeMode: "local_fast",
-          providerId: runtimeEnv.provider,
-          modelId: runtimeEnv.model,
-        },
-      };
-    }
-
-    const nativeResult = await this.windowsNativeIntentService?.tryHandle(
-      runRequest,
-      async (event) => this.publish(workspaceId, workSessionId, sessionId, actualEngine, event),
-    );
-    if (nativeResult) {
-      void this.consumeNativeRun(runRequest, nativeResult, controller, workSessionId);
-      await this.publishStep(workspaceId, workSessionId, sessionId, actualEngine, "windows-native-dispatched", true, `任务已交给 Windows 原生兼容执行层，启动链路总耗时 ${Date.now() - startAt}ms。`);
-      return {
-        taskRunId: sessionId,
-        workSessionId,
-        workspaceId,
-        contextBundle,
-        snapshotId: snapshot.snapshotId,
-        runtime: {
-          engineId: actualEngine,
-          runtimeMode: "local_fast",
-          providerId: runtimeEnv.provider,
-          modelId: runtimeEnv.model,
-        },
-      };
-    }
-
     void this.consumeRun(runRequest, controller, workSessionId);
     await this.publishStep(workspaceId, workSessionId, sessionId, actualEngine, "runner-dispatched", true, `任务已交给 Hermes，启动链路总耗时 ${Date.now() - startAt}ms。`);
 
@@ -274,285 +227,6 @@ export class TaskRunner {
         modelId: runtimeEnv.model,
       },
     };
-  }
-
-  private async consumeToolLoopRun(request: EngineRunRequest, controller: AbortController, workSessionId?: string) {
-    const adapterStartedAt = Date.now();
-    const actualEngine = "hermes" as const;
-    try {
-      await this.publishStage(request.workspaceId, workSessionId, request.sessionId, actualEngine, "running", "Hermes Tool Loop 已接手任务。");
-      await this.publishStep(request.workspaceId, workSessionId, request.sessionId, actualEngine, "stage-tool-loop-entered", false, "已进入 Hermes Windows 工具循环。");
-      let failedResult = false;
-      for await (const event of this.hermesToolLoopRunner!.run(
-        request,
-        controller.signal,
-        async (approvalEvent) => this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, approvalEvent),
-      )) {
-        this.captureFirstOutputMetric(request.sessionId, event);
-        if (event.type === "result" && !event.success) {
-          failedResult = true;
-        }
-        await this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, event);
-      }
-      await this.publishTaskMetrics(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        adapterMs: Date.now() - adapterStartedAt,
-        outcome: failedResult ? "failed" : "completed",
-      });
-      if (workSessionId) {
-        await this.sessionAgentInsightService.recordTaskTerminal({
-          sessionId: workSessionId,
-          taskRunId: request.sessionId,
-          status: failedResult ? "failed" : "complete",
-          updatedAt: now(),
-        }).catch((error) => {
-          console.warn("[Hermes Forge] Failed to record session insight terminal state:", error);
-        });
-      }
-      await this.publishStage(request.workspaceId, workSessionId, request.sessionId, actualEngine, failedResult ? "failed" : "completed", "Hermes Tool Loop 任务生命周期已完成。");
-    } catch (error) {
-      const failure = this.classifyFailure(error, controller.signal.aborted);
-      await this.publishTaskMetrics(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        adapterMs: Date.now() - adapterStartedAt,
-        outcome: controller.signal.aborted ? "cancelled" : "failed",
-      });
-      await this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        type: "result",
-        success: false,
-        title: controller.signal.aborted ? "任务已取消" : failure.title,
-        detail: failure.message,
-        at: now(),
-      });
-      if (workSessionId) {
-        await this.sessionAgentInsightService.recordTaskTerminal({
-          sessionId: workSessionId,
-          taskRunId: request.sessionId,
-          status: controller.signal.aborted ? "cancelled" : "failed",
-          updatedAt: now(),
-        }).catch((insightError) => {
-          console.warn("[Hermes Forge] Failed to record session insight terminal failure:", insightError);
-        });
-      }
-      await this.publishStage(request.workspaceId, workSessionId, request.sessionId, actualEngine, controller.signal.aborted ? "cancelled" : "failed", failure.stageMessage);
-    } finally {
-      this.stopWaitNotices(request.sessionId);
-      this.running.delete(request.sessionId);
-      this.usage.delete(request.sessionId);
-      this.lastUsagePublishAt.delete(request.sessionId);
-      this.metrics.delete(request.sessionId);
-      this.streamingLifecyclePublished.delete(request.sessionId);
-      this.lastEventAt.delete(request.sessionId);
-      this.workspaceLock.release(request.workspaceId, request.sessionId);
-    }
-  }
-
-  private async tryStartWindowsNativeFastPath(
-    input: StartTaskInput,
-    attachments: SessionAttachment[],
-    meta: {
-      startAt: number;
-      targetPath: string;
-      workspaceId: string;
-      workSessionId: string;
-      sessionId: string;
-      actualEngine: "hermes";
-    },
-  ): Promise<TaskStartResult | undefined> {
-    if (!this.windowsNativeIntentService) {
-      return undefined;
-    }
-
-    const runtimeConfig = await this.runtimeEnvResolver.readConfig();
-    if (runtimeConfig.hermesRuntime?.mode === "wsl") {
-      return undefined;
-    }
-    const permissions = resolveEnginePermissions(runtimeConfig, meta.actualEngine);
-    const contextBundle = this.emptyContextBundle(meta.workspaceId);
-    const runtimeEnv = this.nativeRuntimeEnv(runtimeConfig, input.modelProfileId);
-    const request: EngineRunRequest = {
-      sessionId: meta.sessionId,
-      conversationId: meta.workSessionId,
-      conversationHistory: input.conversationHistory ?? [],
-      workspaceId: meta.workspaceId,
-      workspacePath: meta.targetPath,
-      userInput: input.userInput,
-      taskType: input.taskType,
-      selectedFiles: input.selectedFiles,
-      attachments,
-      memoryPolicy: "isolated",
-      modelProfileId: input.modelProfileId,
-      runtimeEnv,
-      contextBundle,
-      permissions,
-    };
-
-    const lock = this.workspaceLock.acquire(meta.workspaceId, meta.sessionId, {
-      engineId: meta.actualEngine,
-      taskType: input.taskType,
-      lockedPaths: input.selectedFiles,
-    });
-    if (!lock.acquired) {
-      throw new Error(lock.message);
-    }
-
-    let dispatched = false;
-    try {
-      const nativeResult = await this.windowsNativeIntentService.tryHandle(
-        request,
-        async (event) => this.publish(meta.workspaceId, meta.workSessionId, meta.sessionId, meta.actualEngine, event),
-      );
-      if (!nativeResult) {
-        return undefined;
-      }
-      const controller = new AbortController();
-      dispatched = true;
-      this.running.set(meta.sessionId, controller);
-      this.usage.set(meta.sessionId, createTaskUsageState(0, runtimeEnv, runtimeConfig));
-      void this.consumeNativeRun(request, nativeResult, controller, meta.workSessionId);
-      await this.publishStep(
-        meta.workspaceId,
-        meta.workSessionId,
-        meta.sessionId,
-        meta.actualEngine,
-        "windows-native-fastpath-dispatched",
-        true,
-        `Windows 原生任务已由桌面端直接执行，跳过 Hermes 模型链路，启动耗时 ${Date.now() - meta.startAt}ms。`,
-      );
-      return {
-        taskRunId: meta.sessionId,
-        workSessionId: meta.workSessionId,
-        workspaceId: meta.workspaceId,
-        contextBundle,
-        snapshotId: "windows-native-direct",
-        runtime: {
-          engineId: meta.actualEngine,
-          runtimeMode: "local_fast",
-          providerId: runtimeEnv.provider,
-          modelId: runtimeEnv.model,
-        },
-      };
-    } finally {
-      if (!dispatched) {
-        this.workspaceLock.release(meta.workspaceId, meta.sessionId);
-      }
-    }
-  }
-
-  private emptyContextBundle(workspaceId: string): ContextBundle {
-    const createdAt = now();
-    return {
-      id: `windows-native-${crypto.randomUUID()}`,
-      workspaceId,
-      policy: "isolated",
-      readonly: true,
-      maxCharacters: 0,
-      usedCharacters: 0,
-      sources: [],
-      summary: "",
-      createdAt,
-      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-    };
-  }
-
-  private cliOwnedContextBundle(workspaceId: string): ContextBundle {
-    const createdAt = now();
-    return {
-      id: `hermes-cli-owned-${crypto.randomUUID()}`,
-      workspaceId,
-      policy: "isolated",
-      readonly: true,
-      maxCharacters: 0,
-      usedCharacters: 0,
-      sources: [],
-      summary: "",
-      createdAt,
-      expiresAt: new Date(Date.now() + 5 * 60_000).toISOString(),
-    };
-  }
-
-  private nativeRuntimeEnv(config: RuntimeConfig, modelProfileId?: string): EngineRuntimeEnv {
-    const profile = config.modelProfiles.find((item) => item.id === (modelProfileId ?? config.defaultModelProfileId)) ?? config.modelProfiles[0];
-    return {
-      profileId: profile?.id ?? "windows-native",
-      provider: profile?.provider ?? "local",
-      model: profile?.model ?? "windows-native",
-      baseUrl: profile?.baseUrl,
-      executionMode: "local_fast",
-      env: {},
-    };
-  }
-
-  private async consumeNativeRun(
-    request: EngineRunRequest,
-    result: WindowsNativeIntentResult,
-    controller: AbortController,
-    workSessionId?: string,
-  ) {
-    const actualEngine = "hermes" as const;
-    const startedAt = Date.now();
-    try {
-      await this.publishStage(request.workspaceId, workSessionId, request.sessionId, actualEngine, "running", "Windows 原生执行层已接手任务。");
-      await this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        type: "status",
-        level: "info",
-        message: "已跳过模型推理，直接执行可确定的 Windows 原生操作。",
-        at: now(),
-      });
-      for (const event of result.events) {
-        await this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, event);
-      }
-      await this.publishTaskMetrics(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        adapterMs: Date.now() - startedAt,
-        outcome: result.events.some((event) => event.type === "result" && !event.success) ? "failed" : "completed",
-      });
-      if (workSessionId) {
-        await this.sessionAgentInsightService.recordTaskTerminal({
-          sessionId: workSessionId,
-          taskRunId: request.sessionId,
-          status: result.events.some((event) => event.type === "result" && !event.success) ? "failed" : "complete",
-          updatedAt: now(),
-        }).catch((error) => {
-          console.warn("[Hermes Forge] Failed to record session insight terminal state:", error);
-        });
-      }
-      await this.publishStage(
-        request.workspaceId,
-        workSessionId,
-        request.sessionId,
-        actualEngine,
-        result.events.some((event) => event.type === "result" && !event.success) ? "failed" : "completed",
-        "Windows 原生执行层任务生命周期已完成。",
-      );
-    } catch (error) {
-      await this.publish(request.workspaceId, workSessionId, request.sessionId, actualEngine, {
-        type: "result",
-        success: false,
-        title: "Windows 原生执行失败",
-        detail: error instanceof Error ? error.message : "未知错误",
-        at: now(),
-      });
-      if (workSessionId) {
-        await this.sessionAgentInsightService.recordTaskTerminal({
-          sessionId: workSessionId,
-          taskRunId: request.sessionId,
-          status: "failed",
-          updatedAt: now(),
-        }).catch((insightError) => {
-          console.warn("[Hermes Forge] Failed to record session insight terminal failure:", insightError);
-        });
-      }
-      await this.publishStage(request.workspaceId, workSessionId, request.sessionId, actualEngine, "failed", "Windows 原生执行失败。");
-    } finally {
-      this.running.delete(request.sessionId);
-      this.usage.delete(request.sessionId);
-      this.lastUsagePublishAt.delete(request.sessionId);
-      this.metrics.delete(request.sessionId);
-      this.streamingLifecyclePublished.delete(request.sessionId);
-      this.lastEventAt.delete(request.sessionId);
-      this.workspaceLock.release(request.workspaceId, request.sessionId);
-      if (!controller.signal.aborted) {
-        controller.abort();
-      }
-    }
   }
 
   async cancel(sessionId: string) {

@@ -18,10 +18,15 @@ const ENGINE_PATH_CANDIDATES: Record<EngineId, string[]> = {
   hermes: hermesPathCandidates,
 };
 
+/**
+ * Pinned fork source: Mahiruxia/hermes-agent@codex/launch-metadata-capabilities
+ * See src/install/wsl-hermes-install-service.ts for full rationale.
+ * Official v0.11.0 lacks `capabilities --json` and `--launch-metadata` support.
+ */
 const DEFAULT_PINNED_HERMES_SOURCE = {
   repoUrl: "https://github.com/Mahiruxia/hermes-agent.git",
   branch: "codex/launch-metadata-capabilities",
-  commit: "55af678ec474bfd21ca5697dac08ef4f3fb59c37",
+  commit: "0537bad534a7ce43d683f06f8ebdf7ff9dfb4816",
   sourceLabel: "pinned" as const,
 };
 
@@ -29,6 +34,7 @@ let preferredRuntimeCache: Promise<NonNullable<RuntimeConfig["hermesRuntime"]>> 
 
 const defaultConfig: RuntimeConfig = {
   defaultModelProfileId: "default-local",
+  modelRoleAssignments: { chat: "default-local" },
   modelProfiles: [
     {
       id: "default-local",
@@ -96,6 +102,7 @@ export class RuntimeConfigStore {
     const migratedJson = migrateRuntimeConfigModels(parsedJson);
     const parsed = runtimeConfigSchema.safeParse(migratedJson);
     if (!parsed.success) {
+      console.error("[RuntimeConfigStore] Schema validation failed, resetting to default config:", parsed.error);
       return await defaultConfigWithPreferredRuntime();
     }
     const config = parsed.data as RuntimeConfig;

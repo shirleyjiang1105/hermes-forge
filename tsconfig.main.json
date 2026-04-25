@@ -26,7 +26,8 @@
     "src/process",
     "src/file-manager",
     "src/runtime",
-    "src/install"
+    "src/install",
+    "src/main/model-providers"
   ],
   "exclude": ["src/**/*.test.ts", "src/**/*.test.tsx"]
 }

@@ -1,12 +1,12 @@
 import crypto from "node:crypto";
+import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { AppPaths } from "../../main/app-paths";
+import { readHermesJsonStream } from "./hermes-json-stream-adapter";
 import { resolveActiveHermesHome } from "../../main/hermes-home";
-import { syncHermesWindowsMcpConfig } from "../../main/hermes-native-mcp-config";
 import { MemoryBudgeter } from "../../memory/memory-budgeter";
-import { HermesHeadlessWorker } from "./hermes-headless-worker";
 import {
   createHermesLaunchMetadataSidecar,
   type HermesLaunchMetadataDelivery,
@@ -34,7 +34,6 @@ import type {
   PermissionOverviewBlockReason,
   RuntimeConfig,
 } from "../../shared/types";
-import { HermesWslWorker } from "./hermes-wsl-worker";
 
 const now = () => new Date().toISOString();
 const HEADLESS_RESULT_START = "__HERMES_FORGE_RESULT_START__";
@@ -98,7 +97,7 @@ type HermesCliSessionPlan = {
 
 type HermesCliMetadataTransport = "native-arg-env" | "blocked" | "none";
 
-type HermesCliCapabilitySupport = "native" | "legacy_compatible" | "degraded" | "unsupported";
+type HermesCliCapabilitySupport = "native" | "legacy_compatible" | "degraded" | "resume_only" | "unsupported";
 
 type HermesCliCapabilityProbe = {
   probed: boolean;
@@ -131,8 +130,6 @@ export class HermesCliAdapter implements EngineAdapter {
   label = "Hermes";
   capabilities = ["file_memory", "private_skills", "context_bridge", "cli"] as const;
   private windowsPython?: Promise<{ command: string; argsPrefix: string[]; lastError?: string }>;
-  private windowsHeadlessWorker?: HermesHeadlessWorker;
-  private wslWorker?: HermesWslWorker;
   private readonly liveCliSessionMappings = new Set<string>();
   private cliCapabilityProbe?: { key: string; probe: Promise<HermesCliCapabilityProbe> };
 
@@ -141,7 +138,6 @@ export class HermesCliAdapter implements EngineAdapter {
     private readonly budgeter: MemoryBudgeter,
     private readonly resolveRootPath: () => Promise<string>,
     private readonly readRuntimeConfig?: () => Promise<RuntimeConfig>,
-    private readonly getWindowsBridgeAccess?: (distro?: string) => Promise<{ url: string; token: string; capabilities: string } | undefined>,
     private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
   ) {}
 
@@ -334,18 +330,11 @@ export class HermesCliAdapter implements EngineAdapter {
     const cliSessionPlan = runtime.mode === "wsl"
       ? await this.prepareCliSessionPlan(runtime, rootPath, request, "zhenghebao-client")
       : undefined;
-    const prompt = await this.buildPrompt(request, runtime, cliPermissionStrategy, cliSessionPlan, cliCapabilities);
     if (runtime.mode !== "wsl") {
-      const finalReply = await this.runViaWindowsWorker(rootPath, runtime, prompt, request, signal);
-      yield {
-        type: "result",
-        success: true,
-        title: "Hermes 回复",
-        detail: finalReply || "Hermes 已运行，但没有返回可显示的模型正文。请在右侧“查看过程”检查模型配置、Hermes 日志，或导出诊断报告。",
-        at: now(),
-      };
+      yield* this.runViaNativeWindowsAgent(rootPath, runtime, request, signal);
       return;
     }
+    const prompt = await this.buildPrompt(request, runtime, cliPermissionStrategy, cliSessionPlan, cliCapabilities);
     const invocation = await this.conversationInvocation(rootPath, runtime, prompt, request.workspacePath, request, "zhenghebao-client", cliPermissionStrategy, cliSessionPlan);
     yield this.cliSessionDiagnostic(invocation.sessionPlan, prompt);
     const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request, invocation.env);
@@ -383,7 +372,7 @@ export class HermesCliAdapter implements EngineAdapter {
     }
 
     if (exitCode !== 0) {
-      throw new Error(this.cliFailureMessage(exitCode, stderrLines));
+      throw new Error(this.cliFailureMessage(exitCode, stderrLines, stdoutLines));
     }
 
     const observedSessionId = this.extractSessionId([...stdoutLines, ...stderrLines]);
@@ -411,6 +400,28 @@ export class HermesCliAdapter implements EngineAdapter {
     };
   }
 
+  private buildToolLoopPrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig, transcript: HermesToolLoopMessage[]) {
+    const desktopPath = path.join(os.homedir(), "Desktop");
+    const workspaceForHermes = runtime.mode === "wsl" ? toWslPath(request.workspacePath) : request.workspacePath;
+    return [
+      "你是 Hermes Windows Agent Planner。你必须通过 JSON 工具协议控制 Windows，不要输出 Markdown，不要输出解释性自然语言。",
+      "每轮只能返回一个 JSON object，且必须是二选一：",
+      "{\"type\":\"tool_call\",\"tool\":\"windows.files.writeText\",\"input\":{\"path\":\"%USERPROFILE%\\\\Desktop\\\\demo.txt\",\"content\":\"hello\"}}",
+      "{\"type\":\"final\",\"message\":\"已完成。\"}",
+      "可用工具：windows.files.listDir/readText/writeText/exists/delete；windows.shell.openPath；windows.clipboard.read/write；windows.powershell.run；windows.screenshot.capture；windows.windows.list/focus/close；windows.keyboard.type/pressHotkey；windows.mouse.click/move；windows.ahk.runScript；windows.system.getDesktopPath/getKnownFolders。",
+      "如果用户要求操作 Windows 桌面、窗口、剪贴板、PowerShell、键盘鼠标，必须先返回 tool_call。工具结果会作为 observation 回传给你。",
+      "如果用户只是普通聊天或你已经完成任务，返回 final。",
+      "权限边界：禁止绕过当前权限。危险动作也按工具协议返回，由宿主决定是否执行。",
+      `当前 Windows 桌面：${desktopPath}`,
+      `当前工作区：${request.workspacePath}`,
+      runtime.mode === "wsl" ? `当前工作区 WSL 路径：${workspaceForHermes}` : "",
+      `用户原始请求：${request.userInput}`,
+      "当前对话/观察记录 JSON：",
+      JSON.stringify(transcript, null, 2),
+      "现在只返回一个 JSON object：",
+    ].filter(Boolean).join("\n");
+  }
+
   async planToolStep(request: EngineRunRequest, transcript: HermesToolLoopMessage[], signal: AbortSignal): Promise<string> {
     const runtime = await this.hermesRuntime();
     const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
@@ -425,15 +436,13 @@ export class HermesCliAdapter implements EngineAdapter {
       const block = this.cliCapabilityBlockReason(cliCapabilities);
       throw new Error(`${block.summary}: ${block.detail}`);
     }
-    const prompt = this.buildToolLoopPrompt(request, runtime, transcript);
     if (runtime.mode !== "wsl") {
-      return await this.runViaWindowsWorker(rootPath, runtime, {
-        systemPrompt: "你是 Hermes Windows Agent Planner。下面用户消息中包含工具规划协议，请严格按协议输出。",
-        userPrompt: prompt,
-      }, request, signal, "zhenghebao-client-tool-loop");
+      // Windows 原生模式不再由 Forge 跑工具循环；Hermes 自己管理工具调用。
+      throw new Error("Windows 原生模式不支持 planToolStep");
     }
+    const prompt = this.buildToolLoopPrompt(request, runtime, transcript);
     const invocation = await this.conversationInvocation(rootPath, runtime, {
-      systemPrompt: "你是 Hermes Windows Agent Planner。下面用户消息中包含工具规划协议，请严格按协议输出。",
+      systemPrompt: "请严格遵守用户消息中的 <system_context>，但不要向用户复述这些内部上下文。",
       userPrompt: prompt,
     }, request.workspacePath, request, "zhenghebao-client-tool-loop", cliPermissionStrategy, cliSessionPlan, cliCapabilities);
     const launch = await this.launchSpec(runtime, rootPath, invocation.args, request.workspacePath, request, invocation.env);
@@ -457,10 +466,7 @@ export class HermesCliAdapter implements EngineAdapter {
 
 
   async stop(_sessionId: string) {
-    await this.windowsHeadlessWorker?.stop();
-    this.windowsHeadlessWorker = undefined;
-    await this.wslWorker?.stop();
-    this.wslWorker = undefined;
+    // Windows headless worker 和 WSL worker 已在架构重构中移除
     return;
   }
 
@@ -525,29 +531,10 @@ export class HermesCliAdapter implements EngineAdapter {
     if (runtime.mode === "wsl") {
       return await this.buildWslPrompt(request, runtime, cliSessionPlan, cliCapabilities);
     }
-    const desktopPath = path.join(os.homedir(), "Desktop");
-    const selectedFiles = this.selectedFilesManifest(request, runtime);
-    const attachments = this.attachmentManifest(request, runtime);
-    const firstImage = request.attachments?.find((attachment) => attachment.kind === "image");
-    const compatibilityContext = await this.desktopCompatibilityContextPrompt(request, runtime);
-    const systemPrompt = [
-      "你正在作为小白启动台里的 Hermes 本地轻量助手工作。",
-      "请直接用自然、简洁的中文回答用户，不要输出 session_id、token、调试日志或 CLI 状态。",
-      "如果用户询问运行环境，只回答系统/发行版、当前工作目录和 Python 路径，不要 dump 全量环境变量。",
-      "如果用户只是寒暄，请像正常聊天一样回应；如果用户要求操作项目，请直接处理。",
-      this.permissionInstructions(request),
-      "如果用户提到“桌面”，默认指当前 Windows 用户桌面路径，不要反问路径。",
-      "如果用户没有指定路径，默认使用当前工作区。",
-      `当前工作区：${request.workspacePath}`,
-      `当前 Windows 桌面：${desktopPath}`,
-      this.windowsBridgePrompt(request, runtime),
-      `用户已选文件：${selectedFiles}`,
-      `用户上传附件：\n${attachments}`,
-      firstImage ? `本轮第一张图片已通过 --image 传入 Hermes：${firstImage.path}` : "",
-      compatibilityContext,
-    ].filter(Boolean).join("\n");
+    // Windows 原生模式：Hermes 自己管理上下文、记忆、工具调用。
+    // Forge 不再拼接 system prompt，只把用户原始输入交给 Hermes。
     return {
-      systemPrompt,
+      systemPrompt: "",
       userPrompt: request.userInput,
     };
   }
@@ -571,6 +558,16 @@ export class HermesCliAdapter implements EngineAdapter {
       launchMetadataNativeSupported: nativeSupported,
       launchMetadataTransport: transport,
       cliCapabilities,
+    };
+  }
+
+  private async launchMetadataBridge(runtime: HermesRuntimeConfig, _request: EngineRunRequest): Promise<LaunchMetadataBridge> {
+    return {
+      enabled: false,
+      available: false,
+      mode: runtime.windowsAgentMode ?? "hermes_native",
+      capabilities: [],
+      reason: "Windows Bridge 已在架构重构中移除",
     };
   }
 
@@ -622,162 +619,6 @@ export class HermesCliAdapter implements EngineAdapter {
     }).join("\n");
   }
 
-  private async launchMetadataBridge(runtime: HermesRuntimeConfig, request: EngineRunRequest): Promise<LaunchMetadataBridge> {
-    if (request.permissions?.contextBridge === false) {
-      return {
-        enabled: false,
-        available: false,
-        mode: runtime.windowsAgentMode,
-        capabilities: [],
-        reason: "contextBridge permission is disabled for this turn",
-      };
-    }
-    if (runtime.windowsAgentMode === "disabled") {
-      return {
-        enabled: false,
-        available: false,
-        mode: runtime.windowsAgentMode,
-        capabilities: [],
-        reason: "windowsAgentMode is disabled",
-      };
-    }
-    const bridge = await this.getWindowsBridgeAccess?.(runtime.distro);
-    return {
-      enabled: true,
-      available: Boolean(bridge),
-      mode: runtime.windowsAgentMode ?? "hermes_native",
-      capabilities: this.parseBridgeCapabilities(bridge?.capabilities),
-      reason: bridge ? undefined : "Windows Bridge access was not available",
-    };
-  }
-
-  private parseBridgeCapabilities(raw: string | undefined) {
-    if (!raw?.trim()) return [];
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed)) {
-        return parsed.filter((item): item is string => typeof item === "string");
-      }
-    } catch {
-      // Fall back to comma/space separated capability strings.
-    }
-    return raw.split(/[,\s]+/).map((item) => item.trim()).filter(Boolean);
-  }
-
-  private async desktopCompatibilityContextPrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
-    if (runtime.mode === "wsl") {
-      return "";
-    }
-    const bundle = request.contextBundle?.summary ? `\n\n只读上下文摘要：\n${request.contextBundle.summary}` : "";
-    const attachmentContents = await this.readAttachmentContents(request);
-    const memoryContent = await this.readMemoryContent(request);
-    const conversationHistory = this.conversationHistoryPrompt(request);
-    const parts = [
-      "Compatibility layer: Windows/headless runs still receive desktop-prepared context until that path is moved to the native CLI session model.",
-      attachmentContents,
-      conversationHistory,
-      memoryContent,
-      bundle,
-    ].filter(Boolean);
-    return parts.length ? parts.join("\n") : "";
-  }
-
-  private async readAttachmentContents(request: EngineRunRequest) {
-    const attachments = request.attachments?.filter((attachment) => attachment.kind === "file") ?? [];
-    if (!attachments.length || request.permissions?.workspaceRead === false) return "";
-    const parts: string[] = [];
-    for (const attachment of attachments.slice(0, 8)) {
-      const content = await this.readTextAttachment(attachment.path);
-      if (!content) continue;
-      parts.push([
-        `附件内容：${attachment.name}`,
-        `路径：${attachment.path}`,
-        "```text",
-        content,
-        "```",
-      ].join("\n"));
-    }
-    return parts.length ? `\n以下是宿主应用已读取的本地文件内容，优先依据这些内容回答：\n${parts.join("\n\n")}` : "";
-  }
-
-  private async readTextAttachment(filePath: string) {
-    const stat = await fs.stat(filePath).catch(() => undefined);
-    if (!stat?.isFile() || stat.size > 512 * 1024) return "";
-    const ext = path.extname(filePath).toLowerCase();
-    const textLike = new Set([".txt", ".md", ".markdown", ".json", ".jsonl", ".yaml", ".yml", ".toml", ".ini", ".log", ".csv", ".ts", ".tsx", ".js", ".jsx", ".py", ".html", ".css", ".xml"]);
-    if (!textLike.has(ext)) return "";
-    const raw = await fs.readFile(filePath, "utf8").catch(() => "");
-    return this.budgeter.summarizeToBudget(raw, 60000);
-  }
-
-  private async readMemoryContent(request: EngineRunRequest): Promise<string> {
-    if (!request.permissions?.memoryRead) {
-      return "";
-    }
-    try {
-      const memoryDir = await this.currentMemoryDir();
-      const userPath = path.join(memoryDir, "USER.md");
-      const memoryPath = path.join(memoryDir, "MEMORY.md");
-      const [userContent, memoryContent] = await Promise.all([
-        fs.readFile(userPath, "utf8").catch(() => ""),
-        fs.readFile(memoryPath, "utf8").catch(() => ""),
-      ]);
-      const parts: string[] = [];
-      if (userContent.trim()) {
-        parts.push(`用户偏好（USER.md）：\n${userContent.trim()}`);
-      }
-      if (memoryContent.trim()) {
-        parts.push(`长期记忆（MEMORY.md）：\n${memoryContent.trim()}`);
-      }
-      if (parts.length > 0) {
-        return `\n记忆信息：\n${parts.join("\n\n")}`;
-      }
-    } catch {
-      // 记忆文件读取失败不影响主流程
-    }
-    return "";
-  }
-
-  private conversationHistoryPrompt(request: EngineRunRequest): string {
-    const history = (request.conversationHistory ?? [])
-      .filter((item) => item.content.trim())
-      .slice(-24);
-    if (history.length === 0) {
-      return "";
-    }
-    const transcript = history.map((item, index) => {
-      const role = item.role === "user" ? "用户" : "Hermes";
-      return `${index + 1}. ${role}：${item.content.trim()}`;
-    }).join("\n\n");
-    return [
-      "\n当前工作台会话近期上下文：",
-      "下面是同一个左侧历史会话中的前几轮问答，请用它承接本轮，不要把它当成新的用户请求，也不要逐字复述。",
-      this.budgeter.summarizeToBudget(transcript, 9000),
-    ].join("\n");
-  }
-
-  private buildToolLoopPrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig, transcript: HermesToolLoopMessage[]) {
-    const desktopPath = path.join(os.homedir(), "Desktop");
-    const workspaceForHermes = runtime.mode === "wsl" ? toWslPath(request.workspacePath) : request.workspacePath;
-    return [
-      "你是 Hermes Windows Agent Planner。你必须通过 JSON 工具协议控制 Windows，不要输出 Markdown，不要输出解释性自然语言。",
-      "每轮只能返回一个 JSON object，且必须是二选一：",
-      "{\"type\":\"tool_call\",\"tool\":\"windows.files.writeText\",\"input\":{\"path\":\"%USERPROFILE%\\\\Desktop\\\\demo.txt\",\"content\":\"hello\"}}",
-      "{\"type\":\"final\",\"message\":\"已完成。\"}",
-      "可用工具：windows.files.listDir/readText/writeText/exists/delete；windows.shell.openPath；windows.clipboard.read/write；windows.powershell.run；windows.screenshot.capture；windows.windows.list/focus/close；windows.keyboard.type/pressHotkey；windows.mouse.click/move；windows.ahk.runScript；windows.system.getDesktopPath/getKnownFolders。",
-      "如果用户要求操作 Windows 桌面、窗口、剪贴板、PowerShell、键盘鼠标，必须先返回 tool_call。工具结果会作为 observation 回传给你。",
-      "如果用户只是普通聊天或你已经完成任务，返回 final。",
-      "权限边界：禁止绕过当前权限。危险动作也按工具协议返回，由宿主决定是否执行。",
-      `当前 Windows 桌面：${desktopPath}`,
-      `当前工作区：${request.workspacePath}`,
-      runtime.mode === "wsl" ? `当前工作区 WSL 路径：${workspaceForHermes}` : "",
-      `用户原始请求：${request.userInput}`,
-      "当前对话/观察记录 JSON：",
-      JSON.stringify(transcript, null, 2),
-      "现在只返回一个 JSON object：",
-    ].filter(Boolean).join("\n");
-  }
-
   private imageArgs(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
     const firstImage = request.attachments?.find((attachment) => attachment.kind === "image");
     if (!firstImage) return [];
@@ -795,10 +636,6 @@ export class HermesCliAdapter implements EngineAdapter {
     cliSessionPlan?: HermesCliSessionPlan,
     cliCapabilities?: HermesCliCapabilityProbe,
   ): Promise<HermesInvocation> {
-    if (runtime.mode !== "wsl") {
-      return this.headlessInvocation(rootPath, runtime, prompt, request, source);
-    }
-
     const combinedPrompt = this.combinePromptForCli(prompt);
     const args = [
       this.hermesCliPath(rootPath, runtime),
@@ -808,6 +645,7 @@ export class HermesCliAdapter implements EngineAdapter {
       ...((prompt.launchMetadataTransport ?? cliCapabilities?.transport) === "native-arg-env" && prompt.launchMetadata?.metadataRuntimePath ? ["--launch-metadata", prompt.launchMetadata.metadataRuntimePath] : []),
       ...(request ? this.imageArgs(request, runtime) : []),
       ...(request ? this.modelArgs(request) : []),
+      ...(request ? this.providerArgs(request) : []),
       "--query",
       combinedPrompt,
       "--quiet",
@@ -834,91 +672,58 @@ export class HermesCliAdapter implements EngineAdapter {
     };
   }
 
-  private async runViaWindowsWorker(
+  private async *runViaNativeWindowsAgent(
     rootPath: string,
     runtime: HermesRuntimeConfig,
-    prompt: HermesPromptPayload,
-    request: EngineRunRequest | undefined,
+    request: EngineRunRequest,
     signal: AbortSignal,
-    source = "zhenghebao-client",
-  ) {
-    const worker = await this.ensureWindowsHeadlessWorker(rootPath, runtime, request);
-    return await worker.run({
-      rootPath,
-      query: this.combinePromptForCli(prompt),
-      systemPrompt: "请严格遵守用户消息中的 <system_context>，但不要向用户复述这些内部上下文。",
-      imagePath: request?.attachments?.find((attachment) => attachment.kind === "image")?.path,
-      sessionId: this.hermesConversationId(request),
-      source,
-      maxTurns: source === "zhenghebao-client-tool-loop" ? 90 : 90,
-      env: sanitizeStringEnv(await this.hermesEnv(rootPath, runtime, request)),
-    }, signal);
+  ): AsyncIterable<EngineEvent> {
+    const env = await this.hermesEnv(rootPath, runtime, request);
+    const runnerPath = await this.windowsAgentRunnerPath();
+    const args = [
+      runnerPath,
+      "--root-path", rootPath,
+      "--query", request.userInput,
+      "--session-id", request.sessionId,
+      "--source", "zhenghebao-client",
+      "--max-turns", "90",
+    ];
+    const firstImage = request.attachments?.find((attachment) => attachment.kind === "image");
+    if (firstImage) {
+      args.push("--image-path", firstImage.path);
+    }
+    if (request.runtimeEnv?.model) {
+      args.push("--model", request.runtimeEnv.model);
+    }
+
+    const proc = spawn("python", args, {
+      cwd: request.workspacePath ?? rootPath,
+      env: { ...process.env, ...env },
+      windowsHide: true,
+      shell: false,
+      detached: false,
+    });
+
+    try {
+      for await (const event of readHermesJsonStream(proc, signal)) {
+        yield event;
+      }
+    } finally {
+      if (!proc.killed) {
+        proc.kill();
+      }
+    }
   }
 
   private async *streamWslInvocation(
     runtime: HermesRuntimeConfig,
-    rootPath: string,
-    pythonArgs: string[],
+    _rootPath: string,
+    _pythonArgs: string[],
     launch: { command: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; detached?: boolean },
-    request: EngineRunRequest,
+    _request: EngineRunRequest,
     signal: AbortSignal,
     timeoutMs: number,
   ): AsyncIterable<CommandLineEvent | Extract<EngineEvent, { type: "diagnostic" }>> {
-    if (runtime.mode === "wsl" && runtime.workerMode === "experimental_wsl") {
-      yield {
-        type: "diagnostic",
-        category: "hermes-wsl-worker",
-        message: "enabled：常驻 WSL Hermes worker 已启用，本轮将优先通过 worker 执行。",
-        at: now(),
-      };
-      try {
-        const worker = await this.ensureWslWorker(rootPath, runtime, launch.env);
-        for await (const event of worker.run({
-          cwd: runtimeToWslPath(request.workspacePath),
-          rootPath,
-          args: pythonArgs,
-          env: launch.env,
-          timeoutMs,
-        }, signal)) {
-          if (event.type === "ready") {
-            yield {
-              type: "diagnostic",
-              category: "hermes-wsl-worker",
-              message: event.reused
-                ? "ready：已复用常驻 WSL Hermes worker。"
-                : "ready：常驻 WSL Hermes worker 已启动。",
-              at: now(),
-            };
-            continue;
-          }
-          if (event.type === "started") {
-            continue;
-          }
-          if (event.type === "error") {
-            throw new Error(event.message);
-          }
-          yield event;
-        }
-        return;
-      } catch (error) {
-        if (signal.aborted) throw error;
-        await this.wslWorker?.stop();
-        this.wslWorker = undefined;
-        yield {
-          type: "diagnostic",
-          category: "hermes-wsl-worker",
-          message: `crashed：常驻 WSL Hermes worker 不可用。原因：${error instanceof Error ? error.message : String(error)}`,
-          at: now(),
-        };
-        yield {
-          type: "diagnostic",
-          category: "hermes-wsl-worker",
-          message: `fallback：常驻 Worker 启动或执行失败，已使用普通 WSL 启动。原因：${error instanceof Error ? error.message : String(error)}`,
-          at: now(),
-        };
-      }
-    }
-
     for await (const event of streamCommand(launch.command, launch.args, {
       cwd: launch.cwd,
       signal,
@@ -930,36 +735,6 @@ export class HermesCliAdapter implements EngineAdapter {
     }
   }
 
-  private async headlessInvocation(rootPath: string, runtime: HermesRuntimeConfig, prompt: HermesPromptPayload, request: EngineRunRequest | undefined, source: string): Promise<HermesInvocation> {
-    const promptPath = await this.writePromptFile(prompt.userPrompt);
-    const systemPath = await this.writePromptFile(prompt.systemPrompt, "system");
-    const runnerPath = await this.headlessRunnerPath();
-    const args = [
-      runtime.mode === "wsl" ? toWslPath(runnerPath) : runnerPath,
-      "--root-path",
-      rootPath,
-      "--query-file",
-      runtime.mode === "wsl" ? toWslPath(promptPath) : promptPath,
-      "--system-file",
-      runtime.mode === "wsl" ? toWslPath(systemPath) : systemPath,
-      "--source",
-      source,
-      ...(this.hermesConversationId(request) ? ["--session-id", this.hermesConversationId(request)!] : []),
-    ];
-    const firstImage = request?.attachments?.find((attachment) => attachment.kind === "image");
-    if (firstImage) {
-      args.push("--image-path", runtime.mode === "wsl" ? toWslPath(firstImage.path) : firstImage.path);
-    }
-    return {
-      args,
-      cleanup: async () => {
-        await Promise.all([
-          fs.rm(promptPath, { force: true }).catch(() => undefined),
-          fs.rm(systemPath, { force: true }).catch(() => undefined),
-        ]);
-      },
-    };
-  }
 
   private combinePromptForCli(prompt: HermesPromptPayload) {
     if (!prompt.systemPrompt.trim()) {
@@ -988,30 +763,12 @@ export class HermesCliAdapter implements EngineAdapter {
     return filePath;
   }
 
-  private async headlessRunnerPath() {
+  private async windowsAgentRunnerPath() {
     const processWithResources = process as NodeJS.Process & { resourcesPath?: string };
     const packagedPath = processWithResources.resourcesPath
-      ? path.join(processWithResources.resourcesPath, "hermes-headless-runner.py")
+      ? path.join(processWithResources.resourcesPath, "hermes-windows-agent.py")
       : undefined;
-    const devPath = path.resolve(process.cwd(), "resources", "hermes-headless-runner.py");
-    return packagedPath && await this.exists(packagedPath) ? packagedPath : devPath;
-  }
-
-  private async headlessWorkerPath() {
-    const processWithResources = process as NodeJS.Process & { resourcesPath?: string };
-    const packagedPath = processWithResources.resourcesPath
-      ? path.join(processWithResources.resourcesPath, "hermes-headless-worker.py")
-      : undefined;
-    const devPath = path.resolve(process.cwd(), "resources", "hermes-headless-worker.py");
-    return packagedPath && await this.exists(packagedPath) ? packagedPath : devPath;
-  }
-
-  private async wslWorkerPath() {
-    const processWithResources = process as NodeJS.Process & { resourcesPath?: string };
-    const packagedPath = processWithResources.resourcesPath
-      ? path.join(processWithResources.resourcesPath, "hermes-wsl-worker.py")
-      : undefined;
-    const devPath = path.resolve(process.cwd(), "resources", "hermes-wsl-worker.py");
+    const devPath = path.resolve(process.cwd(), "resources", "hermes-windows-agent.py");
     return packagedPath && await this.exists(packagedPath) ? packagedPath : devPath;
   }
 
@@ -1022,6 +779,35 @@ export class HermesCliAdapter implements EngineAdapter {
       args.push("--model", model);
     }
     return args;
+  }
+
+  private providerArgs(request: EngineRunRequest) {
+    const args: string[] = [];
+    const sourceType = request.runtimeEnv?.sourceType;
+    // Map Forge sourceType to Hermes CLI --provider for providers that need
+    // special handling (e.g. kimi-coding has reasoning_content quirks).
+    const hermesProvider = this.mapSourceTypeToHermesProvider(sourceType);
+    if (hermesProvider) {
+      args.push("--provider", hermesProvider);
+    }
+    return args;
+  }
+
+  private mapSourceTypeToHermesProvider(sourceType: string | undefined): string | undefined {
+    switch (sourceType) {
+      case "kimi_coding_api_key":
+        return "kimi-coding";
+      case "kimi_coding_cn_api_key":
+        return "kimi-coding-cn";
+      case "stepfun_coding_api_key":
+        return "stepfun";
+      case "minimax_coding_api_key":
+        return "minimax";
+      case "minimax_cn_token_plan_api_key":
+        return "minimax-cn";
+      default:
+        return undefined;
+    }
   }
 
   private resolveCliPermissionStrategy(runtime: HermesRuntimeConfig): HermesCliPermissionStrategy {
@@ -1139,6 +925,9 @@ export class HermesCliAdapter implements EngineAdapter {
     } else if (input.supportsLaunchMetadataEnv && input.supportsResume) {
       support = "degraded";
       transport = "blocked";
+    } else if (input.supportsResume && input.cliVersion) {
+      support = "resume_only";
+      transport = "blocked";
     } else {
       support = "unsupported";
       transport = "blocked";
@@ -1170,7 +959,7 @@ export class HermesCliAdapter implements EngineAdapter {
     return {
       code,
       summary: missingFile
-        ? "Hermes Agent 未安装或路径不存在"
+        ? "Hermes Agent 未安装或路径不存在，请重新安装 / 修复安装。"
         : permissionDenied
           ? "Hermes CLI 无执行权限"
           : "Hermes CLI 不满足 Forge WSL 最低能力门槛",
@@ -1299,7 +1088,7 @@ export class HermesCliAdapter implements EngineAdapter {
   ): Promise<{ ok: boolean; reason?: string }> {
     const stat = await fs.stat(stateDbPath).catch(() => undefined);
     if (!stat?.isFile()) {
-      return { ok: false, reason: `Hermes CLI state.db 不存在：${stateDbPath}` };
+      return { ok: false, reason: `Hermes CLI state.db 中找不到 session：${cliSessionId}` };
     }
     if (runtime.mode !== "wsl") {
       return { ok: true };
@@ -1439,31 +1228,15 @@ export class HermesCliAdapter implements EngineAdapter {
       : `session-map-${crypto.createHash("sha256").update(forgeSessionId).digest("hex").slice(0, 16)}`;
   }
 
-  private cliFailureMessage(exitCode: number | null, stderrLines: string[]) {
-    const details = stderrLines
+  private cliFailureMessage(exitCode: number | null, stderrLines: string[], stdoutLines: string[] = []) {
+    const stderrDetails = stderrLines
       .map((line) => line.trim())
       .filter(Boolean)
-      .slice(-8)
+      .slice(-12)
       .join("\n");
-    return details
-      ? `Hermes CLI 退出码 ${exitCode ?? "unknown"}：\n${details}`
+    return stderrDetails
+      ? `Hermes CLI 退出码 ${exitCode ?? "unknown"}：\n${stderrDetails}`
       : `Hermes CLI 退出码 ${exitCode ?? "unknown"}`;
-  }
-
-  private permissionInstructions(request: EngineRunRequest) {
-    const permissions = request.permissions;
-    if (!permissions) return "";
-    const rules = [
-      `读取项目目录：${permissions.workspaceRead ? "允许" : "禁止"}`,
-      `写入/修改文件：${permissions.fileWrite ? "允许" : "禁止"}`,
-      `运行命令：${permissions.commandRun ? "允许" : "禁止"}`,
-      `读取记忆/历史：${permissions.memoryRead ? "允许" : "禁止"}`,
-      `桥接上下文：${permissions.contextBridge ? "允许" : "禁止"}`,
-    ];
-    return [
-      "本轮必须遵守以下权限边界，禁止时只能解释限制并给出人工步骤，不要尝试绕过：",
-      ...rules,
-    ].join("\n");
   }
 
   private async cleanReply(lines: string[], startedAt: number, streamReplyLines: string[] = []) {
@@ -1606,7 +1379,7 @@ export class HermesCliAdapter implements EngineAdapter {
       /^usage\s*:/i.test(text) ||
       /^trace\s*:/i.test(text) ||
       /^debug\s*:/i.test(text) ||
-      /^真实\s*hermes\s*cli\s*已完成/i.test(text) ||
+      /^任务完成[：:]/i.test(text) ||
       /^hermes\s*任务完成/i.test(text) ||
       isHermesCliLifecycleLine(text) ||
       text === HEADLESS_RESULT_START ||
@@ -1637,17 +1410,7 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   private async hermesEnv(rootPath: string, runtime: HermesRuntimeConfig, request?: EngineRunRequest): Promise<NodeJS.ProcessEnv> {
-    const bridge = request?.permissions?.contextBridge === false || runtime.windowsAgentMode === "disabled"
-      ? undefined
-      : await this.getWindowsBridgeAccess?.(runtime.distro);
     const hermesHome = await this.activeHermesHome();
-    if (request) {
-      await syncHermesWindowsMcpConfig({
-        runtime,
-        hermesHome,
-        bridge: (runtime.windowsAgentMode ?? "hermes_native") === "hermes_native" ? bridge : undefined,
-      });
-    }
     const env = {
       PYTHONUTF8: "1",
       PYTHONIOENCODING: "utf-8",
@@ -1666,18 +1429,10 @@ export class HermesCliAdapter implements EngineAdapter {
         HERMES_INFERENCE_PROVIDER: this.hermesProvider(request.runtimeEnv.provider),
         OPENAI_MODEL: request.runtimeEnv.model,
       } : {}),
-      ...(bridge ? {
-        HERMES_WINDOWS_BRIDGE_URL: bridge.url,
-        HERMES_WINDOWS_BRIDGE_TOKEN: bridge.token,
-        HERMES_WINDOWS_BRIDGE_CAPABILITIES: bridge.capabilities,
-        HERMES_WINDOWS_TOOL_MANIFEST_URL: `${bridge.url}/v1/manifest`,
-        HERMES_WINDOWS_AGENT_MODE: runtime.windowsAgentMode ?? "hermes_native",
-      } : {}),
       ...(request?.runtimeEnv?.model ? { OPENAI_MODEL: request.runtimeEnv.model } : {}),
       ...(request?.runtimeEnv?.env ?? {}),
     };
-    const bridgeHost = bridge?.url ? this.hostFromUrl(bridge.url) : undefined;
-    return runtime.mode === "wsl" && bridgeHost ? this.rewriteLocalhostModelUrls(env, bridgeHost) : env;
+    return env;
   }
 
   private hermesProvider(provider: string) {
@@ -1789,73 +1544,6 @@ export class HermesCliAdapter implements EngineAdapter {
     return await this.windowsPython;
   }
 
-  private async ensureWindowsHeadlessWorker(rootPath: string, runtime: HermesRuntimeConfig, request?: EngineRunRequest) {
-    if (!this.windowsHeadlessWorker) {
-      this.windowsHeadlessWorker = new HermesHeadlessWorker(async () => {
-        const env = await this.hermesEnv(rootPath, runtime, request);
-        const python = await this.windowsPythonSpec(rootPath, this.hermesCliPath(rootPath, runtime), env);
-        return {
-          command: python.command,
-          args: [...python.argsPrefix, await this.headlessWorkerPath()],
-          cwd: request?.workspacePath ?? rootPath,
-          env,
-        };
-      });
-    }
-    return this.windowsHeadlessWorker;
-  }
-
-  private async ensureWslWorker(rootPath: string, runtime: HermesRuntimeConfig, env?: NodeJS.ProcessEnv) {
-    const key = this.wslWorkerKey(rootPath, runtime, env);
-    if (this.wslWorker && this.wslWorker.getKey() !== key) {
-      await this.wslWorker.stop();
-      this.wslWorker = undefined;
-    }
-    if (!this.wslWorker) {
-      this.wslWorker = new HermesWslWorker(key, async () => {
-        const workerPath = runtimeToWslPath(await this.wslWorkerPath());
-        const pythonCommand = runtime.pythonCommand?.trim() || "python3";
-        return {
-          command: "wsl.exe",
-          args: [
-            ...this.wslDistroArgs(runtime),
-            "--cd",
-            rootPath,
-            "env",
-            "PYTHONUTF8=1",
-            "PYTHONIOENCODING=utf-8",
-            "PYTHONUNBUFFERED=1",
-            pythonCommand,
-            workerPath,
-          ],
-          cwd: process.cwd(),
-          env: process.env,
-        };
-      });
-    }
-    return this.wslWorker;
-  }
-
-  private wslWorkerKey(rootPath: string, runtime: HermesRuntimeConfig, env?: NodeJS.ProcessEnv) {
-    const envFingerprint = crypto.createHash("sha256").update(JSON.stringify({
-      provider: env?.HERMES_INFERENCE_PROVIDER,
-      model: env?.OPENAI_MODEL,
-      openaiBaseUrl: env?.OPENAI_BASE_URL ?? env?.AI_BASE_URL,
-      anthropicBaseUrl: env?.ANTHROPIC_BASE_URL,
-      hermesHome: env?.HERMES_HOME,
-      bridgeUrl: env?.HERMES_WINDOWS_BRIDGE_URL,
-      bridgeMode: env?.HERMES_WINDOWS_AGENT_MODE,
-    })).digest("hex").slice(0, 16);
-    return [
-      runtime.distro?.trim() ?? "<default>",
-      rootPath,
-      runtime.pythonCommand?.trim() || "python3",
-      runtime.permissionPolicy ?? "bridge_guarded",
-      runtime.cliPermissionMode ?? "yolo",
-      envFingerprint,
-    ].join("\0");
-  }
-
   private async detectWindowsPython(rootPath: string, cliPath: string, env: NodeJS.ProcessEnv) {
     const candidates: Array<{ command: string; argsPrefix: string[] }> = [
       { command: "python", argsPrefix: [] },
@@ -1907,31 +1595,6 @@ export class HermesCliAdapter implements EngineAdapter {
     return runtime.mode === "wsl"
       ? `${rootPath.replace(/\/+$/, "")}/hermes`
       : path.join(rootPath, "hermes");
-  }
-
-  private windowsBridgePrompt(request: EngineRunRequest, runtime: HermesRuntimeConfig) {
-    if (request.permissions?.contextBridge === false) {
-      return "Windows Control Bridge 本轮被权限关闭；需要控制 Windows 原生环境时，请解释限制并给出人工步骤。";
-    }
-    if (runtime.windowsAgentMode === "disabled") {
-      return "Windows Agent 模式已关闭；本轮不要调用 Windows Control Bridge，需要 Windows 原生操作时请说明限制。";
-    }
-    if (runtime.mode === "wsl") {
-      return [
-        "Windows 原生控制由桌面端 Windows Bridge 边界管理；WSL 内 shell/file/git 交给 Hermes CLI 自己执行。",
-        "需要触达 Windows 原生文件、PowerShell、剪贴板、截屏、窗口或键鼠时，只使用 Hermes CLI 暴露的 MCP/Bridge 工具入口；宿主负责 bridge token、capabilities 与 Windows 原生审批。",
-        "不要把提示词规则当成权限控制；如果 Bridge 工具不可用，请说明当前 Windows 原生能力不可达。",
-      ].join("\n");
-    }
-    return [
-      "Windows 原生控制：优先使用你自己的 Hermes 工具/终端能力规划任务；当需要真正触达原生 Windows（文件、PowerShell、剪贴板、截屏、窗口、键鼠）时，调用 Windows Control Bridge 执行，不要尝试直接在 WSL 中控制 Windows GUI，也不要依赖 /mnt/c 挂载。",
-      "Bridge 环境变量：HERMES_WINDOWS_BRIDGE_URL、HERMES_WINDOWS_BRIDGE_TOKEN、HERMES_WINDOWS_BRIDGE_CAPABILITIES、HERMES_WINDOWS_TOOL_MANIFEST_URL、HERMES_WINDOWS_AGENT_MODE。",
-      "工具清单：curl -s \"$HERMES_WINDOWS_TOOL_MANIFEST_URL\" -H \"Authorization: Bearer $HERMES_WINDOWS_BRIDGE_TOKEN\"。",
-      "调用示例：curl -s \"$HERMES_WINDOWS_BRIDGE_URL/v1/health\" -H \"Authorization: Bearer $HERMES_WINDOWS_BRIDGE_TOKEN\"。",
-      "统一工具调用：curl -s -X POST \"$HERMES_WINDOWS_BRIDGE_URL/v1/tool\" -H \"Authorization: Bearer $HERMES_WINDOWS_BRIDGE_TOKEN\" -H \"Content-Type: application/json\" -d '{\"tool\":\"windows.files.writeText\",\"input\":{\"path\":\"%USERPROFILE%\\\\Desktop\\\\demo.txt\",\"content\":\"hello\"}}'。",
-      "用户要求在桌面创建 txt 时，先调用 windows.system.getDesktopPath 获得真实 Windows 桌面路径，再用 windows.files.writeText 写入；成功后可用 windows.shell.openPath 打开桌面或文件。",
-      "PowerShell 示例：curl -s -X POST \"$HERMES_WINDOWS_BRIDGE_URL/v1/tool\" -H \"Authorization: Bearer $HERMES_WINDOWS_BRIDGE_TOKEN\" -H \"Content-Type: application/json\" -d '{\"tool\":\"windows.powershell.run\",\"input\":{\"script\":\"Get-Location\"}}'。",
-    ].join("\n");
   }
 
   private async rootPath() {

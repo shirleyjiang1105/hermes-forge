@@ -12,11 +12,8 @@ import type { SessionAgentInsightService } from "./session-agent-insight-service
 import type { WorkSessionService } from "./work-session-service";
 import type { HermesConnectorService } from "./hermes-connector-service";
 import type { HermesModelSyncService } from "./hermes-model-sync";
-import { syncHermesWindowsMcpConfig } from "./hermes-native-mcp-config";
 import type { HermesWebUiService } from "./hermes-webui-service";
-import type { HermesWindowsBridgeTestService } from "./hermes-windows-bridge-test-service";
 import type { HermesSystemAuditService } from "./hermes-system-audit-service";
-import type { WindowsControlBridge } from "./windows-control-bridge";
 import type { ApprovalService } from "./approval-service";
 import type { EngineAdapter } from "../adapters/engine-adapter";
 import type { SecretVault } from "../auth/secret-vault";
@@ -40,8 +37,10 @@ import {
   inferSourceType as inferConnectionSourceType,
   testModelConnection,
 } from "./model-connection-service";
+import { defaultProviderRegistry } from "./model-providers/registry";
 import { IpcChannels } from "../shared/ipc";
 import {
+  modelRoleSchema,
   runtimeConfigSchema,
   secretRefSchema,
   secretSaveInputSchema,
@@ -59,6 +58,7 @@ import type {
   ManagedWslInstallerPhase,
   ManagedWslInstallerReport,
   ManagedWslInstallerStatus,
+  ModelRole,
   ModelProfile,
   RuntimeConfig,
   SessionAttachment,
@@ -122,6 +122,25 @@ const modelConnectionDraftSchema = z.object({
     "gemini_api_key",
     "deepseek_api_key",
     "huggingface_api_key",
+    "dashscope_api_key",
+    "baidu_wenxin_api_key",
+    "zhipu_api_key",
+    "spark_api_key",
+    "moonshot_api_key",
+    "baichuan_api_key",
+    "minimax_api_key",
+    "yi_api_key",
+    "hunyuan_api_key",
+    "siliconflow_api_key",
+    "volcengine_ark_api_key",
+    "volcengine_coding_api_key",
+    "dashscope_coding_api_key",
+    "zhipu_coding_api_key",
+    "baidu_qianfan_coding_api_key",
+    "tencent_token_plan_api_key",
+    "tencent_hunyuan_token_plan_api_key",
+    "minimax_token_plan_api_key",
+    "kimi_coding_api_key",
     "gemini_oauth",
     "anthropic_local_credentials",
     "github_copilot",
@@ -162,8 +181,6 @@ export type IpcServices = {
   hermesWebUiService: HermesWebUiService;
   hermesConnectorService: HermesConnectorService;
   hermesModelSyncService: HermesModelSyncService;
-  windowsControlBridge: WindowsControlBridge;
-  hermesWindowsBridgeTestService: HermesWindowsBridgeTestService;
   hermesSystemAuditService: HermesSystemAuditService;
   approvalService: ApprovalService;
   runtimeAdapterFactory: RuntimeAdapterFactory;
@@ -234,30 +251,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         await restartGatewayIfRunning(services);
       }
     }
-    await syncCurrentWindowsBridgeConfig(saved).catch((error) => {
-      console.warn("[Hermes Forge] Failed to sync Windows bridge config:", error);
-    });
     return saved;
-  }
-
-  async function syncCurrentWindowsBridgeConfig(config: RuntimeConfig) {
-    const runtime = {
-      mode: config.hermesRuntime?.mode ?? "windows",
-      distro: config.hermesRuntime?.distro?.trim() || undefined,
-      pythonCommand: config.hermesRuntime?.pythonCommand?.trim() || "python3",
-      windowsAgentMode: config.hermesRuntime?.windowsAgentMode ?? "hermes_native",
-    };
-    const permissions = resolveEnginePermissions(config, "hermes");
-    const shouldEnable = permissions.enabled && permissions.contextBridge && runtime.windowsAgentMode !== "disabled";
-    if (shouldEnable) {
-      await services.windowsControlBridge.start();
-    }
-    const host = await services.runtimeAdapterFactory(runtime).getBridgeAccessHost();
-    return syncHermesWindowsMcpConfig({
-      runtime,
-      hermesHome: services.appPaths.hermesDir(),
-      bridge: shouldEnable ? services.windowsControlBridge.accessForHost(host) : undefined,
-    });
   }
 
   ipcMain.handle(IpcChannels.restartApp, () => {
@@ -490,15 +484,6 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.previewFile, (_event, filePath: string) => services.hermesWebUiService.previewFile(workspacePathInputSchema.parse(filePath)));
   ipcMain.handle(IpcChannels.getFileBreadcrumb, (_event, filePath: string) => services.hermesWebUiService.fileBreadcrumb(workspacePathInputSchema.parse(filePath)));
   ipcMain.handle(IpcChannels.getGitInfo, (_event, workspacePath: string) => services.hermesWebUiService.gitInfo(workspacePathInputSchema.parse(workspacePath)));
-  ipcMain.handle(IpcChannels.respondApproval, (_event, input) => {
-    const parsed = z.object({
-      id: z.string().trim().min(1).max(160),
-      choice: z.enum(["once", "session", "always", "deny"]),
-      editedCommand: z.string().trim().max(4000).optional(),
-    }).parse(input ?? {});
-    return services.approvalService.respond(parsed);
-  });
-
   ipcMain.handle(IpcChannels.getHermesStatus, async (_event, workspacePath?: string): Promise<HermesStatusSummary> => {
     const config = await services.configStore.read();
     const workspaceId = workspacePath
@@ -524,7 +509,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.probeHermes, async (_event, workspacePath?: string) => {
     if (!services.hermes.warmup) return { ok: false, message: "Hermes 当前没有可用的深度探针。", probeKind: "real", diagnosticCategory: "unknown" };
     const config = await services.configStore.read();
-    const runtimeEnv = await services.runtimeEnvResolver.resolve(config.defaultModelProfileId);
+    const runtimeEnv = await services.runtimeEnvResolver.resolveRoleFromConfig(config, "chat");
     return services.hermes.warmup("real", workspacePath, runtimeEnv);
   });
 
@@ -580,14 +565,12 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     }
   });
   ipcMain.handle(IpcChannels.getRuntimeConfig, () => readRuntimeConfigWithModelFallback(services));
+  ipcMain.handle(IpcChannels.listModelProviders, () => defaultProviderRegistry.definitions());
   ipcMain.handle(IpcChannels.getPermissionOverview, async () => {
     const config = await services.configStore.read();
-    await syncCurrentWindowsBridgeConfig(config).catch((error) => {
-      console.warn("[Hermes Forge] Failed to refresh Windows bridge config for permission overview:", error);
-    });
     return buildPermissionOverview({
       config,
-      bridge: services.windowsControlBridge.status(),
+      bridge: { running: false, capabilities: [] },
       appPaths: services.appPaths,
       resolveHermesRoot: async () => {
         return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
@@ -604,7 +587,6 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
       hermesConnectorService: services.hermesConnectorService,
     }),
   );
-  ipcMain.handle(IpcChannels.testHermesWindowsBridge, () => services.hermesWindowsBridgeTestService.test());
   ipcMain.handle(IpcChannels.testHermesSystemAudit, () => services.hermesSystemAuditService.test());
   ipcMain.handle(IpcChannels.getConfigOverview, async (_event, workspacePath?: string) => {
     const runtimeConfig = await readRuntimeConfigWithModelFallback(services);
@@ -628,7 +610,7 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
         rootPath: hermesPath,
         warmupMode: runtimeConfig.startupWarmupMode ?? "cheap",
         runtime: runtimeConfig.hermesRuntime ?? { mode: "windows", pythonCommand: "python3" },
-        bridge: services.windowsControlBridge.status(),
+        bridge: { running: false, capabilities: [] },
         permissions: {
           enabled: runtimeConfig.enginePermissions?.hermes?.enabled ?? true,
           workspaceRead: runtimeConfig.enginePermissions?.hermes?.workspaceRead ?? true,
@@ -640,6 +622,8 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
       },
       models: {
         defaultProfileId: runtimeConfig.defaultModelProfileId,
+        roleAssignments: runtimeConfig.modelRoleAssignments ?? {},
+        providers: defaultProviderRegistry.definitions(),
         providerProfiles: runtimeConfig.providerProfiles ?? [],
         modelProfiles: runtimeConfig.modelProfiles,
         summary: modelSummary,
@@ -716,13 +700,20 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     const parsed = z.object({
       defaultProfileId: z.string().max(120).optional(),
       defaultModelId: z.string().max(120).optional(),
+      modelRoleAssignments: z.partialRecord(modelRoleSchema, z.string().trim().min(1).max(120)).optional(),
       modelProfiles: z.array(z.any()).optional(),
       providerProfiles: z.array(z.any()).optional(),
     }).parse(input);
     const config = await services.configStore.read();
+    const defaultModelProfileId = parsed.defaultModelId ?? parsed.defaultProfileId ?? parsed.modelRoleAssignments?.chat ?? config.defaultModelProfileId;
     return writeRuntimeConfigWithModelSync(migrateRuntimeConfigModels({
       ...config,
-      defaultModelProfileId: parsed.defaultModelId ?? parsed.defaultProfileId ?? config.defaultModelProfileId,
+      defaultModelProfileId,
+      modelRoleAssignments: {
+        ...(config.modelRoleAssignments ?? {}),
+        ...(parsed.modelRoleAssignments ?? {}),
+        ...(defaultModelProfileId ? { chat: defaultModelProfileId } : {}),
+      },
       modelProfiles: parsed.modelProfiles ?? config.modelProfiles,
       providerProfiles: parsed.providerProfiles ?? config.providerProfiles,
     }), true);
@@ -748,6 +739,10 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     const next = migrateRuntimeConfigModels({
       ...previous,
       defaultModelProfileId: clicked,
+      modelRoleAssignments: {
+        ...(previous.modelRoleAssignments ?? {}),
+        chat: clicked,
+      },
     });
     let saved: RuntimeConfig;
     try {
@@ -776,9 +771,6 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     try {
       const sync = await services.hermesModelSyncService.syncRuntimeConfig(reloaded);
       if (sync.synced) await restartGatewayIfRunning(services);
-      await syncCurrentWindowsBridgeConfig(reloaded).catch((error) => {
-        console.warn("[Hermes Forge] Failed to sync Windows bridge config after model default change:", error);
-      });
       console.info("[Hermes Forge] set default model Hermes sync result", sync);
     } catch (error) {
       syncWarning = error instanceof Error ? error.message : "Hermes 运行时同步失败。";
@@ -790,6 +782,116 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
       models: reloaded.modelProfiles,
       code: syncWarning ? "HERMES_SYNC_DEFERRED" : undefined,
       message: syncWarning ? `默认模型已保存；Hermes/Bridge 同步稍后重试。${syncWarning}` : undefined,
+    };
+  });
+  ipcMain.handle(IpcChannels.setModelRole, async (_event, input) => {
+    const parsed = z.object({
+      role: modelRoleSchema,
+      profileId: z.string().trim().min(1).max(120),
+    }).parse(input);
+    const previous = migrateRuntimeConfigModels(await services.configStore.read());
+    const profile = previous.modelProfiles.find((item) => item.id === parsed.profileId);
+    if (!profile) {
+      return { success: false, code: "MODEL_NOT_FOUND", message: `没有找到模型：${parsed.profileId}` };
+    }
+    const roleCheck = modelSupportsRuntimeRole(profile, parsed.role);
+    if (!roleCheck.ok) {
+      return { success: false, code: "ROLE_NOT_SUPPORTED", message: roleCheck.message };
+    }
+    const next = migrateRuntimeConfigModels({
+      ...previous,
+      defaultModelProfileId: parsed.role === "chat" ? profile.id : previous.defaultModelProfileId,
+      modelRoleAssignments: {
+        ...(previous.modelRoleAssignments ?? {}),
+        [parsed.role]: profile.id,
+        ...(parsed.role === "chat" ? { chat: profile.id } : {}),
+      },
+    });
+    const saved = await writeRuntimeConfigWithModelSync(next, true);
+    return {
+      success: true,
+      role: parsed.role,
+      profileId: profile.id,
+      defaultModelId: saved.defaultModelProfileId,
+      modelRoleAssignments: saved.modelRoleAssignments ?? {},
+      models: saved.modelProfiles,
+      message: parsed.role === "coding_plan"
+        ? "Coding Plan 模型已保存到 Hermes Forge 配置；当前 Hermes Agent 尚未消费独立 Coding Plan runtime。"
+        : "主模型已同步到 Hermes。",
+    };
+  });
+  ipcMain.handle(IpcChannels.syncHermesModelRuntime, async () => {
+    const config = await services.configStore.read();
+    const sync = await services.hermesModelSyncService.syncRuntimeConfig(config);
+    if (sync.synced) await restartGatewayIfRunning(services);
+    return sync;
+  });
+  ipcMain.handle(IpcChannels.testModelRuntimeRole, async (_event, input) => {
+    const parsed = z.object({ role: modelRoleSchema }).parse(input);
+    const config = await services.configStore.read();
+    const profileId = config.modelRoleAssignments?.[parsed.role] ?? (parsed.role === "chat" ? config.defaultModelProfileId : undefined);
+    const profile = profileId ? config.modelProfiles.find((item) => item.id === profileId) : undefined;
+    if (!profile) {
+      return {
+        ok: false,
+        role: parsed.role,
+        code: "MODEL_ROLE_UNASSIGNED",
+        message: `${parsed.role} 角色尚未分配模型。`,
+      };
+    }
+    const roleCheck = modelSupportsRuntimeRole(profile, parsed.role);
+    if (!roleCheck.ok) {
+      return {
+        ok: false,
+        role: parsed.role,
+        profileId: profile.id,
+        code: "ROLE_NOT_SUPPORTED",
+        message: roleCheck.message,
+      };
+    }
+    const health = await testModelConnection({
+      draft: {
+        sourceType: profile.sourceType ?? inferConnectionSourceType(profile.provider, profile.baseUrl),
+        profileId: profile.id,
+        provider: profile.provider,
+        baseUrl: profile.baseUrl,
+        model: profile.model,
+        secretRef: profile.secretRef,
+        maxTokens: profile.maxTokens,
+      },
+      config,
+      secretVault: services.secretVault,
+      runtimeAdapterFactory: services.runtimeAdapterFactory,
+      resolveHermesRoot: async () => {
+        return config.hermesRuntime?.mode === "wsl" && config.hermesRuntime?.managedRoot?.trim()
+          ? config.hermesRuntime.managedRoot.trim()
+          : services.configStore.getEnginePath("hermes");
+      },
+    });
+    if (!health.ok) {
+      return {
+        ok: false,
+        role: parsed.role,
+        profileId: profile.id,
+        model: profile.model,
+        baseUrl: profile.baseUrl,
+        provider: profile.provider,
+        code: health.failureCategory ?? "MODEL_RUNTIME_TEST_FAILED",
+        message: health.message,
+        recommendedFix: health.recommendedFix,
+        health,
+      };
+    }
+    const runtime = await services.runtimeEnvResolver.resolveRoleFromConfig(config, parsed.role);
+    return {
+      ok: true,
+      role: parsed.role,
+      profileId: runtime.profileId,
+      model: runtime.model,
+      baseUrl: runtime.baseUrl,
+      provider: runtime.provider,
+      message: `${parsed.role} 运行环境测试通过。`,
+      health,
     };
   });
   ipcMain.handle(IpcChannels.saveRuntimeConfig, (_event, config) =>
@@ -849,6 +951,29 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     services.oneClickDiagnosticsOrchestrator.exportLatest(workspacePath),
   );
   ipcMain.handle(IpcChannels.oneClickDiagnosticsStatus, () => services.oneClickDiagnosticsOrchestrator.getStatus());
+
+  // Windows 原生模式 stub：前端仍可能调用这些方法，但底层桥接/审批服务已删除
+  ipcMain.handle(IpcChannels.respondApproval, (_event, input: { id: string; choice: string }) => ({
+    ok: true,
+    id: input.id,
+    approved: true,
+    message: "Windows 原生模式无需审批中介",
+  }));
+  ipcMain.handle(IpcChannels.testHermesWindowsBridge, async () => {
+    const config = await services.configStore.read();
+    const runtimeMode = config.hermesRuntime?.mode ?? "windows";
+    return {
+      ok: false,
+      mode: runtimeMode,
+      message: "Windows 原生模式不依赖 WindowsControlBridge",
+      steps: [{
+        id: "bridge-running" as const,
+        label: "Bridge 运行状态",
+        status: "skipped" as const,
+        message: "Windows 原生模式无需桥接",
+      }],
+    };
+  });
 }
 
 async function readRuntimeConfigWithModelFallback(services: IpcServices) {
@@ -1179,6 +1304,25 @@ function normalizeProviderBaseUrl(provider: ModelProfile["provider"], baseUrl?: 
 function sourceTypeFromProfile(profile: Pick<ModelProfile, "provider" | "baseUrl">): ModelConnectionTestResult["sourceType"] {
   if (profile.provider === "custom") {
     const baseUrl = profile.baseUrl?.toLowerCase() ?? "";
+    if (baseUrl.includes("coding-intl.dashscope.aliyuncs.com")) return "dashscope_coding_api_key";
+    if (baseUrl.includes("dashscope.aliyuncs.com")) return "dashscope_api_key";
+    if (baseUrl.includes("open.bigmodel.cn/api/coding/paas/v4")) return "zhipu_coding_api_key";
+    if (baseUrl.includes("bigmodel.cn")) return "zhipu_api_key";
+    if (baseUrl.includes("api.kimi.com/coding/v1")) return "kimi_coding_api_key";
+    if (baseUrl.includes("moonshot.cn")) return "moonshot_api_key";
+    if (baseUrl.includes("qianfan.baidubce.com/v2/coding")) return "baidu_qianfan_coding_api_key";
+    if (baseUrl.includes("aip.baidubce.com")) return "baidu_wenxin_api_key";
+    if (baseUrl.includes("spark-api-open.xf-yun.com")) return "spark_api_key";
+    if (baseUrl.includes("baichuan-ai.com")) return "baichuan_api_key";
+    if (baseUrl.includes("api.minimaxi.com/v1")) return "minimax_token_plan_api_key";
+    if (baseUrl.includes("minimax.chat")) return "minimax_api_key";
+    if (baseUrl.includes("lingyiwanwu.com")) return "yi_api_key";
+    if (baseUrl.includes("api.lkeap.cloud.tencent.com/plan/v3")) return "tencent_token_plan_api_key";
+    if (baseUrl.includes("tokenhub.tencentmaas.com/plan/v3")) return "tencent_hunyuan_token_plan_api_key";
+    if (baseUrl.includes("hunyuan.cloud.tencent.com")) return "hunyuan_api_key";
+    if (baseUrl.includes("siliconflow.cn")) return "siliconflow_api_key";
+    if (baseUrl.includes("ark.cn-beijing.volces.com/api/coding")) return "volcengine_coding_api_key";
+    if (baseUrl.includes("ark.cn-beijing.volces.com")) return "volcengine_ark_api_key";
     return baseUrl.includes(":11434")
       ? "ollama"
       : baseUrl.includes(":1234")
@@ -1202,7 +1346,7 @@ function sourceTypeFromProfile(profile: Pick<ModelProfile, "provider" | "baseUrl
 
 function draftToModelProfile(draft: z.infer<typeof modelConnectionDraftSchema>): ModelProfile {
   const provider =
-    ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible", "legacy"].includes(draft.sourceType)
+    ["ollama", "vllm", "sglang", "lm_studio", "openai_compatible", "legacy", "dashscope_api_key", "baidu_wenxin_api_key", "zhipu_api_key", "spark_api_key", "moonshot_api_key", "baichuan_api_key", "minimax_api_key", "yi_api_key", "hunyuan_api_key", "siliconflow_api_key", "volcengine_ark_api_key", "volcengine_coding_api_key", "dashscope_coding_api_key", "zhipu_coding_api_key", "baidu_qianfan_coding_api_key", "tencent_token_plan_api_key", "tencent_hunyuan_token_plan_api_key", "minimax_token_plan_api_key", "kimi_coding_api_key"].includes(draft.sourceType)
       ? "custom"
       : draft.sourceType === "openrouter_api_key"
         ? "openrouter"
@@ -1439,4 +1583,32 @@ async function exists(targetPath: string) {
   } catch {
     return false;
   }
+}
+
+function modelSupportsRuntimeRole(profile: ModelProfile, role: ModelRole) {
+  const definition = defaultProviderRegistry.definitions().find((item) => item.sourceType === profile.sourceType)
+    ?? defaultProviderRegistry.getByModelOrUrl(profile.model, profile.baseUrl).definition;
+  const runtimeCompatibility = definition.runtimeCompatibility ?? "runtime";
+  if (runtimeCompatibility === "connection_only") {
+    return { ok: false, message: `${definition.label} 当前只支持连接测试，暂不能同步到 Hermes runtime。` };
+  }
+  const roles = definition.roleCapabilities ?? (profile.sourceType === "volcengine_coding_api_key" ? ["coding_plan"] : ["chat"]);
+  if (!roles.includes(role)) {
+    return {
+      ok: false,
+      message: role === "coding_plan"
+        ? "这个模型不是 Coding Plan / Token Plan 专用入口，请选择声明支持 coding_plan 的 Provider。"
+        : "这个模型不能作为主模型运行。",
+    };
+  }
+  if (role === "chat" && profile.agentRole && profile.agentRole !== "primary_agent") {
+    return { ok: false, message: "这个模型的工具调用或上下文能力不足，不能作为 Hermes 主模型。" };
+  }
+  if ((role === "chat" || role === "coding_plan") && profile.supportsTools === false) {
+    return { ok: false, message: "这个模型最近一次测试没有通过 tool calling，不能同步给 Hermes runtime。" };
+  }
+  if (profile.lastHealthStatus === "failed") {
+    return { ok: false, message: "这个模型最近一次健康检查失败，请重新测试通过后再设置用途。" };
+  }
+  return { ok: true, message: "ok" };
 }

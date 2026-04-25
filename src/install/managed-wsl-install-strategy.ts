@@ -34,14 +34,15 @@ export class ManagedWslInstallStrategy implements InstallStrategy {
     };
   }
 
-  async update(): Promise<InstallStrategyUpdateResult> {
-    const plan = await this.plan({ mode: "wsl" });
+  async update(publish?: InstallPublisher, _options: InstallOptions = {}): Promise<InstallStrategyUpdateResult> {
+    const report = await this.installerService.install(publish);
     return {
-      ok: false,
+      ok: report.finalInstallerState === "completed",
       engineId: "hermes",
-      message: "Managed WSL update 尚未实现；当前仅提供可正式调用的安装/repair 链路。",
-      log: plan.steps.map((step) => `[${step.phase}] ${step.summary}`),
-      plan,
+      rootPath: report.managedRoot,
+      message: report.summary,
+      log: report.timeline.map((step) => `[${step.phase}] ${step.code}: ${step.summary}${step.detail ? ` | ${step.detail}` : ""}`),
+      plan: this.reportToPlan(report),
     };
   }
 

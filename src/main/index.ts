@@ -1,5 +1,6 @@
 import { app, BrowserWindow } from "electron";
 import path from "node:path";
+import { IpcChannels } from "../shared/ipc";
 import { AppPaths } from "./app-paths";
 import { AutoHotkeyService } from "./autohotkey-service";
 import { registerIpcHandlers } from "./ipc";
@@ -7,11 +8,8 @@ import { RuntimeConfigStore } from "./runtime-config";
 import { RuntimeEnvResolver } from "./runtime-env-resolver";
 import { SessionLog } from "./session-log";
 import { ApprovalService } from "./approval-service";
-import { HermesWindowsBridgeTestService } from "./hermes-windows-bridge-test-service";
 import { HermesSystemAuditService } from "./hermes-system-audit-service";
 import { SessionAgentInsightService } from "./session-agent-insight-service";
-import { WindowsControlBridge } from "./windows-control-bridge";
-import { WindowsToolExecutor } from "./windows-tool-executor";
 import { WorkSessionService } from "./work-session-service";
 import { HermesCliAdapter } from "../adapters/hermes/hermes-cli-adapter";
 import { SecretVault } from "../auth/secret-vault";
@@ -23,9 +21,7 @@ import { HermesModelSyncService } from "./hermes-model-sync";
 import { HermesWebUiService } from "./hermes-webui-service";
 import { ModelRuntimeProxyService } from "./model-runtime-proxy";
 import { MemoryBudgeter } from "../memory/memory-budgeter";
-import { MemoryBroker } from "../memory/memory-broker";
 import { SnapshotManager } from "../process/snapshot-manager";
-import { HermesToolLoopRunner } from "../process/hermes-tool-loop-runner";
 import { TaskPreflightService } from "../process/task-preflight-service";
 import { TaskRunner } from "../process/task-runner";
 import { WorkspaceLock } from "../process/workspace-lock";
@@ -59,7 +55,6 @@ const isDevMode = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isSystemAuditMode = process.argv.includes("--system-audit") || process.env.HERMES_FORGE_SYSTEM_AUDIT === "1";
 
 let mainWindow: BrowserWindow | undefined;
-let windowsControlBridge: WindowsControlBridge | undefined;
 let shutdownStarted = false;
 
 app.whenReady().then(async () => {
@@ -109,64 +104,18 @@ app.whenReady().then(async () => {
   const approvalService = new ApprovalService(appPaths);
   const budgeter = new MemoryBudgeter();
   const autoHotkeyService = new AutoHotkeyService();
-  const windowsToolExecutor = new WindowsToolExecutor(
-    async () => resolveEnginePermissions(await configStore.read(), "hermes"),
-    autoHotkeyService,
-    runCommand,
-    async (input) => approvalService.request({
-      taskRunId: input.taskRunId,
-      title: input.title,
-      command: input.command,
-      path: input.path,
-      patternKey: input.patternKey,
-      actionKind: input.actionKind,
-      details: input.details,
-      risk: input.risk,
-    }, input.publish),
-  );
-  windowsControlBridge = new WindowsControlBridge(
-    async () => resolveEnginePermissions(await configStore.read(), "hermes"),
-    () => app.getVersion(),
-    windowsToolExecutor,
-  );
-  const runtimeProbeService = new RuntimeProbeService(configStore, hermesRuntimeResolver, windowsControlBridge, fetch);
+  const runtimeProbeService = new RuntimeProbeService(configStore, hermesRuntimeResolver, undefined, fetch);
   const runtimeAdapterFactory: RuntimeAdapterFactory = (runtime) =>
     runtime.mode === "wsl"
       ? new WslRuntimeAdapter(runtime, hermesRuntimeResolver, runtimeProbeService)
       : new NativeRuntimeAdapter(runtime, hermesRuntimeResolver, runtimeProbeService);
-  const hermesWindowsBridgeTestService = new HermesWindowsBridgeTestService(
-    windowsControlBridge,
-    () => configStore.read(),
-    fetch,
-    runCommand,
-    windowsToolExecutor,
-    runtimeProbeService,
-  );
   const hermes = new HermesCliAdapter(
     appPaths,
     budgeter,
     resolveHermesRoot,
     () => configStore.read(),
-    async (distro?: string) => {
-      const config = await configStore.read();
-      const permissions = resolveEnginePermissions(config, "hermes");
-      if (!permissions.contextBridge || !permissions.enabled) {
-        return undefined;
-      }
-      await windowsControlBridge?.start();
-      const runtime = hermesRuntimeResolver.runtimeFromConfig({
-        ...config,
-        hermesRuntime: {
-          ...(config.hermesRuntime ?? { mode: "windows", pythonCommand: "python3", windowsAgentMode: "hermes_native" }),
-          distro: distro ?? config.hermesRuntime?.distro,
-        },
-      });
-      const host = await runtimeAdapterFactory(runtime).getBridgeAccessHost();
-      return windowsControlBridge?.accessForHost(host);
-    },
     runtimeAdapterFactory,
   );
-  const memoryBroker = new MemoryBroker(budgeter);
   const sessionLog = new SessionLog(appPaths);
   const sessionAgentInsightService = new SessionAgentInsightService(appPaths, sessionLog);
   const workSessionService = new WorkSessionService(appPaths);
@@ -180,7 +129,7 @@ app.whenReady().then(async () => {
   await secretVault.status();
   const modelRuntimeProxyService = new ModelRuntimeProxyService();
   const runtimeEnvResolver = new RuntimeEnvResolver(configStore, secretVault, modelRuntimeProxyService);
-  const hermesModelSyncService = new HermesModelSyncService(runtimeEnvResolver, () => appPaths.hermesDir());
+  const hermesModelSyncService = new HermesModelSyncService(runtimeEnvResolver, () => appPaths.hermesDir(), runtimeAdapterFactory);
   // Startup must stay lightweight: model/bridge synchronization can touch WSL,
   // Hermes files, or local bridge processes, so it is deferred to explicit UI
   // actions and config-save paths.
@@ -220,7 +169,7 @@ app.whenReady().then(async () => {
     wslDoctorReportService,
     async () => buildPermissionOverview({
       config: await configStore.read(),
-      bridge: windowsControlBridge?.status() ?? { running: false, capabilities: [] },
+      bridge: { running: false, capabilities: [] },
       appPaths,
       resolveHermesRoot,
       runtimeAdapterFactory,
@@ -242,7 +191,6 @@ app.whenReady().then(async () => {
     runtimeAdapterFactory,
     () => configStore.read(),
   );
-  const hermesToolLoopRunner = new HermesToolLoopRunner(hermes, windowsToolExecutor);
   const preflightService = new TaskPreflightService(
     appPaths,
     workspaceLock,
@@ -261,7 +209,6 @@ app.whenReady().then(async () => {
     console.log("__HERMES_FORGE_SYSTEM_AUDIT_START__");
     console.log(JSON.stringify(result, null, 2));
     console.log("__HERMES_FORGE_SYSTEM_AUDIT_END__");
-    await windowsControlBridge?.stop();
     await hermes.stop("system-audit");
     await hermesConnectorService.shutdown();
     await modelRuntimeProxyService.shutdown();
@@ -319,7 +266,6 @@ app.whenReady().then(async () => {
 
   const taskRunner = new TaskRunner(
     appPaths,
-    memoryBroker,
     workspaceLock,
     snapshotManager,
     preflightService,
@@ -328,7 +274,6 @@ app.whenReady().then(async () => {
     sessionLog,
     sessionAgentInsightService,
     () => mainWindow,
-    hermesToolLoopRunner,
   );
   const activeOneClickDiagnosticsOrchestrator = new OneClickDiagnosticsOrchestrator(
     configStore,
@@ -364,8 +309,6 @@ app.whenReady().then(async () => {
     hermesWebUiService,
     hermesConnectorService,
     hermesModelSyncService,
-    windowsControlBridge,
-    hermesWindowsBridgeTestService,
     hermesSystemAuditService,
     approvalService,
     runtimeAdapterFactory,
@@ -400,6 +343,24 @@ app.whenReady().then(async () => {
   };
 
   scheduleStartupWarmup();
+
+  // 启动后延迟检查 Hermes Agent 与 Forge v0.2.0+ 的兼容性（仅 Windows 原生模式）
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const check = await setupService.checkHermesAgentCompatibility();
+        if (check.status !== "ok" && mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(IpcChannels.hermesAgentCompatibilityWarning, {
+            compatible: false,
+            message: check.message,
+          });
+        }
+      } catch (error) {
+        console.warn("[Hermes Forge] Hermes Agent compatibility check failed:", error);
+      }
+    })();
+  }, 8000);
+
   clientAutoUpdateService.scheduleStartupCheck(30000);
 
   app.on("activate", () => {
@@ -425,7 +386,6 @@ app.whenReady().then(async () => {
       { id: "task-runner-drain", timeoutMs: 5000, run: () => taskRunner.shutdown("app-shutdown") },
       { id: "active-command-kill", timeoutMs: 3000, run: async () => killActiveCommands() },
       { id: "hermes-stop", timeoutMs: 5000, run: () => hermes.stop("app-shutdown") },
-      { id: "bridge-stop", timeoutMs: 5000, run: async () => { await windowsControlBridge?.stop(); } },
       { id: "connector-shutdown", timeoutMs: 8000, run: () => hermesConnectorService.shutdown() },
       { id: "model-runtime-proxy-shutdown", timeoutMs: 5000, run: () => modelRuntimeProxyService.shutdown() },
     ]).then((report) => {

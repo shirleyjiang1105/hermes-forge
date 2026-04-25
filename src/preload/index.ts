@@ -224,6 +224,10 @@ const api = {
   updateHermesConfig: (input: unknown) => ipcRenderer.invoke(IpcChannels.updateHermesConfig, input) as Promise<RuntimeConfig>,
   updateModelConfig: (input: unknown) => ipcRenderer.invoke(IpcChannels.updateModelConfig, input) as Promise<RuntimeConfig>,
   setDefaultModel: (modelId: string) => ipcRenderer.invoke(IpcChannels.setDefaultModel, { modelId }) as Promise<{ success: boolean; code?: string; message?: string; defaultModelId?: string; models?: RuntimeConfig["modelProfiles"] }>,
+  setModelRole: (input: { role: string; profileId: string }) => ipcRenderer.invoke(IpcChannels.setModelRole, input) as Promise<{ success: boolean; code?: string; message?: string; role?: string; profileId?: string; defaultModelId?: string; modelRoleAssignments?: RuntimeConfig["modelRoleAssignments"]; models?: RuntimeConfig["modelProfiles"] }>,
+  listModelProviders: () => ipcRenderer.invoke(IpcChannels.listModelProviders) as Promise<unknown[]>,
+  syncHermesModelRuntime: () => ipcRenderer.invoke(IpcChannels.syncHermesModelRuntime) as Promise<unknown>,
+  testModelRuntimeRole: (role: string) => ipcRenderer.invoke(IpcChannels.testModelRuntimeRole, { role }) as Promise<unknown>,
   saveRuntimeConfig: (config: RuntimeConfig) =>
     ipcRenderer.invoke(IpcChannels.saveRuntimeConfig, config) as Promise<RuntimeConfig>,
   testModelConnection: (input?: string | Record<string, unknown>) =>
@@ -249,6 +253,11 @@ const api = {
     const wrapped = (_event: Electron.IpcRendererEvent, payload: TaskEventEnvelope) => callback(payload);
     ipcRenderer.on(IpcChannels.taskEvent, wrapped);
     return () => ipcRenderer.removeListener(IpcChannels.taskEvent, wrapped);
+  },
+  onHermesAgentCompatibilityWarning: (callback: (event: { compatible: boolean; message: string }) => void) => {
+    const wrapped = (_event: Electron.IpcRendererEvent, payload: { compatible: boolean; message: string }) => callback(payload);
+    ipcRenderer.on(IpcChannels.hermesAgentCompatibilityWarning, wrapped);
+    return () => ipcRenderer.removeListener(IpcChannels.hermesAgentCompatibilityWarning, wrapped);
   },
 };
 

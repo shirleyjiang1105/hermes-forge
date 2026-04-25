@@ -207,6 +207,10 @@ declare global {
       updateHermesConfig(input: unknown): Promise<RuntimeConfig>;
       updateModelConfig(input: unknown): Promise<RuntimeConfig>;
       setDefaultModel(modelId: string): Promise<{ success: boolean; code?: string; message?: string; defaultModelId?: string; models?: RuntimeConfig["modelProfiles"] }>;
+      setModelRole(input: { role: string; profileId: string }): Promise<{ success: boolean; code?: string; message?: string; role?: string; profileId?: string; defaultModelId?: string; modelRoleAssignments?: RuntimeConfig["modelRoleAssignments"]; models?: RuntimeConfig["modelProfiles"] }>;
+      listModelProviders(): Promise<unknown[]>;
+      syncHermesModelRuntime(): Promise<unknown>;
+      testModelRuntimeRole(role: string): Promise<unknown>;
       saveRuntimeConfig(config: RuntimeConfig): Promise<RuntimeConfig>;
       testModelConnection(input?: string | Record<string, unknown>): Promise<ModelConnectionTestResult>;
       discoverLocalModelSources(): Promise<LocalModelDiscoveryResult>;
@@ -220,6 +224,7 @@ declare global {
       exportOneClickDiagnostics(workspacePath?: string): Promise<OneClickDiagnosticsExportResult>;
       getOneClickDiagnosticsStatus(): Promise<OneClickDiagnosticsStatus>;
       onTaskEvent(callback: (event: TaskEventEnvelope) => void): () => void;
+      onHermesAgentCompatibilityWarning(callback: (event: { compatible: boolean; message: string }) => void): () => void;
     };
   }
 }

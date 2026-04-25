@@ -47,3 +47,26 @@ Thumbs.db
 # Debug artifacts
 debug-*.png
 desktop_task_list_tmp.md
+
+# Temporary / working files
+bad_lines.txt
+corrupted.diff
+decode_debug.txt
+fix_adapter.py
+inspect_dump*.py
+test_build_kwargs.py
+test_dotenv*.py
+test_e2e.py
+test_kimi*.py
+test_normalize*.py
+test_sdk_mutate*.py
+hermes-cli-adapter-corrupted.ts
+
+# User content directories
+docs/
+python/
+
+# Python artifacts
+__pycache__/
+*.pyc
+*.pyo

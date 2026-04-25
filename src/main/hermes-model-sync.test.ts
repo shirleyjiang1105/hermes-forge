@@ -97,4 +97,61 @@ describe("HermesModelSyncService", () => {
     await expect(fs.readFile(path.join(profileHome, ".env"), "utf8")).resolves.toContain("HERMES_INFERENCE_PROVIDER=custom");
     await expect(fs.readFile(path.join(profileHome, ".env"), "utf8")).resolves.toContain("OPENAI_API_KEY=pwd");
   });
+
+  it("writes separate chat and Coding Plan runtime env values", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-model-sync-roles-"));
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "kimi-main",
+      modelRoleAssignments: {
+        chat: "kimi-main",
+        coding_plan: "doubao-coding",
+      },
+      modelProfiles: [
+        {
+          id: "kimi-main",
+          provider: "custom",
+          sourceType: "moonshot_api_key",
+          model: "moonshot-v1-128k",
+          baseUrl: "https://api.moonshot.cn/v1",
+        },
+        {
+          id: "doubao-coding",
+          provider: "custom",
+          sourceType: "volcengine_coding_api_key",
+          model: "doubao-coding",
+          baseUrl: "https://ark.cn-beijing.volces.com/api/coding/v3",
+        },
+      ],
+      updateSources: {},
+    };
+    const resolver = {
+      resolveFromConfig: async (_config: RuntimeConfig, profileId: string) => ({
+        profileId,
+        provider: "custom",
+        model: profileId === "doubao-coding" ? "doubao-coding" : "moonshot-v1-128k",
+        baseUrl: profileId === "doubao-coding" ? "https://ark.cn-beijing.volces.com/api/coding/v3" : "https://api.moonshot.cn/v1",
+        env: {
+          AI_PROVIDER: "custom",
+          AI_MODEL: profileId === "doubao-coding" ? "doubao-coding" : "moonshot-v1-128k",
+          OPENAI_BASE_URL: profileId === "doubao-coding" ? "https://ark.cn-beijing.volces.com/api/coding/v3" : "https://api.moonshot.cn/v1",
+          OPENAI_API_KEY: profileId === "doubao-coding" ? "coding-key" : "kimi-key",
+        },
+      }),
+    };
+
+    const service = new HermesModelSyncService(resolver as never, () => home);
+    const result = await service.syncRuntimeConfig(config);
+    const env = await fs.readFile(path.join(home, ".env"), "utf8");
+
+    expect(result.roles?.chat?.profileId).toBe("kimi-main");
+    expect(result.roles?.coding_plan?.profileId).toBe("doubao-coding");
+    expect(result.roles?.chat?.consumedByHermes).toBe(true);
+    expect(result.roles?.coding_plan?.consumedByHermes).toBe(false);
+    expect(result.roles?.coding_plan?.syncNote).toContain("未读取 HERMES_CODING_PLAN");
+    expect(env).toContain("HERMES_FORGE_CHAT_MODEL_PROFILE_ID=kimi-main");
+    expect(env).toContain("OPENAI_BASE_URL=https://api.moonshot.cn/v1");
+    expect(env).toContain("HERMES_FORGE_CODING_PLAN_MODEL_PROFILE_ID=doubao-coding");
+    expect(env).toContain("HERMES_CODING_PLAN_BASE_URL=https://ark.cn-beijing.volces.com/api/coding/v3");
+    expect(env).toContain("HERMES_CODING_PLAN_API_KEY=coding-key");
+  });
 });
