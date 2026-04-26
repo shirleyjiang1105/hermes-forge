@@ -1,12 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Sparkles, CheckCircle2, AlertCircle, Loader2, ArrowRight, Settings, HelpCircle, Wrench, BookOpen } from "lucide-react";
+import { Sparkles, CheckCircle2, AlertCircle, Loader2, ArrowRight, Settings, HelpCircle, Wrench, BookOpen, Monitor, RefreshCw } from "lucide-react";
 import { useAppStore } from "../store";
 import type { HermesInstallEvent, SetupCheck, SetupDependencyRepairId } from "../../shared/types";
 
 export function WelcomePage(props: { onComplete: () => void }) {
   const store = useAppStore();
-  const [status, setStatus] = useState<"detecting" | "found" | "not-found" | "installing">("detecting");
+  const [status, setStatus] = useState<"detecting" | "found" | "not-found" | "installing" | "wsl-setup-needed">("detecting");
   const [progress, setProgress] = useState(0);
   const [message, setMessage] = useState("正在检测本地 Hermes...");
   const [detail, setDetail] = useState("");
@@ -21,6 +21,42 @@ export function WelcomePage(props: { onComplete: () => void }) {
     });
     return () => unsubscribe?.();
   }, []);
+
+  async function runPreflightThenDeploy() {
+    try {
+      const config = await window.workbenchClient.getRuntimeConfig();
+      const isWslMode = config.hermesRuntime?.mode === "wsl";
+      if (!isWslMode) {
+        void handleAutoDeploy();
+        return;
+      }
+
+      setMessage("正在检查 WSL 环境是否就绪...");
+      const plan = await window.workbenchClient.installerPlan();
+      const blocked = plan.report?.finalInstallerState === "doctor_blocked" || plan.code === "unsupported";
+      const needsRepair = plan.report?.finalInstallerState === "repair_planned";
+
+      if (blocked) {
+        setStatus("wsl-setup-needed");
+        setMessage("需要先启用 WSL2 才能继续安装");
+        setDetail(plan.fixHint ?? plan.detail ?? "检测到 WSL 尚未安装或不可用。");
+        return;
+      }
+
+      if (needsRepair) {
+        setStatus("not-found");
+        setMessage("WSL 环境需要修复");
+        setDetail(plan.detail ?? "检测到部分依赖缺失，尝试自动修复后安装。");
+        void handleAutoDeploy();
+        return;
+      }
+
+      void handleAutoDeploy();
+    } catch (error) {
+      console.warn("WSL preflight failed, falling back to auto-deploy:", error);
+      void handleAutoDeploy();
+    }
+  }
 
   useEffect(() => {
     async function detectHermes() {
@@ -50,7 +86,7 @@ export function WelcomePage(props: { onComplete: () => void }) {
 
         if (!autoInstallAttemptedRef.current) {
           autoInstallAttemptedRef.current = true;
-          void handleAutoDeploy();
+          await runPreflightThenDeploy();
         }
       } catch (error) {
         console.error("Hermes detection failed:", error);
@@ -219,6 +255,59 @@ export function WelcomePage(props: { onComplete: () => void }) {
             </div>
           )}
 
+          {status === "wsl-setup-needed" && (
+            <div className="text-center">
+              <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-indigo-50">
+                <Monitor size={28} className="text-indigo-600" />
+              </div>
+              <h3 className="text-lg font-semibold text-slate-900">需要先启用 WSL2</h3>
+              <p className="mt-2 text-sm text-slate-500">{message}</p>
+              {detail ? <p className="mt-2 break-all text-xs leading-5 text-slate-400">{detail}</p> : null}
+
+              <div className="mt-6 space-y-3">
+                <button
+                  className="w-full rounded-xl bg-indigo-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition-all hover:bg-indigo-700 hover:shadow-md active:scale-[0.98]"
+                  onClick={() => {
+                    setStatus("detecting");
+                    setMessage("正在重新检测 WSL 状态...");
+                    void runPreflightThenDeploy();
+                  }}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <RefreshCw size={16} /> 我已重启，重新检测
+                  </span>
+                </button>
+
+                <button
+                  className="w-full rounded-xl border border-slate-200 bg-white px-6 py-3 text-sm font-semibold text-slate-700 transition-all hover:bg-slate-50"
+                  onClick={handleManualConfig}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <Settings size={16} /> 手动配置路径
+                  </span>
+                </button>
+
+                <button
+                  className="w-full rounded-xl px-6 py-3 text-sm text-slate-500 transition-colors hover:text-slate-700"
+                  onClick={handleSkip}
+                >
+                  <span className="flex items-center justify-center gap-2">
+                    <HelpCircle size={16} /> 跳过，稍后配置
+                  </span>
+                </button>
+              </div>
+
+              <div className="mt-4 text-left">
+                <div className="rounded-xl border border-amber-100 bg-amber-50 px-4 py-3 text-xs text-amber-800">
+                  <p className="font-semibold">为什么需要 WSL2？</p>
+                  <p className="mt-1">Hermes Forge 默认将 Hermes Agent 安装到 WSL2 的 Ubuntu 中，这样可以获得更稳定的 Python 环境和更完整的 Linux 工具链支持。</p>
+                </div>
+              </div>
+
+              <ManualInstallGuide defaultOpen />
+            </div>
+          )}
+
           {status === "not-found" && (
             <div className="text-center">
               <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-amber-50">
@@ -366,8 +455,8 @@ function welcomeSetupFixLabel(id: SetupDependencyRepairId) {
   return "修微信";
 }
 
-function ManualInstallGuide() {
-  const [open, setOpen] = useState(false);
+function ManualInstallGuide(props: { defaultOpen?: boolean }) {
+  const [open, setOpen] = useState(props.defaultOpen ?? false);
   return (
     <div className="mt-4 rounded-xl border border-slate-100 bg-slate-50 text-left">
       <button
