@@ -1,5 +1,69 @@
 # Release Notes
 
+## Hermes Forge v0.2.1
+
+发布日期：2026-04-26
+
+这是 v0.2.0 Shell 架构重构之后的一次稳定性 + 接入面拓展版本，重点补齐 Kimi 等 Coding Plan / Token Plan 套餐的接入路径，修复 WSL 与 Windows 两种 runtime 下模型请求构建链路上的若干兼容性问题，并把 Chat 与 Coding Plan 角色配置在写入 Hermes Agent 时的链路彻底分开。
+
+### 修复内容
+
+- 修复 Kimi Coding Plan 套餐 `KIMI_BASE_URL` 拼接出 `/v1/v1/messages` 导致 HTTP 404 的问题：
+  - Forge 在写入 Hermes 托管 `.env` 时会去掉 `kimi_coding_api_key` 类型 base URL 末尾的 `/v1`。
+  - Hermes Agent 内置的 `_detect_api_mode_for_url()` 会把 `api.kimi.com/coding` 识别为 Anthropic Messages 协议，由 Anthropic SDK 自行追加 `/v1/messages`。
+  - 用户在配置面板里仍然按官方文档填写 `https://api.kimi.com/coding/v1`，运行时由 Forge 自动归一。
+  - 已在 WSL 端 `hermes chat -q 'Say only OK' --provider kimi-coding` 端到端验证返回 `OK`。
+- 修复 Hermes Forge 调用 Hermes CLI 时 `--provider` 参数与套餐 sourceType 不匹配的问题：
+  - 新增 `mapSourceTypeToHermesProvider` / `resolveHermesProvider`，按 `kimi_coding_api_key → kimi-coding`、`volcengine_coding_api_key → volcengine-coding`、`zhipu_coding_api_key → zhipu-coding`、`dashscope_coding_api_key → dashscope-coding`、`baidu_qianfan_coding_api_key → baidu-qianfan-coding`、`tencent_token_plan_api_key → tencent-token-plan`、`tencent_hunyuan_token_plan_api_key → tencent-hy-token-plan`、`minimax_token_plan_api_key`/`minimax_api_key`/`minimax_cn_token_plan_api_key`/`stepfun_coding_api_key` 等映射输出 Hermes 端能识别的 provider 名。
+  - Forge profile 仍保留 `provider: "custom"`，不影响其他 OpenAI-compatible 接入路径。
+- 修复 WSL runtime 下模型 base URL 包含 `127.0.0.1 / localhost / ::1` 时 Hermes Agent 实际访问失败的问题：
+  - hermes-cli-adapter 在拼装环境变量时，会把 `OPENAI_BASE_URL`、`AI_BASE_URL`、`ANTHROPIC_BASE_URL` 中的 localhost 改写为 WSL 可见的 Windows 桥接 host。
+  - hermes-model-sync 写入托管 `.env` / `config.yaml` 时同样会经过 `toRuntimeReachableBaseUrl` 重写，避免一份配置在 Forge 看得到但在 WSL 内打不通。
+- 修复 Hermes Agent 兼容性检查在 WSL CLI 较旧时静默回退、导致界面里看到“可以聊天但实际不会启动”的问题：
+  - `negotiateCliCapabilities` 在 WSL 模式下会强制要求 CLI 同时支持 `capabilities --json`、`--launch-metadata`（参数 + 环境变量两种形式）以及 `--resume`，不满足直接报错。
+  - 新增的 `cli-adapter` 测试覆盖能力协商失败分支，避免回归。
+- 修复 Windows 原生模式下 `testHermesWindowsBridge` 永远返回 `false`、看起来 Windows 桥接没接入的问题：
+  - 改为真实调用 `hermes.healthCheck()`，并把错误信息透传到设置页。
+- 修复 Coding Plan 套餐被 Forge 自有 chat/tool probe 误判为不可用的问题：
+  - `BaseProvider.shouldDelegateToHermesRuntime()` 会按 `definition.badge === "Coding Plan"` 跳过 Forge 自己的 chat 与 tool calling 探测。
+  - 改为只跑 WSL 可达性探测 + Hermes CLI capability 协商，把套餐侧 `access_terminated_error` / stainless-headers 拒绝第三方客户端的情况收敛到“委托运行时验证”路径。
+
+### 接入面拓展
+
+- 模型配置中心新增 / 完善 7 类 Coding Plan / Token Plan 套餐：
+  - Kimi Coding、Volcengine Coding、DashScope Coding、Zhipu Coding、Baidu Qianfan Coding、Tencent lkeap、Tencent TokenHub、MiniMax Token Plan。
+  - 自动按 base URL 推断 sourceType（`coding-intl.dashscope`、`api.z.ai/api/coding/paas/v4`、`api.kimi.com/coding/v1`、`qianfan.baidubce.com/v2/coding`、`api.minimaxi.com/anthropic`、`api.lkeap.cloud.tencent.com/coding/v3`、`tokenhub.tencentmaas.com` 等）。
+  - 套餐保存即按 CC Switch 直通模板写入 `.env`，并由 Forge 自动选择对应 Hermes provider 名。
+- 新增 Chat 与 Coding Plan 模型角色解析 (`modelRoleAssignments`)：
+  - `RuntimeEnvResolver.resolveRoleFromConfig` 区分 chat / coding_plan，缺少角色分配时直接报错而不是回退到 chat 主模型。
+  - `hermes-model-sync` 同步时会同时写入 `HERMES_FORGE_CHAT_MODEL_PROFILE_ID`、`HERMES_CODING_PLAN_BASE_URL`、`HERMES_CODING_PLAN_API_KEY` 等环境变量；`HERMES_CODING_PLAN_*` 已写入但当前 Hermes Agent 尚未读取，会显式标注 `consumedByHermes: false` 与等待原生支持的提示。
+- 新增 `model-runtime-snapshot` 模块：
+  - 把 `defaultModelProfileId / modelRoleAssignments / modelProfiles / providerProfiles` 一并打包进比较快照。
+  - 角色分配变化（包括只切 Coding Plan 不动 chat）会触发 Hermes 同步与 runtime 重建。
+- 新增 / 增强 `ModelRuntimeProxyService`：
+  - 短 API key、本地 endpoint 在送到 Hermes 之前由本地 HTTP 代理重写为可签发的形式。
+  - 启动主进程时自动 warmup，关闭时统一进入 shutdown pipeline。
+
+### 用户体验
+
+- 模型配置面板的连接测试结果（`ConnectionTestResult`）增加 `fixSteps`：
+  - WSL 不可达时给出中文修复提示（区分 “模型只监听 127.0.0.1” 与 “Windows 防火墙 / WSL 网络问题”）。
+- 模型配置向导和设置页对 Coding Plan 套餐显示专属 badge 与说明文案，避免用户误把套餐当作通用 OpenAI-compatible endpoint。
+- 新增 `exportMessage` 与 `writeClipboard` IPC，用于在面板里直接导出消息或拷到剪贴板。
+- 修复多个面板的 React state / useEffect 闪烁、滚动跳动等小问题。
+
+### 验证
+
+- `npm run check` 通过。
+- `npm test` 通过。
+- `npm run build` 通过，`dist/main/main/index.js` 与 `dist/renderer/index.html` 均产出。
+- `package.json` `extraResources` 中所有 ico/icns/bmp/wasm/py/nsh 文件均存在。
+
+### 已知限制
+
+- Hermes Agent 当前仍未读取 `HERMES_CODING_PLAN_*`，Coding Plan 角色被分配的模型不会自动接管 Hermes 的 Coding Plan 任务，目前仅作为 Forge 侧记录，后续随 Hermes Agent 升级一并启用。
+- WSL 桥接 host 的发现依赖 `wsl.exe` 输出的 IPv4 地址，在 mirrored networking 模式下若没有 `127.0.0.1` 重定向，需要把模型 endpoint 显式绑定到 `0.0.0.0`。
+
 ## Hermes Forge v0.1.19
 
 发布日期：2026-04-24

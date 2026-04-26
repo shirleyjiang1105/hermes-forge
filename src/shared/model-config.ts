@@ -1,4 +1,56 @@
-import type { ModelProfile, ModelRole, ProviderId, RuntimeConfig } from "./types";
+import type { ModelProfile, ModelRole, ModelSourceType, ProviderId, RuntimeConfig } from "./types";
+
+/**
+ * Coding Plan / 特殊路由 sourceType → Hermes Agent 内部 provider 名映射。
+ *
+ * Hermes Agent 在 CLI 命令 (`--provider X`) 与 AIAgent 构造函数
+ * (`provider="X"`) 上接受同一组 provider 名，例如 `kimi-coding`、`zhipu-coding`。
+ * Forge 默认让所有 Coding Plan profile 的 `provider` 字段挂在 `custom` 上，
+ * 但 Hermes AIAgent 不认识 `custom`，需要把 sourceType 翻译成它认识的 alias。
+ */
+export function mapSourceTypeToHermesProvider(sourceType?: ModelSourceType | string): string | undefined {
+  switch (sourceType) {
+    case "kimi_coding_api_key":
+      return "kimi-coding";
+    case "kimi_coding_cn_api_key":
+      return "kimi-coding-cn";
+    case "stepfun_coding_api_key":
+      return "stepfun";
+    case "minimax_coding_api_key":
+      return "minimax";
+    case "minimax_cn_token_plan_api_key":
+      return "minimax-cn";
+    case "zhipu_coding_api_key":
+      return "zhipu-coding";
+    case "dashscope_coding_api_key":
+      return "dashscope-coding";
+    case "baidu_qianfan_coding_api_key":
+      return "baidu-qianfan-coding";
+    case "tencent_token_plan_api_key":
+      return "tencent-token-plan";
+    case "tencent_hunyuan_token_plan_api_key":
+      return "tencent-hy-token-plan";
+    case "volcengine_coding_api_key":
+      return "volcengine-coding";
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * 给 Hermes Agent 用的 provider 名解析。
+ *
+ * 优先使用 sourceType 映射（覆盖所有 Coding Plan profile），其次按 ProviderId
+ * 做兼容翻译。当 ProviderId === "custom" 且没有 sourceType 映射时，仍然返回
+ * `custom`，由 Hermes Agent 走 OpenAI-compatible 自动识别。
+ */
+export function resolveHermesProvider(input: { provider: string; sourceType?: ModelSourceType | string }): string {
+  const mapped = mapSourceTypeToHermesProvider(input.sourceType);
+  if (mapped) return mapped;
+  if (input.provider === "openai") return "openrouter";
+  if (input.provider === "copilot_acp") return "copilot-acp";
+  return input.provider;
+}
 
 export function normalizeOpenAiCompatibleBaseUrl(baseUrl?: string) {
   const trimmed = baseUrl?.trim();

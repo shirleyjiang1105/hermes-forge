@@ -63,6 +63,17 @@ export async function probeWslReachability(input: {
   }
 
   const isLocalhost = LOCALHOST_HOSTS.has(new URL(input.baseUrl).hostname);
+  const fixSteps = isLocalhost
+    ? [
+        "把模型服务启动参数加上 `--host 0.0.0.0`（如 Ollama: `OLLAMA_HOST=0.0.0.0 ollama serve`；LM Studio: 在设置里把 Server Port 绑定到 0.0.0.0）。",
+        "在 Base URL 里把 `127.0.0.1` 或 `localhost` 换成 `host.docker.internal` 或你的 Windows 实际局域网 IP。",
+        "重新点击「立即测试」。",
+      ]
+    : [
+        "确认 WSL 内可访问公网 HTTPS（在 WSL 终端里执行 `curl https://api.openai.com` 测试）。",
+        "检查代理、DNS、证书和防火墙设置。",
+        "如果使用了 VPN 或代理，确保 WSL 也能走通该代理。",
+      ];
   return {
     ok: false,
     message: isLocalhost
@@ -72,8 +83,7 @@ export async function probeWslReachability(input: {
       ? "这通常发生在你把模型服务绑在 localhost，但 Hermes 正跑在 WSL 里。"
       : "这通常是 WSL 网络、代理、DNS 或证书环境导致的。HTTP 4xx 会被视为服务可达，只有网络异常或 5xx 才会失败。",
     testedUrl: candidates.at(-1),
-    fixHint: isLocalhost
-      ? "请把模型服务绑定到 0.0.0.0，或改用 Windows host IP；若仍失败，请检查防火墙和端口监听。"
-      : "请确认 WSL 内可访问公网 HTTPS，并检查代理、DNS、证书和防火墙设置。",
+    fixHint: fixSteps.join(" "),
+    fixSteps,
   };
 }

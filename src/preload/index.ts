@@ -259,6 +259,9 @@ const api = {
     ipcRenderer.on(IpcChannels.hermesAgentCompatibilityWarning, wrapped);
     return () => ipcRenderer.removeListener(IpcChannels.hermesAgentCompatibilityWarning, wrapped);
   },
+  exportMessage: (input: { content: string; suggestedName: string }) =>
+    ipcRenderer.invoke(IpcChannels.exportMessage, input) as Promise<{ ok: boolean; path?: string; message?: string }>,
+  writeClipboard: (text: string) => ipcRenderer.invoke(IpcChannels.writeClipboard, text) as Promise<{ ok: boolean }>,
 };
 
 contextBridge.exposeInMainWorld("workbenchClient", api);

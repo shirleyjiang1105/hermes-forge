@@ -145,14 +145,41 @@ describe("RuntimeEnvResolver", () => {
 
     const runtime = await resolver.resolve();
 
+    // KIMI_BASE_URL is stripped of trailing /v1: Hermes Agent treats this
+    // endpoint as Anthropic Messages, and the Anthropic SDK appends /v1/messages,
+    // so .../coding becomes .../coding/v1/messages (correct), while .../coding/v1
+    // would yield .../coding/v1/v1/messages (404).
     expect(runtime.env).toMatchObject({
       AI_PROVIDER: "custom",
       AI_MODEL: "kimi-k2.6",
       KIMI_API_KEY: "sk-kimi-test",
-      KIMI_BASE_URL: "https://api.kimi.com/coding/v1",
+      KIMI_BASE_URL: "https://api.kimi.com/coding",
       OPENAI_API_KEY: "sk-kimi-test",
       OPENAI_BASE_URL: "https://api.kimi.com/coding/v1",
     });
+  });
+
+  it("strips trailing /v1 from Kimi base URL even when user already typed it without /v1", async () => {
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "kimi-coding",
+      modelProfiles: [{
+        id: "kimi-coding",
+        provider: "custom",
+        sourceType: "kimi_coding_api_key",
+        baseUrl: "https://api.kimi.com/coding",
+        model: "kimi-k2.6",
+        secretRef: "provider.kimi-coding.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = new RuntimeEnvResolver(
+      { read: async () => config } as never,
+      { readSecret: async () => "sk-kimi-test" } as never,
+    );
+
+    const runtime = await resolver.resolve();
+
+    expect(runtime.env.KIMI_BASE_URL).toBe("https://api.kimi.com/coding");
   });
 
   it("exports MiniMax provider-specific env so Hermes sends Authorization", async () => {
@@ -162,7 +189,7 @@ describe("RuntimeEnvResolver", () => {
         id: "minimax-token-plan",
         provider: "custom",
         sourceType: "minimax_token_plan_api_key",
-        baseUrl: "https://api.minimaxi.com/v1",
+        baseUrl: "https://api.minimaxi.com/anthropic",
         model: "MiniMax-M2.7",
         secretRef: "provider.minimax-token-plan.apiKey",
       }],
@@ -179,9 +206,9 @@ describe("RuntimeEnvResolver", () => {
       AI_PROVIDER: "custom",
       AI_MODEL: "MiniMax-M2.7",
       MINIMAX_API_KEY: "sk-minimax-test",
-      MINIMAX_BASE_URL: "https://api.minimaxi.com/v1",
+      MINIMAX_BASE_URL: "https://api.minimaxi.com/anthropic",
       OPENAI_API_KEY: "sk-minimax-test",
-      OPENAI_BASE_URL: "https://api.minimaxi.com/v1",
+      OPENAI_BASE_URL: "https://api.minimaxi.com/anthropic",
     });
   });
 

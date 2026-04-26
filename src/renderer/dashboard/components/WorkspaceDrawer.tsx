@@ -64,7 +64,7 @@ export function WorkspaceDrawer(props: {
         </p>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+      <div className="custom-scrollbar flex-1 overflow-y-auto">
         {store.workspacePath ? (
           <div className="p-2">
             {store.selectedFiles.length ? (

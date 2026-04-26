@@ -280,11 +280,11 @@ describe("model-connection-service", () => {
       "tencent_token_plan_api_key",
       "tencent_hunyuan_token_plan_api_key",
       "minimax_token_plan_api_key",
+      "kimi_coding_api_key",
     ]));
-    expect(codingProviders.map((item) => item.sourceType)).not.toContain("kimi_coding_api_key");
     expect(definitions.find((item) => item.sourceType === "kimi_coding_api_key")).toMatchObject({
-      roleCapabilities: [],
-      runtimeCompatibility: "connection_only",
+      roleCapabilities: ["coding_plan"],
+      runtimeCompatibility: "runtime",
     });
     expect(codingProviders).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -299,7 +299,7 @@ describe("model-connection-service", () => {
       }),
       expect.objectContaining({
         sourceType: "minimax_token_plan_api_key",
-        baseUrl: "https://api.minimaxi.com/v1",
+        baseUrl: "https://api.minimaxi.com/anthropic/v1",
         runtimeCompatibility: "runtime",
       }),
     ]));

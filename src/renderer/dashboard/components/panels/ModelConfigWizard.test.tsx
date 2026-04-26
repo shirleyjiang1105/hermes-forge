@@ -81,7 +81,7 @@ describe("ModelConfigWizard", () => {
       },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "添加为默认" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试并添加为默认" }));
 
     await waitFor(() => {
       expect(saveSecret).toHaveBeenCalledWith({ ref: "provider.custom.apiKey", plainText: "sk-json" });
@@ -103,7 +103,7 @@ describe("ModelConfigWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "表单输入" }));
     fireEvent.change(screen.getByPlaceholderText("your-api-key-here"), { target: { value: "sk-kimi" } });
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "moonshot-v1-128k" } });
-    fireEvent.click(screen.getByRole("button", { name: "添加为默认" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试并添加为默认" }));
 
     await waitFor(() => {
       expect(saveSecret).toHaveBeenCalledWith({ ref: "provider.moonshot.apiKey", plainText: "sk-kimi" });
@@ -137,7 +137,7 @@ describe("ModelConfigWizard", () => {
     fireEvent.click(screen.getByRole("button", { name: "表单输入" }));
     fireEvent.change(screen.getByPlaceholderText("your-api-key-here"), { target: { value: "ark-coding-key" } });
     fireEvent.change(screen.getByLabelText("添加模型名称"), { target: { value: "doubao-coding-endpoint" } });
-    fireEvent.click(screen.getByRole("button", { name: "添加为默认" }));
+    fireEvent.click(screen.getByRole("button", { name: "测试并添加为默认" }));
 
     await waitFor(() => {
       expect(updateModelConfig).toHaveBeenCalledWith(expect.objectContaining({

@@ -50,7 +50,7 @@ export function ControlCenter(props: {
 
   return (
     <div className="hermes-panel-shell flex h-full flex-col">
-      <header className="hermes-panel-header flex h-14 items-center justify-between border-b border-slate-100 bg-white px-5 shadow-sm">
+      <header className="hermes-panel-header flex h-12 items-center justify-between border-b border-slate-100 bg-white px-4 shadow-sm">
         <div className="flex items-center gap-3">
           {activeConfig && (
             <>
@@ -76,7 +76,7 @@ export function ControlCenter(props: {
         </div>
       </header>
 
-      <div className="hermes-panel-content custom-scrollbar flex-1 overflow-y-auto p-5">
+      <div className="hermes-panel-content custom-scrollbar flex-1 overflow-y-auto p-4">
         <div className="transition-opacity duration-200">
           {active === "tasks" ? <TasksPanel key="tasks" /> : null}
           {active === "skills" ? <SkillsPanel key="skills" /> : null}

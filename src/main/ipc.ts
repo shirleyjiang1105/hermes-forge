@@ -12,6 +12,7 @@ import type { SessionAgentInsightService } from "./session-agent-insight-service
 import type { WorkSessionService } from "./work-session-service";
 import type { HermesConnectorService } from "./hermes-connector-service";
 import type { HermesModelSyncService } from "./hermes-model-sync";
+import { modelRuntimeChanged } from "./model-runtime-snapshot";
 import type { HermesWebUiService } from "./hermes-webui-service";
 import type { HermesSystemAuditService } from "./hermes-system-audit-service";
 import type { ApprovalService } from "./approval-service";
@@ -948,6 +949,25 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
     return { ref: parsed, exists: await services.secretVault.hasSecret(parsed) };
   });
   ipcMain.handle(IpcChannels.exportDiagnostics, (_event, workspacePath?: string) => services.diagnosticsService.export(workspacePath));
+  ipcMain.handle(IpcChannels.exportMessage, async (_event, input) => {
+    const parsed = z.object({ content: z.string(), suggestedName: z.string() }).parse(input);
+    const result = await dialog.showSaveDialog({
+      title: "导出消息",
+      defaultPath: parsed.suggestedName,
+      filters: [
+        { name: "Markdown", extensions: ["md"] },
+        { name: "Text", extensions: ["txt"] },
+        { name: "All Files", extensions: ["*"] },
+      ],
+    });
+    if (result.canceled || !result.filePath) return { ok: false, message: "已取消" };
+    await fs.writeFile(result.filePath, parsed.content, "utf8");
+    return { ok: true, path: result.filePath, message: "已导出" };
+  });
+  ipcMain.handle(IpcChannels.writeClipboard, async (_event, text: string) => {
+    clipboard.writeText(text);
+    return { ok: true };
+  });
   ipcMain.handle(IpcChannels.oneClickDiagnosticsRun, (_event, input) =>
     services.oneClickDiagnosticsOrchestrator.run(oneClickDiagnosticsRunOptionsSchema.parse(input ?? {})),
   );
@@ -966,15 +986,29 @@ export function registerIpcHandlers(_mainWindow: BrowserWindow, services: IpcSer
   ipcMain.handle(IpcChannels.testHermesWindowsBridge, async () => {
     const config = await services.configStore.read();
     const runtimeMode = config.hermesRuntime?.mode ?? "windows";
+    if (runtimeMode === "wsl") {
+      return {
+        ok: true,
+        mode: runtimeMode,
+        message: "WSL 模式不测试 Windows 联动",
+        steps: [{
+          id: "bridge-running" as const,
+          label: "Bridge 运行状态",
+          status: "skipped" as const,
+          message: "WSL 模式无需 Windows 桥接",
+        }],
+      };
+    }
+    const health = await services.hermes.healthCheck().catch(() => ({ available: false, message: "检查失败" }));
     return {
-      ok: false,
+      ok: health.available,
       mode: runtimeMode,
-      message: "Windows 原生模式不依赖 WindowsControlBridge",
+      message: health.available ? "Windows 联动正常" : (health.message || "Windows 联动异常"),
       steps: [{
         id: "bridge-running" as const,
         label: "Bridge 运行状态",
-        status: "skipped" as const,
-        message: "Windows 原生模式无需桥接",
+        status: health.available ? ("passed" as const) : ("failed" as const),
+        message: health.message || (health.available ? "运行正常" : "未通过健康检查"),
       }],
     };
   });
@@ -1151,18 +1185,6 @@ async function restartGatewayIfRunning(services: IpcServices) {
   }
 }
 
-function modelRuntimeChanged(previous: RuntimeConfig, next: RuntimeConfig) {
-  return JSON.stringify(modelRuntimeSnapshot(previous)) !== JSON.stringify(modelRuntimeSnapshot(next));
-}
-
-function modelRuntimeSnapshot(config: RuntimeConfig) {
-  return {
-    defaultModelProfileId: config.defaultModelProfileId,
-    modelProfiles: config.modelProfiles,
-    providerProfiles: config.providerProfiles,
-  };
-}
-
 async function testOpenAiCompatibleModel(
   profileId: string,
   baseUrl: string,
@@ -1308,21 +1330,21 @@ function normalizeProviderBaseUrl(provider: ModelProfile["provider"], baseUrl?: 
 function sourceTypeFromProfile(profile: Pick<ModelProfile, "provider" | "baseUrl">): ModelConnectionTestResult["sourceType"] {
   if (profile.provider === "custom") {
     const baseUrl = profile.baseUrl?.toLowerCase() ?? "";
-    if (baseUrl.includes("coding-intl.dashscope.aliyuncs.com")) return "dashscope_coding_api_key";
+    if (baseUrl.includes("coding-intl.dashscope.aliyuncs.com") || baseUrl.includes("coding.dashscope.aliyuncs.com")) return "dashscope_coding_api_key";
     if (baseUrl.includes("dashscope.aliyuncs.com")) return "dashscope_api_key";
-    if (baseUrl.includes("open.bigmodel.cn/api/coding/paas/v4")) return "zhipu_coding_api_key";
-    if (baseUrl.includes("bigmodel.cn")) return "zhipu_api_key";
+    if (baseUrl.includes("open.bigmodel.cn/api/coding/paas/v4") || baseUrl.includes("api.z.ai/api/coding/paas/v4")) return "zhipu_coding_api_key";
+    if (baseUrl.includes("bigmodel.cn") || baseUrl.includes("api.z.ai")) return "zhipu_api_key";
     if (baseUrl.includes("api.kimi.com/coding/v1")) return "kimi_coding_api_key";
     if (baseUrl.includes("moonshot.cn")) return "moonshot_api_key";
     if (baseUrl.includes("qianfan.baidubce.com/v2/coding")) return "baidu_qianfan_coding_api_key";
     if (baseUrl.includes("aip.baidubce.com")) return "baidu_wenxin_api_key";
     if (baseUrl.includes("spark-api-open.xf-yun.com")) return "spark_api_key";
     if (baseUrl.includes("baichuan-ai.com")) return "baichuan_api_key";
-    if (baseUrl.includes("api.minimaxi.com/v1")) return "minimax_token_plan_api_key";
+    if (baseUrl.includes("api.minimaxi.com/anthropic") || baseUrl.includes("api.minimax.io/anthropic") || baseUrl.includes("api.minimaxi.com/v1")) return "minimax_token_plan_api_key";
     if (baseUrl.includes("minimax.chat")) return "minimax_api_key";
     if (baseUrl.includes("lingyiwanwu.com")) return "yi_api_key";
-    if (baseUrl.includes("api.lkeap.cloud.tencent.com/plan/v3")) return "tencent_token_plan_api_key";
-    if (baseUrl.includes("tokenhub.tencentmaas.com/plan/v3")) return "tencent_hunyuan_token_plan_api_key";
+    if (baseUrl.includes("api.lkeap.cloud.tencent.com/coding/v3") || baseUrl.includes("api.lkeap.cloud.tencent.com/plan/v3")) return "tencent_token_plan_api_key";
+    if (baseUrl.includes("tokenhub.tencentmaas.com")) return "tencent_hunyuan_token_plan_api_key";
     if (baseUrl.includes("hunyuan.cloud.tencent.com")) return "hunyuan_api_key";
     if (baseUrl.includes("siliconflow.cn")) return "siliconflow_api_key";
     if (baseUrl.includes("ark.cn-beijing.volces.com/api/coding")) return "volcengine_coding_api_key";

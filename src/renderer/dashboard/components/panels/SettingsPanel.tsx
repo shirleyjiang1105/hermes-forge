@@ -78,6 +78,10 @@ export function SettingsPanel(props: {
     });
   }, []);
 
+  useEffect(() => {
+    void reloadOverview();
+  }, []);
+
   async function reloadOverview() {
     const overview = await window.workbenchClient.getConfigOverview().catch(() => undefined);
     const nextRuntime = overview?.hermes?.runtime ?? store.runtimeConfig?.hermesRuntime ?? RECOMMENDED_RUNTIME;
@@ -105,6 +109,13 @@ export function SettingsPanel(props: {
   }
 
   async function saveRuntime(nextRuntime = effectiveRuntime()) {
+    const previousRuntime = runtime;
+    const previousRootPath = rootPath;
+    const previousRuntimeChoice = runtimeChoice;
+    const previousConfig = store.runtimeConfig;
+    if (previousConfig) {
+      store.setRuntimeConfig({ ...previousConfig, hermesRuntime: nextRuntime });
+    }
     setSavingRuntime(true);
     try {
       const saved = await window.workbenchClient.updateHermesConfig({
@@ -117,6 +128,10 @@ export function SettingsPanel(props: {
       await props.onRefresh();
       store.success("Hermes 设置已保存", "已应用新的运行环境设置。");
     } catch (error) {
+      setRuntime(previousRuntime);
+      setRootPath(previousRootPath);
+      setRuntimeChoice(previousRuntimeChoice);
+      if (previousConfig) store.setRuntimeConfig(previousConfig);
       store.error("保存失败", error instanceof Error ? error.message : "未知错误");
     } finally {
       setSavingRuntime(false);
@@ -270,12 +285,12 @@ export function SettingsPanel(props: {
         : "重新安装";
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-3">
       <HeroStatus
         title={status.summaryTitle}
         description={status.summaryDetail}
         tone={status.summaryTone}
-        primaryLabel={status.summaryTone === "ok" ? installActionLabel : "一键修复"}
+        primaryLabel="一键修复"
         primaryLoading={installingHermes}
         onPrimary={installHermes}
         secondaryLabel="刷新状态"
@@ -283,14 +298,14 @@ export function SettingsPanel(props: {
         onSecondary={refreshAll}
       />
 
-      <section className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+      <section className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
         <StatusCard title="运行环境" value={status.runtime.value} detail={status.runtime.detail} tone={status.runtime.tone} />
         <StatusCard title="安装状态" value={status.install.value} detail={status.install.detail} tone={status.install.tone} />
         <StatusCard title="连接状态" value={status.connection.value} detail={status.connection.detail} tone={status.connection.tone} />
         <StatusCard title="健康检查" value={status.health.value} detail={status.health.detail} tone={status.health.tone} />
       </section>
 
-      <section className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
+      <section className="rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
         <SectionHeader
           icon={Settings}
           title="基础设置"
@@ -306,7 +321,7 @@ export function SettingsPanel(props: {
                 更多
               </button>
               {moreOpen ? (
-                <div className="absolute right-0 z-10 mt-2 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg">
+                <div className="absolute right-0 z-[25] mt-2 w-44 overflow-hidden rounded-lg border border-slate-200 bg-white py-1 text-sm shadow-lg">
                   <MenuButton label="导入旧配置" loading={importingHermesConfig} onClick={importHermesConfig} />
                   <MenuButton label="恢复推荐设置" onClick={restoreRecommendedSettings} />
                 </div>
@@ -315,7 +330,7 @@ export function SettingsPanel(props: {
           )}
         />
 
-        <div className="mt-5 space-y-5">
+        <div className="mt-4 space-y-3">
           <div>
             <FieldLabel label="运行环境" hint="自动选择会优先使用更稳定的 WSL 环境，普通用户推荐保持此项。" />
             <SegmentedControl
@@ -327,7 +342,7 @@ export function SettingsPanel(props: {
               ]}
               onChange={(value) => setRuntimeChoice(value)}
             />
-            <p className="mt-2 text-xs leading-5 text-slate-500">
+            <p className="mt-1 text-xs leading-4 text-slate-500">
               {runtimeChoice === "auto"
                 ? `Forge 会自动选择运行方式。当前推荐：${runtime.mode === "windows" ? "Windows" : "WSL"}。`
                 : runtimeChoice === "wsl"
@@ -336,11 +351,11 @@ export function SettingsPanel(props: {
             </p>
           </div>
 
-          <div className="rounded-lg border border-slate-100 bg-slate-50 p-4">
-            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div className="rounded-lg border border-slate-100 bg-slate-50 p-3">
+            <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0">
                 <FieldLabel label="安装位置" hint="Forge 会在这里查找或安装 Hermes Agent。路径不确定时可以直接点一键修复。" />
-                <p className="mt-1 break-all font-mono text-sm text-slate-700">{rootPath || "尚未选择安装位置"}</p>
+                <p className="mt-0.5 break-all font-mono text-sm text-slate-700">{rootPath || "尚未选择安装位置"}</p>
               </div>
               <div className="flex shrink-0 flex-wrap gap-2">
                 <SecondaryButton icon={Folder} label="更改位置" onClick={chooseHermesRoot} />
@@ -351,7 +366,7 @@ export function SettingsPanel(props: {
 
           <div className="flex flex-wrap gap-2">
             <PrimaryButton icon={Sparkles} label={installActionLabel} loading={installingHermes} onClick={installHermes} />
-            <SecondaryButton icon={Save} label="保存基础设置" loading={savingRuntime} onClick={() => void saveRuntime()} />
+            <SecondaryButton icon={Save} label="保存设置" loading={savingRuntime} onClick={() => void saveRuntime()} />
           </div>
           {installEvent ? <InstallProgressView event={installEvent} /> : null}
         </div>
@@ -360,15 +375,15 @@ export function SettingsPanel(props: {
       <section className="rounded-xl border border-slate-100 bg-white shadow-sm">
         <button
           type="button"
-          className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left"
+          className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left"
           onClick={() => setAdvancedOpen((value) => !value)}
         >
           <SectionHeader icon={ShieldCheck} title="高级设置" description="通常不需要修改。遇到权限、联动或启动检查问题时再展开。" compact />
-          <ChevronDown size={18} className={cn("shrink-0 text-slate-400 transition-transform", advancedOpen && "rotate-180")} />
+          <ChevronDown size={16} className={cn("shrink-0 text-slate-400 transition-transform", advancedOpen && "rotate-180")} />
         </button>
         {advancedOpen ? (
-          <div className="border-t border-slate-100 px-5 py-5">
-            <div className="grid gap-4">
+          <div className="border-t border-slate-100 px-4 py-4">
+            <div className="grid gap-3">
               {runtimeChoice !== "windows" ? (
                 <div className="grid gap-4 sm:grid-cols-2">
                   <AdvancedTextInput
@@ -469,7 +484,6 @@ export function SettingsPanel(props: {
               <div className="flex flex-wrap gap-2">
                 <SecondaryButton icon={RotateCcw} label="恢复推荐设置" onClick={restoreRecommendedSettings} />
                 <SecondaryButton icon={Network} label="测试 Windows 联动" loading={testingBridge} onClick={testBridge} />
-                <PrimaryButton icon={Save} label="保存高级设置" loading={savingRuntime} onClick={() => void saveRuntime()} />
               </div>
               {bridgeTest ? <BridgeTestResultView result={bridgeTest} /> : null}
             </div>
@@ -572,15 +586,15 @@ function HeroStatus(props: {
 }) {
   const Icon = props.tone === "ok" ? CheckCircle2 : AlertTriangle;
   return (
-    <section className={cn("rounded-xl border p-5 shadow-sm", props.tone === "ok" ? "border-emerald-100 bg-emerald-50" : "border-amber-100 bg-amber-50")}>
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
-        <div className="flex min-w-0 gap-3">
-          <div className={cn("grid h-11 w-11 shrink-0 place-items-center rounded-lg", props.tone === "ok" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
-            <Icon size={21} />
+    <section className={cn("rounded-xl border p-4 shadow-sm", props.tone === "ok" ? "border-emerald-100 bg-emerald-50" : "border-amber-100 bg-amber-50")}>
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+        <div className="flex min-w-0 gap-2.5">
+          <div className={cn("grid h-9 w-9 shrink-0 place-items-center rounded-lg", props.tone === "ok" ? "bg-emerald-100 text-emerald-700" : "bg-amber-100 text-amber-700")}>
+            <Icon size={18} />
           </div>
           <div className="min-w-0">
-            <h3 className={cn("text-base font-semibold", props.tone === "ok" ? "text-emerald-950" : "text-amber-950")}>{props.title}</h3>
-            <p className={cn("mt-1 text-sm leading-6", props.tone === "ok" ? "text-emerald-700" : "text-amber-700")}>{props.description}</p>
+            <h3 className={cn("text-sm font-semibold", props.tone === "ok" ? "text-emerald-950" : "text-amber-950")}>{props.title}</h3>
+            <p className={cn("mt-0.5 text-xs leading-5", props.tone === "ok" ? "text-emerald-700" : "text-amber-700")}>{props.description}</p>
           </div>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
@@ -595,13 +609,13 @@ function HeroStatus(props: {
 function StatusCard(props: { title: string; value: string; detail: string; tone: Tone }) {
   const Icon = props.tone === "ok" ? CheckCircle2 : props.tone === "danger" ? XCircle : props.tone === "warn" ? AlertTriangle : Info;
   return (
-    <div className="rounded-xl border border-slate-100 bg-white p-4 shadow-sm">
+    <div className="rounded-xl border border-slate-100 bg-white p-3 shadow-sm">
       <div className="flex items-center justify-between gap-3">
         <p className="text-sm font-medium text-slate-500">{props.title}</p>
-        <Icon size={17} className={toneText(props.tone)} />
+        <Icon size={16} className={toneText(props.tone)} />
       </div>
-      <p className="mt-3 text-lg font-semibold text-slate-950">{props.value}</p>
-      <p className="mt-1 text-xs leading-5 text-slate-500">{props.detail}</p>
+      <p className="mt-2 text-base font-semibold text-slate-950">{props.value}</p>
+      <p className="mt-0.5 text-xs leading-4 text-slate-500">{props.detail}</p>
     </div>
   );
 }
@@ -610,13 +624,13 @@ function SectionHeader(props: { icon: typeof Settings; title: string; descriptio
   const Icon = props.icon;
   return (
     <div className={cn("flex min-w-0 items-start justify-between gap-3", props.compact && "flex-1")}>
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-600">
-          <Icon size={17} />
+      <div className="flex min-w-0 items-start gap-2.5">
+        <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-slate-100 text-slate-600">
+          <Icon size={15} />
         </div>
         <div className="min-w-0">
           <h3 className="text-sm font-semibold text-slate-950">{props.title}</h3>
-          <p className="mt-1 text-xs leading-5 text-slate-500">{props.description}</p>
+          <p className="mt-0.5 text-xs leading-4 text-slate-500">{props.description}</p>
         </div>
       </div>
       {props.action}
@@ -636,8 +650,8 @@ function FieldLabel(props: { label: string; hint?: string }) {
 function Tooltip(props: { text: string }) {
   return (
     <span className="group relative inline-flex">
-      <Info size={14} className="text-slate-400" />
-      <span className="pointer-events-none absolute left-1/2 top-6 z-20 hidden w-64 -translate-x-1/2 rounded-lg bg-slate-950 px-3 py-2 text-xs leading-5 text-white shadow-lg group-hover:block">
+      <Info size={13} className="text-slate-400" />
+      <span className="pointer-events-none absolute left-1/2 top-5 z-20 hidden w-64 -translate-x-1/2 rounded-lg bg-slate-950 px-3 py-2 text-xs leading-5 text-white shadow-lg group-hover:block">
         {props.text}
       </span>
     </span>
@@ -650,13 +664,13 @@ function SegmentedControl(props: {
   onChange: (value: RuntimeChoice) => void;
 }) {
   return (
-    <div className="mt-3 grid rounded-lg bg-slate-100 p-1 sm:grid-cols-3">
+    <div className="mt-2 grid rounded-lg bg-slate-100 p-1 sm:grid-cols-3">
       {props.options.map((option) => (
         <button
           key={option.value}
           type="button"
           className={cn(
-            "rounded-md px-3 py-2 text-sm font-medium transition",
+            "rounded-md px-3 py-1.5 text-sm font-medium transition",
             props.value === option.value ? "bg-white text-slate-950 shadow-sm" : "text-slate-500 hover:text-slate-800",
           )}
           onClick={() => props.onChange(option.value)}
@@ -670,10 +684,10 @@ function SegmentedControl(props: {
 
 function AdvancedTextInput(props: { label: string; tooltip: string; value: string; placeholder?: string; monospace?: boolean; onChange: (value: string) => void }) {
   return (
-    <label className="grid gap-2 text-sm">
+    <label className="grid gap-1.5 text-sm">
       <FieldLabel label={props.label} hint={props.tooltip} />
       <input
-        className={cn("rounded-lg border border-slate-200 px-3 py-2 text-slate-800", props.monospace && "font-mono")}
+        className={cn("rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-800", props.monospace && "font-mono")}
         value={props.value}
         placeholder={props.placeholder}
         onChange={(event) => props.onChange(event.target.value)}
@@ -684,10 +698,10 @@ function AdvancedTextInput(props: { label: string; tooltip: string; value: strin
 
 function AdvancedSelect(props: { label: string; tooltip: string; value: string; options: Array<{ value: string; label: string }>; onChange: (value: string) => void | Promise<void> }) {
   return (
-    <label className="grid gap-2 text-sm">
+    <label className="grid gap-1.5 text-sm">
       <FieldLabel label={props.label} hint={props.tooltip} />
       <select
-        className="rounded-lg border border-slate-200 px-3 py-2 text-slate-800"
+        className="rounded-lg border border-slate-200 px-3 py-1.5 text-sm text-slate-800"
         value={props.value}
         onChange={(event) => void props.onChange(event.target.value)}
       >
@@ -711,7 +725,7 @@ function ActionButton(props: { icon: typeof Folder; label: string; onClick: () =
     <button
       type="button"
       className={cn(
-        "inline-flex h-10 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60",
+        "inline-flex h-9 items-center justify-center gap-2 rounded-lg px-3 text-sm font-medium transition disabled:cursor-not-allowed disabled:opacity-60",
         props.variant === "primary"
           ? "bg-slate-950 text-white hover:bg-slate-800"
           : "border border-slate-200 bg-white text-slate-700 hover:bg-slate-50",
@@ -719,7 +733,7 @@ function ActionButton(props: { icon: typeof Folder; label: string; onClick: () =
       onClick={props.onClick}
       disabled={props.loading}
     >
-      {props.loading ? <RefreshCw size={15} className="animate-spin" /> : <Icon size={15} />}
+      {props.loading ? <RefreshCw size={14} className="animate-spin" /> : <Icon size={14} />}
       {props.label}
     </button>
   );
@@ -742,15 +756,15 @@ function MenuButton(props: { label: string; onClick: () => void; loading?: boole
 function InstallProgressView(props: { event: HermesInstallEvent }) {
   const progress = Math.max(0, Math.min(100, props.event.progress));
   return (
-    <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-3">
+    <div className="rounded-lg border border-slate-100 bg-slate-50 px-3 py-2.5">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <p className="text-sm font-medium text-slate-800">{props.event.message}</p>
-          {props.event.detail ? <p className="mt-1 break-all text-xs text-slate-500">{props.event.detail}</p> : null}
+          {props.event.detail ? <p className="mt-0.5 break-all text-xs text-slate-500">{props.event.detail}</p> : null}
         </div>
         <span className="shrink-0 rounded-full bg-white px-2 py-1 text-xs font-semibold text-slate-600">{Math.round(progress)}%</span>
       </div>
-      <div className="mt-3 h-2 overflow-hidden rounded-full bg-white">
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white">
         <div className="h-full rounded-full bg-slate-950 transition-all duration-200" style={{ width: `${progress}%` }} />
       </div>
     </div>
@@ -759,13 +773,13 @@ function InstallProgressView(props: { event: HermesInstallEvent }) {
 
 function PolicyBlockedBanner(props: { block: PermissionOverviewBlockReason }) {
   return (
-    <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3">
+    <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2">
       <div className="flex items-start gap-2">
-        <AlertTriangle size={17} className="mt-0.5 shrink-0 text-rose-600" />
+        <AlertTriangle size={15} className="mt-0.5 shrink-0 text-rose-600" />
         <div className="min-w-0">
           <p className="text-sm font-semibold text-rose-800">{props.block.summary}</p>
-          <p className="mt-1 text-xs leading-5 text-rose-700">{props.block.detail}</p>
-          <p className="mt-2 text-xs font-medium leading-5 text-rose-800">修复：{props.block.fixHint}</p>
+          <p className="mt-0.5 text-xs leading-4 text-rose-700">{props.block.detail}</p>
+          <p className="mt-1 text-xs font-medium leading-4 text-rose-800">修复：{props.block.fixHint}</p>
         </div>
       </div>
     </div>
@@ -840,7 +854,7 @@ function EnforcementMatrixView(props: { rows: ReturnType<typeof enforcementMatri
 
 function InfoCard(props: { label: string; value: string; monospace?: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-4 py-3">
+    <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2">
       <span className="text-sm text-slate-500">{props.label}</span>
       <code className={cn("truncate text-sm text-slate-800", props.monospace && "font-mono")}>{props.value}</code>
     </div>
@@ -849,7 +863,7 @@ function InfoCard(props: { label: string; value: string; monospace?: boolean }) 
 
 function ClientInfoGrid(props: { appVersion: string; userDataPath: string; rendererMode: string; portable: string }) {
   return (
-    <div className="grid gap-2 sm:grid-cols-2">
+    <div className="grid gap-1.5 sm:grid-cols-2">
       <InfoCard label="版本" value={props.appVersion} />
       <InfoCard label="数据路径" value={props.userDataPath} monospace />
       <InfoCard label="模式" value={props.rendererMode} />
@@ -860,9 +874,9 @@ function ClientInfoGrid(props: { appVersion: string; userDataPath: string; rende
 
 function BridgeTestResultView(props: { result: HermesWindowsBridgeTestResult }) {
   return (
-    <div className={cn("rounded-lg border px-4 py-3", props.result.ok ? "border-emerald-100 bg-emerald-50" : "border-rose-100 bg-rose-50")}>
+    <div className={cn("rounded-lg border px-3 py-2", props.result.ok ? "border-emerald-100 bg-emerald-50" : "border-rose-100 bg-rose-50")}>
       <p className={cn("text-sm font-medium", props.result.ok ? "text-emerald-800" : "text-rose-800")}>{props.result.message}</p>
-      <div className="mt-3 grid gap-2">
+      <div className="mt-2 grid gap-1.5">
         {props.result.steps.map((step) => <BridgeTestStepRow key={step.id} step={step} />)}
       </div>
     </div>

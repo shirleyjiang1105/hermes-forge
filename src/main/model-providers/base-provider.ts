@@ -58,6 +58,10 @@ export abstract class BaseProvider {
       ]);
     }
 
+    if (this.shouldDelegateToHermesRuntime()) {
+      return this.buildDelegatedSuccess({ ...input, profile }, baseUrl);
+    }
+
     const steps: ModelHealthCheckStep[] = [];
     const modelInfo = await this.fetchModels({ ...input, profile }, baseUrl, auth.auth);
     steps.push(step("auth", modelInfo.authResolved, modelInfo.authResolved ? "鉴权已通过" : modelInfo.message));
@@ -80,11 +84,60 @@ export abstract class BaseProvider {
 
     const chat = await this.sendTestChat({ ...input, profile }, baseUrl, auth.auth);
     steps.push(step("chat", chat.ok, chat.message));
+    const isCodingPlan = this.definition.badge === "Coding Plan";
+    const isAccessTerminated = !chat.ok && chat.failureCategory === "manual_action_required" && /access_terminated/i.test(chat.message ?? "");
+
     if (!chat.ok) {
+      if (isCodingPlan) {
+        if (chat.failureCategory === "network_unreachable" || (chat.failureCategory === "auth_invalid" && !isAccessTerminated)) {
+          return this.fail(
+            profile,
+            chat.failureCategory,
+            chat.message,
+            chat.recommendedFix,
+            steps,
+            { normalizedBaseUrl: baseUrl, availableModels: modelInfo.availableModels, authResolved: modelInfo.authResolved },
+          );
+        }
+        const runtimeCompatibility = this.effectiveRuntimeCompatibility();
+        const roleCompatibility = this.buildRoleCompatibility("provider_only", runtimeCompatibility);
+        steps.push(step("agent_capability", false, "Coding Plan provider 的 agent 能力由 Hermes Agent 在运行时验证，Forge 不做直接测试。"));
+        steps.push(step("runtime", runtimeCompatibility !== "connection_only", runtimeCompatibility === "proxy" ? "运行态将通过本地 OpenAI 兼容代理接入 Hermes。" : runtimeCompatibility === "runtime" ? "运行态可直接同步到 Hermes。" : "当前只支持连接测试和保存，暂不能分配给 Hermes runtime。"));
+        const wsl = await this.testWslIfNeeded({ ...input, profile }, baseUrl, steps);
+        if (!wsl.ok) {
+          return this.fail(profile, "wsl_unreachable", wsl.message ?? "WSL 内 Hermes 暂时访问不到这个模型服务地址。", wsl.fixHint, steps, {
+            normalizedBaseUrl: baseUrl,
+            availableModels: modelInfo.availableModels,
+            authResolved: modelInfo.authResolved,
+            agentRole: "provider_only",
+            runtimeCompatibility,
+            roleCompatibility,
+            wslReachable: false,
+            wslProbeUrl: wsl.testedUrl,
+            fixSteps: wsl.fixSteps,
+          });
+        }
+        return success({
+          profile,
+          sourceType: this.sourceType,
+          family: this.definition.family,
+          authMode: this.definition.authMode,
+          message: chat.ok ? "连接成功；Coding Plan provider 配置已保存。" : "Forge 直接连接测试被 Coding Plan provider 拦截，但配置可保存。实际可用性请通过 Hermes Agent 验证。",
+          steps,
+          normalizedBaseUrl: baseUrl,
+          availableModels: modelInfo.availableModels,
+          authResolved: modelInfo.authResolved,
+          agentRole: "provider_only",
+          runtimeCompatibility,
+          roleCompatibility,
+          wslReachable: wsl.reachable,
+          wslProbeUrl: wsl.testedUrl,
+        });
+      }
       return this.fail(
         profile,
         modelListMismatch ? "model_not_found" : chat.failureCategory ?? "unknown",
-        modelListMismatch ? `模型服务可达，但模型列表不包含“${profile.model}”，chat 实测也失败。` : chat.message,
+        modelListMismatch ? `模型服务可达，但模型列表不包含"${profile.model}"，chat 实测也失败。` : chat.message,
         modelListMismatch ? "请从返回的模型列表里选择一个模型，或确认模型 ID/部署名是否正确。" : chat.recommendedFix,
         steps,
         { normalizedBaseUrl: baseUrl, availableModels: modelInfo.availableModels, authResolved: modelInfo.authResolved },
@@ -129,11 +182,12 @@ export abstract class BaseProvider {
         roleCompatibility,
         wslReachable: false,
         wslProbeUrl: wsl.testedUrl,
+        fixSteps: wsl.fixSteps,
       });
     }
 
     if (!toolCheck.ok) {
-      return this.fail(profile, "tool_calling_unavailable", "这个模型服务能聊天，但 tool calling 没通过，不能直接作为 Hermes agent 主模型。", toolCheck.recommendedFix ?? "请开启工具调用能力，或把它只作为辅助模型保存。", steps, {
+      return this.fail(profile, "tool_calling_unavailable", "模型可以正常对话，但不支持「工具调用」功能。Hermes 需要工具调用才能自动执行命令、读写文件。如果你确认不需要这些功能，可以把它保存为「辅助模型」；否则请换一个支持 tool calling 的模型。", toolCheck.recommendedFix ?? "请开启工具调用能力，或把它只作为辅助模型保存。", steps, {
         normalizedBaseUrl: baseUrl,
         availableModels: modelInfo.availableModels,
         authResolved: modelInfo.authResolved,
@@ -184,6 +238,70 @@ export abstract class BaseProvider {
 
   protected abstract fetchModels(input: ProviderTestContext, baseUrl: string, auth?: string): Promise<ModelListResult>;
 
+  /**
+   * Coding Plan / Token Plan 走 Hermes Agent 直通分支，
+   * 直接保存配置并跳过 Forge 侧的 chat/tool 探测。
+   *
+   * 这些 provider 通常：
+   * - 限制第三方客户端访问（kimi-cli stainless headers 校验、access_terminated_error 等）
+   * - 不暴露 OpenAI 兼容的 /models 端点，或返回非标准格式
+   * - 用 Anthropic /v1/messages 协议而非 OpenAI /chat/completions
+   *
+   * Hermes Agent 内置 handler 会在运行时按 --provider 字段直接处理这些差异，
+   * Forge 唯一需要做的是把凭据 + base URL 准确写到 settingsConfig.env。
+   */
+  protected shouldDelegateToHermesRuntime(): boolean {
+    return this.definition.badge === "Coding Plan";
+  }
+
+  protected async buildDelegatedSuccess(input: ProviderTestContext, baseUrl: string): Promise<ModelConnectionTestResult> {
+    const steps: ModelHealthCheckStep[] = [
+      step("auth", true, "API Key 已就绪"),
+      step("models", true, "Coding Plan / Token Plan 直通 Hermes Agent，跳过 Forge 侧模型发现。"),
+      step("agent_capability", true, "Agent 能力由 Hermes Agent 内置 handler 在运行时验证。"),
+      step("runtime", true, "运行态由 Hermes Agent 直接接管。"),
+    ];
+    const wsl = await this.testWslIfNeeded(input, baseUrl, steps);
+    const runtimeCompatibility = this.effectiveRuntimeCompatibility();
+    const roleCompatibility = this.buildRoleCompatibility("primary_agent", runtimeCompatibility);
+    if (!wsl.ok) {
+      return this.fail(
+        input.profile,
+        "wsl_unreachable",
+        wsl.message ?? "WSL 内 Hermes 暂时访问不到这个模型服务地址。",
+        wsl.fixHint,
+        steps,
+        {
+          normalizedBaseUrl: baseUrl,
+          availableModels: [],
+          authResolved: true,
+          agentRole: "primary_agent",
+          runtimeCompatibility,
+          roleCompatibility,
+          wslReachable: false,
+          wslProbeUrl: wsl.testedUrl,
+          fixSteps: wsl.fixSteps,
+        },
+      );
+    }
+    return success({
+      profile: input.profile,
+      sourceType: this.sourceType,
+      family: this.definition.family,
+      authMode: this.definition.authMode,
+      message: "Coding Plan / Token Plan 配置已保存，运行时由 Hermes Agent 直接验证。请在实际会话中确认实际可用性。",
+      steps,
+      normalizedBaseUrl: baseUrl,
+      availableModels: [],
+      authResolved: true,
+      agentRole: "primary_agent",
+      runtimeCompatibility,
+      roleCompatibility,
+      wslReachable: wsl.reachable,
+      wslProbeUrl: wsl.testedUrl,
+    });
+  }
+
   protected async resolveAuth(input: ProviderTestContext): Promise<ProviderAuthResult> {
     if (this.definition.authMode === "optional_api_key") {
       if (!input.profile.secretRef) return { ok: true };
@@ -213,11 +331,16 @@ export abstract class BaseProvider {
       if (response.ok) return { ok: true, message: "最小 chat 请求通过。" };
       const preview = await response.text().catch(() => "");
       const modelMissing = /model.*(not found|not exist|does not exist|unknown|不存在|未找到)|deployment.*not found/i.test(preview);
+      const accessTerminated = /access_terminated_error/i.test(preview);
       return {
         ok: false,
         message: `最小 chat 请求失败（HTTP ${response.status}）${preview ? `：${compactPreview(preview)}` : "。"}`,
-        failureCategory: modelMissing ? "model_not_found" : httpFailureCategory(response.status),
-        recommendedFix: modelMissing ? "请确认模型 ID/部署名正确，或从模型列表中选择一个已加载模型。" : httpFailureFix(response.status, baseUrl),
+        failureCategory: modelMissing ? "model_not_found" : accessTerminated ? "manual_action_required" : httpFailureCategory(response.status),
+        recommendedFix: modelMissing
+          ? "请确认模型 ID/部署名正确，或从模型列表中选择一个已加载模型。"
+          : accessTerminated
+            ? "该模型服务当前限制了第三方客户端访问，请联系 provider 确认您的账户是否已开通对应权限，或尝试使用官方推荐的客户端。"
+            : httpFailureFix(response.status, baseUrl),
       };
     } catch (error) {
       return { ok: false, message: `连不上聊天接口 ${url}。`, failureCategory: "network_unreachable", recommendedFix: error instanceof Error ? error.message : "请检查服务地址和网络。" };
@@ -273,7 +396,7 @@ export abstract class BaseProvider {
     if (input.config.hermesRuntime?.mode !== "wsl") return { ok: true, reachable: true as const };
     const wsl = await probeWslReachability({ baseUrl, runtime: input.config.hermesRuntime, runtimeAdapterFactory: input.runtimeAdapterFactory, resolveHermesRoot: input.resolveHermesRoot });
     steps.push(step("wsl_network", wsl.ok, wsl.message, wsl.detail));
-    return { ok: wsl.ok, reachable: wsl.ok, testedUrl: wsl.testedUrl, fixHint: wsl.fixHint, message: wsl.message };
+    return { ok: wsl.ok, reachable: wsl.ok, testedUrl: wsl.testedUrl, fixHint: wsl.fixHint, fixSteps: wsl.fixSteps, message: wsl.message };
   }
 
   private buildOpenAiToolProbeAttempts(model: string): OpenAiToolProbeAttempt[] {
@@ -347,4 +470,5 @@ type ProviderHealthExtra = {
   roleCompatibility?: ModelConnectionTestResult["roleCompatibility"];
   wslReachable?: boolean;
   wslProbeUrl?: string;
+  fixSteps?: string[];
 };

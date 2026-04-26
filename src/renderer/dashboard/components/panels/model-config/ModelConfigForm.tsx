@@ -20,6 +20,8 @@ export function ModelConfigForm(props: {
   busyAction?: BusyAction;
   canTestConnection: boolean;
   canSaveModel: boolean;
+  canSaveAsAuxiliary?: boolean;
+  testPassed?: boolean;
   willCreateNewProfile: boolean;
   formBlockingHint?: string;
   onModelChange: (value: string) => void;
@@ -29,6 +31,7 @@ export function ModelConfigForm(props: {
   onSecretRefChange: (value: string) => void;
   onTest: () => void;
   onSave: () => void;
+  onSaveAsAuxiliary?: () => void;
   onDiscover: () => void;
   onCreateDraft: () => void;
   onApplyDiscovery: (candidate: LocalModelDiscoveryResult["candidates"][number]) => void;
@@ -179,10 +182,27 @@ export function ModelConfigForm(props: {
             className="h-12 rounded-2xl bg-slate-900 text-[15px] font-semibold text-white shadow-[0_16px_38px_rgba(15,23,42,0.18)] transition hover:bg-slate-800 active:translate-y-px disabled:cursor-not-allowed disabled:bg-slate-200 disabled:text-slate-400 disabled:shadow-none"
             disabled={!props.canSaveModel}
             onClick={saveFromCurrentMode}
+            title={props.canSaveModel ? (props.testPassed ? "" : "会先自动执行连接测试，通过后再保存。") : "请填写必填字段后再保存。"}
             type="button"
           >
-            {props.busyAction === "save" ? "保存中..." : "添加为默认"}
+            {props.busyAction === "save"
+              ? "保存中..."
+              : props.busyAction === "test"
+                ? "测试中..."
+                : props.canSaveModel && !props.testPassed
+                  ? "测试并添加为默认"
+                  : "添加为默认"}
           </button>
+          {props.canSaveAsAuxiliary && props.onSaveAsAuxiliary ? (
+            <button
+              className="h-10 rounded-xl border border-slate-200 bg-white text-[13px] font-medium text-slate-600 transition hover:bg-slate-50 hover:text-slate-900 active:translate-y-px"
+              disabled={Boolean(props.busyAction)}
+              onClick={props.onSaveAsAuxiliary}
+              type="button"
+            >
+              {props.busyAction === "save" ? "保存中..." : "仅保存为辅助模型（不用于主任务）"}
+            </button>
+          ) : null}
           <div className="flex flex-wrap justify-between gap-2">
             <button className="rounded-xl px-3 py-2 text-[12px] font-semibold text-slate-500 transition hover:bg-slate-50 hover:text-slate-950 active:translate-y-px" onClick={props.onCreateDraft} type="button">新增模型草稿</button>
             <div className="flex gap-2">
@@ -220,9 +240,15 @@ function Field(props: { label: string; children: ReactNode }) {
 }
 
 function DiscoveryPanel(props: { discovery: LocalModelDiscoveryResult; onApply: (candidate: LocalModelDiscoveryResult["candidates"][number]) => void }) {
+  const hasLocalhost = props.discovery.candidates.some((c) => /127\.0\.0\.1|localhost/.test(c.baseUrl));
   return (
     <div className="mt-4 rounded-[22px] bg-slate-50/80 p-4 text-[12px] text-slate-600 ring-1 ring-slate-200/70">
       <p className="font-semibold text-slate-900">{props.discovery.ok ? "发现可用本地接口" : "未发现本地接口"}</p>
+      {hasLocalhost ? (
+        <p className="mt-2 rounded-xl bg-amber-50/70 px-3 py-2 text-amber-800 ring-1 ring-amber-200/60">
+          检测到 localhost 地址。如果你使用 WSL 模式，请确认该服务已绑定到 0.0.0.0，否则 Hermes 可能无法连接。
+        </p>
+      ) : null}
       <div className="mt-2 grid gap-2">
         {props.discovery.candidates.map((candidate) => (
           <button key={candidate.baseUrl} className="rounded-2xl bg-white px-3 py-2.5 text-left text-[12px] text-slate-600 shadow-[0_8px_22px_rgba(15,23,42,0.04)] ring-1 ring-slate-200/60 transition hover:bg-slate-50 active:translate-y-px" onClick={() => props.onApply(candidate)} type="button">

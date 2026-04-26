@@ -1315,6 +1315,7 @@ export type ModelConnectionTestResult = {
   roleCompatibility?: Partial<Record<ModelRole, { ok: boolean; message: string }>>;
   wslReachable?: boolean;
   wslProbeUrl?: string;
+  fixSteps?: string[];
   authResolved?: boolean;
   failureCategory?:
     | "network_unreachable"

@@ -31,8 +31,8 @@ import type {
 
 const now = () => new Date().toISOString();
 const MAX_INLINE_ATTACHMENT_BYTES = 100 * 1024 * 1024;
-const FULL_SNAPSHOT_MAX_FILES = 1200;
-const FULL_SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024;
+const FULL_SNAPSHOT_MAX_FILES = 600;
+const FULL_SNAPSHOT_MAX_BYTES = 32 * 1024 * 1024;
 const HERMES_WAIT_NOTICES = [
   { afterMs: 3_500, message: "Hermes 已启动，正在等待首段输出。" },
   { afterMs: 10_000, message: "Hermes 仍在运行，但暂时还没有返回可显示正文。" },
@@ -401,11 +401,11 @@ export class TaskRunner {
     }
 
     const message = error instanceof Error ? error.message : "未知错误";
-    if (/NoConsoleScreenBufferError|No Windows console found|prompt_toolkit\.output\.win32/i.test(message)) {
+    if (/NoConsoleScreenBufferError|No Windows console found|prompt_toolkit\.output\.win32|控制台初始化失败/i.test(message)) {
       return {
         category: "cli-console-missing",
-        title: "Hermes CLI 缺少可用控制台",
-        message: `${message}。这更像是 Windows 下的 CLI 启动方式与控制台环境不兼容，并不是模型或密钥本身有问题。建议优先检查 Hermes 运行模式、Python 环境，或切到 WSL 模式后重试。`,
+        title: "Hermes CLI 在 Windows 原生模式下无法初始化控制台",
+        message: "Hermes CLI 在 Windows 原生模式下无法初始化控制台。这通常与 Python prompt_toolkit 或 Windows 终端环境有关，并不是模型或密钥配置错误。建议：1) 在「设置 > Hermes 运行环境」中切换到 WSL 模式；2) 或确保从标准 Windows Terminal / CMD 启动 Forge。",
         stageMessage: `Hermes CLI 控制台初始化失败：${message}`,
         retryable: true,
       };

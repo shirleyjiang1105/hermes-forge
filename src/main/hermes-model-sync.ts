@@ -5,7 +5,8 @@ import { resolveActiveHermesHome } from "./hermes-home";
 import type { RuntimeEnvResolver } from "./runtime-env-resolver";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import { runCommand } from "../process/command-runner";
-import type { EngineRuntimeEnv, ModelProfile, ModelRole, ProviderId, RuntimeConfig } from "../shared/types";
+import { resolveHermesProvider } from "../shared/model-config";
+import type { EngineRuntimeEnv, ModelProfile, ModelRole, RuntimeConfig } from "../shared/types";
 
 const MANAGED_ENV_START = "# >>> Hermes Forge Model Runtime >>>";
 const MANAGED_ENV_END = "# <<< Hermes Forge Model Runtime <<<";
@@ -48,7 +49,7 @@ export class HermesModelSyncService {
     }
 
     const chatRuntimeEnv = await this.runtimeEnvResolver.resolveFromConfig(config, chatProfile.id, "chat");
-    const provider = toHermesProvider(chatProfile.provider);
+    const provider = toHermesProvider(chatProfile);
     const modelConfig: HermesModelConfig = {
       provider,
       model: chatRuntimeEnv.model,
@@ -68,7 +69,7 @@ export class HermesModelSyncService {
     const codingProfile = selectRoleProfile(config, "coding_plan");
     if (codingProfile && codingProfile.id !== chatProfile.id && codingProfile.provider !== "local") {
       const codingRuntimeEnv = await this.runtimeEnvResolver.resolveFromConfig(config, codingProfile.id, "coding_plan");
-      const codingProvider = toHermesProvider(codingProfile.provider);
+      const codingProvider = toHermesProvider(codingProfile);
       const codingEnv = await this.buildRoleEnv(config, "coding_plan", codingRuntimeEnv, codingProvider);
       envBlocks.push(codingEnv);
       roles.coding_plan = {
@@ -186,15 +187,8 @@ function selectRoleProfile(config: RuntimeConfig, role: ModelRole): ModelProfile
   );
 }
 
-function toHermesProvider(provider: ProviderId) {
-  if (provider === "openai") {
-    // Hermes routes plain OpenAI-compatible API keys through its OpenRouter/custom-compatible path.
-    return "openrouter";
-  }
-  if (provider === "copilot_acp") {
-    return "copilot-acp";
-  }
-  return provider;
+function toHermesProvider(profile: Pick<ModelProfile, "provider" | "sourceType">) {
+  return resolveHermesProvider({ provider: profile.provider, sourceType: profile.sourceType });
 }
 
 function buildModelEnv(runtimeEnv: EngineRuntimeEnv, hermesProvider: string, role: ModelRole = "chat") {

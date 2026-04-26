@@ -44,11 +44,11 @@ export function ConnectionTestResult(props: {
       {props.testResult ? (
         <div className="mt-3 flex flex-wrap gap-2">
           {props.testResult.agentRole ? <StatusBadge label={roleLabel(props.testResult.agentRole)} tone={props.testResult.agentRole === "primary_agent" ? "success" : "warning"} /> : null}
-          {typeof props.testResult.supportsTools === "boolean" ? <StatusBadge label={props.testResult.supportsTools ? "tool calling 可用" : "tool calling 未通过"} tone={props.testResult.supportsTools ? "success" : "warning"} /> : null}
-          {typeof props.testResult.contextWindow === "number" ? <StatusBadge label={`ctx:${props.testResult.contextWindow}`} tone={props.testResult.contextWindow >= MIN_AGENT_CONTEXT ? "success" : "warning"} /> : null}
+          {typeof props.testResult.supportsTools === "boolean" ? <StatusBadge label={props.testResult.supportsTools ? "支持工具调用" : "不支持工具调用"} tone={props.testResult.supportsTools ? "success" : "warning"} /> : null}
+          {typeof props.testResult.contextWindow === "number" ? <StatusBadge label={`上下文 ${props.testResult.contextWindow}`} tone={props.testResult.contextWindow >= MIN_AGENT_CONTEXT ? "success" : "warning"} /> : null}
           {props.testResult.runtimeCompatibility ? <StatusBadge label={runtimeLabel(props.testResult.runtimeCompatibility)} tone={props.testResult.runtimeCompatibility === "connection_only" ? "warning" : "success"} /> : null}
           {props.testResult.roleCompatibility?.coding_plan?.ok ? <StatusBadge label="可作 Coding Plan" tone="success" /> : null}
-          {typeof props.testResult.wslReachable === "boolean" ? <StatusBadge label={props.testResult.wslReachable ? "WSL 可达" : "WSL 不可达"} tone={props.testResult.wslReachable ? "success" : "warning"} /> : null}
+          {typeof props.testResult.wslReachable === "boolean" ? <StatusBadge label={props.testResult.wslReachable ? "WSL 可连通" : "WSL 连不上"} tone={props.testResult.wslReachable ? "success" : "warning"} /> : null}
         </div>
       ) : null}
 
@@ -68,7 +68,29 @@ export function ConnectionTestResult(props: {
           建议动作：{props.testResult.recommendedFix}
         </div>
       ) : null}
+
+      {<WslLocalhostHelp testResult={props.testResult} />}
     </section>
+  );
+}
+
+function WslLocalhostHelp(props: { testResult?: ModelConnectionTestResult }) {
+  if (!props.testResult) return null;
+  if (props.testResult.failureCategory !== "wsl_unreachable") return null;
+  const url = props.testResult.wslProbeUrl ?? props.testResult.normalizedBaseUrl ?? "";
+  if (!/127\.0\.0\.1|localhost/.test(url)) return null;
+  const steps = props.testResult.fixSteps;
+  if (!steps || steps.length === 0) return null;
+
+  return (
+    <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50/60 px-3 py-2.5 shadow-[0_8px_18px_rgba(15,23,42,0.03)]">
+      <p className="font-semibold text-amber-800">为什么 WSL 访问不到 Windows 上的模型服务？</p>
+      <ol className="mt-2 list-decimal pl-5 text-amber-700">
+        {steps.map((step, index) => (
+          <li key={index} className="mt-1 leading-5">{step}</li>
+        ))}
+      </ol>
+    </div>
   );
 }
 

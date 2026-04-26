@@ -259,7 +259,7 @@ export function HermesHeader(props: {
           </button>
 
           {showMenu ? (
-            <div className="hermes-popover absolute right-0 top-[calc(100%+10px)] z-50 w-52 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/95 p-1.5 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-xl">
+            <div className="hermes-popover absolute right-0 top-[calc(100%+10px)] z-[45] w-52 overflow-hidden rounded-2xl border border-slate-200/80 bg-white/95 p-1.5 shadow-[0_18px_45px_rgba(15,23,42,0.12)] backdrop-blur-xl">
               {menuItems.map((item, index) => (
                 "divider" in item ? (
                   <div key={`divider-${index}`} className="my-1 h-px bg-slate-100" />

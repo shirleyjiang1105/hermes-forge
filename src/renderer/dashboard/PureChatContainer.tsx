@@ -236,8 +236,12 @@ function AssistantMessageCard(props: { run: TaskRunProjection; onOpenFix?: (targ
 
   async function copyMessage() {
     try {
-      await navigator.clipboard.writeText(run.assistantMessage.content);
-      store.success("已复制回复", "当前消息内容已写入剪贴板");
+      const result = await window.workbenchClient.writeClipboard(run.assistantMessage.content);
+      if (result.ok) {
+        store.success("已复制回复", "当前消息内容已写入剪贴板");
+      } else {
+        store.error("复制失败", "无法写入剪贴板");
+      }
     } catch (error) {
       store.error("复制失败", error instanceof Error ? error.message : "无法写入剪贴板");
     }
@@ -326,14 +330,20 @@ function AssistantMoreMenu(props: { run: TaskRunProjection; onCopy: () => void; 
     setOpen(false);
   }
 
-  function exportMessage() {
-    const blob = new Blob([props.run.assistantMessage.content], { type: "text/markdown;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `hermes-${props.run.taskRunId}.md`;
-    link.click();
-    URL.revokeObjectURL(url);
+  async function exportMessage() {
+    try {
+      const result = await window.workbenchClient.exportMessage({
+        content: props.run.assistantMessage.content,
+        suggestedName: `hermes-${props.run.taskRunId}.md`,
+      });
+      if (result.ok) {
+        store.success("导出成功", result.message ?? "消息已保存");
+      } else {
+        store.error("导出失败", result.message ?? "保存文件时出错");
+      }
+    } catch (error) {
+      store.error("导出失败", error instanceof Error ? error.message : "无法保存文件");
+    }
     setOpen(false);
   }
 

@@ -36,10 +36,14 @@ export class TaskPreflightService {
       throw this.appError("WORKSPACE_LOCKED", "工作区正在被占用", "当前工作区已有 Hermes 任务运行，请等待完成或停止后再试。");
     }
 
-    await this.assertModel(input.modelProfileId);
-    await this.assertHermesPermissions(input);
-    await this.assertRuntimePreflight(input);
-    const health = await this.getCachedHealth();
+    const [_, health] = await Promise.all([
+      Promise.all([
+        this.assertModel(input.modelProfileId),
+        this.assertHermesPermissions(input),
+        this.assertRuntimePreflight(input),
+      ]),
+      this.getCachedHealth(),
+    ]);
     if (!health.available) {
       throw this.appError("ENGINE_NOT_READY", "Hermes 不可用", health.message, "configure_hermes");
     }
@@ -139,6 +143,9 @@ export class TaskPreflightService {
     const profile = config.modelProfiles.find((item) => item.id === (modelProfileId ?? config.defaultModelProfileId)) ?? config.modelProfiles[0];
     if (!profile) {
       throw this.appError("MODEL_NOT_CONFIGURED", "缺少模型配置", "请先在设置里新增一个模型配置。", "configure_model");
+    }
+    if (profile.provider === "local" && profile.model === "mock-model") {
+      throw this.appError("MODEL_NOT_CONFIGURED", "默认模型是占位配置", "当前默认模型是 mock-model，请在设置中配置并测试一个真实模型后再运行任务。", "configure_model");
     }
     if (profile.provider === "custom") {
       try {

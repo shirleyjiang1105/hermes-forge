@@ -503,6 +503,59 @@ describe("HermesCliAdapter Windows launch", () => {
     expect(args).toEqual([]);
   });
 
+  it("translates Coding Plan sourceType into a canonical Hermes provider name for env runners", () => {
+    const adapter = Object.create(HermesCliAdapter.prototype) as {
+      hermesProvider(provider: string, sourceType?: string): string;
+    };
+
+    expect(adapter.hermesProvider("custom", "kimi_coding_api_key")).toBe("kimi-coding");
+    expect(adapter.hermesProvider("custom", "zhipu_coding_api_key")).toBe("zhipu-coding");
+    expect(adapter.hermesProvider("custom", "dashscope_coding_api_key")).toBe("dashscope-coding");
+    expect(adapter.hermesProvider("custom", "tencent_token_plan_api_key")).toBe("tencent-token-plan");
+    // 没有显式映射的 sourceType 仍然落到 OpenAI-compatible 通用路由（保留原有行为）。
+    expect(adapter.hermesProvider("custom", "minimax_token_plan_api_key")).toBe("custom");
+    expect(adapter.hermesProvider("custom", undefined)).toBe("custom");
+    // 老的 provider-only 翻译保持不变。
+    expect(adapter.hermesProvider("openai")).toBe("openrouter");
+    expect(adapter.hermesProvider("copilot_acp")).toBe("copilot-acp");
+  });
+
+  it("propagates HERMES_INFERENCE_PROVIDER from sourceType for Coding Plan profiles in hermesEnv", async () => {
+    const adapter = Object.create(HermesCliAdapter.prototype) as {
+      activeHermesHome(): Promise<string>;
+      hermesEnv(
+        rootPath: string,
+        runtime: { mode: "windows" },
+        request: { runtimeEnv: { provider: string; sourceType?: string; model: string; baseUrl?: string; env?: Record<string, string> } },
+      ): Promise<NodeJS.ProcessEnv>;
+    };
+    adapter.activeHermesHome = async () => "C:\\Users\\example\\Hermes Agent";
+
+    const env = await adapter.hermesEnv(
+      "C:\\Users\\example\\Hermes Agent",
+      { mode: "windows" },
+      {
+        runtimeEnv: {
+          provider: "custom",
+          sourceType: "kimi_coding_api_key",
+          model: "kimi-for-coding",
+          baseUrl: "https://api.kimi.com/coding/v1",
+          env: {
+            AI_PROVIDER: "custom",
+            AI_MODEL: "kimi-for-coding",
+            OPENAI_BASE_URL: "https://api.kimi.com/coding/v1",
+            OPENAI_API_KEY: "sk-test",
+            KIMI_API_KEY: "sk-test",
+          },
+        },
+      },
+    );
+
+    expect(env.HERMES_INFERENCE_PROVIDER).toBe("kimi-coding");
+    expect(env.OPENAI_MODEL).toBe("kimi-for-coding");
+    expect(env.OPENAI_API_KEY).toBe("sk-test");
+  });
+
   it("uses a hidden non-detached process for Windows CLI runs", async () => {
     const adapter = new HermesCliAdapter(
       { hermesDir: () => "C:\\Users\\example\\AppData\\Roaming\\Hermes Forge\\hermes" } as never,
@@ -581,5 +634,89 @@ describe("HermesCliAdapter Windows launch", () => {
     expect(launch.args).toContain(`HERMES_HOME=${toWslPath(path.join(baseDir, "hermes-home", "profiles", "wechat"))}`);
     expect(status.filePath).toBe(path.join(baseDir, "hermes-home", "profiles", "wechat", "memories"));
     expect(status.entries).toBe(2);
+  });
+});
+
+describe("HermesCliAdapter pre-startup model sync", () => {
+  it("invokes HermesModelSyncService.syncRuntimeConfig with the current runtime config", async () => {
+    const calls: unknown[] = [];
+    const stubSync = {
+      syncRuntimeConfig: async (config: unknown) => {
+        calls.push(config);
+        return {
+          ok: true,
+          synced: true,
+          profileId: "kimi-coding",
+          model: "kimi-for-coding",
+          provider: "kimi-coding",
+          configPath: "/tmp/config.yaml",
+          envPath: "/tmp/.env",
+        };
+      },
+    };
+    const runtimeConfig = {
+      defaultModelProfileId: "kimi-coding",
+      modelRoleAssignments: { chat: "kimi-coding" },
+      modelProfiles: [
+        { id: "kimi-coding", provider: "custom", sourceType: "kimi_coding_api_key", model: "kimi-for-coding", baseUrl: "https://api.kimi.com/coding/v1" },
+      ],
+      updateSources: {},
+    };
+    const adapter = new HermesCliAdapter(
+      { hermesDir: () => os.tmpdir() } as never,
+      {} as never,
+      async () => "C:\\Hermes Agent",
+      async () => runtimeConfig as never,
+      undefined,
+      () => stubSync as never,
+    );
+
+    const result = await (adapter as never as {
+      syncHermesModelEnv(): Promise<{ ok: boolean; synced?: boolean; profileId?: string } | undefined>;
+    }).syncHermesModelEnv();
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toEqual(runtimeConfig);
+    expect(result?.ok).toBe(true);
+    expect(result?.synced).toBe(true);
+    expect(result?.profileId).toBe("kimi-coding");
+  });
+
+  it("returns undefined when no sync service is provided (legacy adapter wiring)", async () => {
+    const adapter = new HermesCliAdapter(
+      { hermesDir: () => os.tmpdir() } as never,
+      {} as never,
+      async () => "C:\\Hermes Agent",
+      async () => ({ modelProfiles: [], updateSources: {} } as never),
+    );
+
+    const result = await (adapter as never as {
+      syncHermesModelEnv(): Promise<unknown>;
+    }).syncHermesModelEnv();
+
+    expect(result).toBeUndefined();
+  });
+
+  it("captures sync errors so the chat session can still continue", async () => {
+    const stubSync = {
+      syncRuntimeConfig: async () => {
+        throw new Error("filesystem busy");
+      },
+    };
+    const adapter = new HermesCliAdapter(
+      { hermesDir: () => os.tmpdir() } as never,
+      {} as never,
+      async () => "C:\\Hermes Agent",
+      async () => ({ modelProfiles: [], updateSources: {} } as never),
+      undefined,
+      () => stubSync as never,
+    );
+
+    const result = await (adapter as never as {
+      syncHermesModelEnv(): Promise<{ ok: boolean; error?: string } | undefined>;
+    }).syncHermesModelEnv();
+
+    expect(result?.ok).toBe(false);
+    expect(result?.error).toContain("filesystem busy");
   });
 });

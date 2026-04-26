@@ -275,25 +275,25 @@
   }
 
   .custom-scrollbar {
-    scrollbar-width: thin;
-    scrollbar-color: rgb(148 163 184 / 0.28) transparent;
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
 
   .custom-scrollbar::-webkit-scrollbar {
-    width: 6px;
-    height: 6px;
+    display: none;
+    width: 0;
+    height: 0;
   }
 
-  .custom-scrollbar::-webkit-scrollbar-track {
-    background: transparent;
+  * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
   }
 
-  .custom-scrollbar::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-slate-300/70;
-  }
-
-  .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-    @apply bg-slate-400/80;
+  *::-webkit-scrollbar {
+    display: none;
+    width: 0;
+    height: 0;
   }
 
   .hermes-purple-focus {
@@ -910,13 +910,6 @@
   box-shadow: 0 0 16px rgb(154 134 255 / 0.16);
 }
 
-:root[data-theme="slate"] .custom-scrollbar {
-  scrollbar-color: rgb(104 116 139 / 0.55) transparent;
-}
-
-:root[data-theme="slate"] .custom-scrollbar::-webkit-scrollbar-thumb {
-  background: rgb(71 85 105 / 0.72) !important;
-}
 
 :root[data-theme="slate"] input,
 :root[data-theme="slate"] textarea,

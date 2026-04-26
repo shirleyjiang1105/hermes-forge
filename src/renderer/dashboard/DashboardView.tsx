@@ -60,7 +60,7 @@ export function DashboardView(props: {
   return (
     <section className="absolute inset-0 flex overflow-hidden bg-[#f6f8fb] text-slate-900">
       <IconRail />
-      <div className="relative flex min-w-0 flex-1 flex-col overflow-visible">
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
         <HermesHeader
           onRenameSession={props.onRenameSession}
           onClearSession={props.onClearSession}
@@ -178,6 +178,9 @@ function computeSendBlock(store: ReturnType<typeof useAppStore.getState>): { mes
     ?? store.runtimeConfig?.modelProfiles[0];
   if (!defaultProfile?.model?.trim()) {
     return { message: "未配置可用模型。", target: "model" };
+  }
+  if (defaultProfile.provider === "local" && defaultProfile.model === "mock-model") {
+    return { message: "当前默认模型是占位配置 mock-model，请在设置中配置真实模型。", target: "model" };
   }
 
   const criticalBlocker = store.setupSummary?.blocking.find((check) => {

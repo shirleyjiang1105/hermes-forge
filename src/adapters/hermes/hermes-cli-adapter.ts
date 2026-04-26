@@ -6,6 +6,7 @@ import path from "node:path";
 import type { AppPaths } from "../../main/app-paths";
 import { readHermesJsonStream } from "./hermes-json-stream-adapter";
 import { resolveActiveHermesHome } from "../../main/hermes-home";
+import type { HermesModelSyncService } from "../../main/hermes-model-sync";
 import { MemoryBudgeter } from "../../memory/memory-budgeter";
 import {
   createHermesLaunchMetadataSidecar,
@@ -18,6 +19,7 @@ import { validateWslHermesCli, type HermesCliValidationFailureKind } from "../..
 import type { RuntimeAdapterFactory } from "../../runtime/runtime-adapter";
 import { toWslPath as runtimeToWslPath } from "../../runtime/runtime-resolver";
 import { extractHermesCliLifecycleSessionId, isHermesCliLifecycleLine } from "../../shared/hermes-cli-output";
+import { mapSourceTypeToHermesProvider, resolveHermesProvider } from "../../shared/model-config";
 import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason, type PermissionBoundaryAudit } from "../../shared/permission-audit";
 import type { EngineAdapter, HermesToolLoopMessage } from "../engine-adapter";
 import type {
@@ -139,6 +141,7 @@ export class HermesCliAdapter implements EngineAdapter {
     private readonly resolveRootPath: () => Promise<string>,
     private readonly readRuntimeConfig?: () => Promise<RuntimeConfig>,
     private readonly runtimeAdapterFactory?: RuntimeAdapterFactory,
+    private readonly resolveHermesModelSync?: () => HermesModelSyncService | undefined,
   ) {}
 
   async healthCheck(): Promise<EngineHealth> {
@@ -268,6 +271,15 @@ export class HermesCliAdapter implements EngineAdapter {
     const runtime = await this.hermesRuntime();
     const rootPath = await this.normalizeRootPath(await this.rootPath(), runtime);
     const startedAt = Date.now();
+    const preflightSync = await this.syncHermesModelEnv();
+    if (preflightSync) {
+      yield {
+        type: "diagnostic",
+        category: "hermes-model-sync-preflight",
+        message: JSON.stringify(preflightSync),
+        at: now(),
+      };
+    }
     const cliPermissionStrategy = this.resolveCliPermissionStrategy(runtime);
     yield { type: "status", level: "info", message: runtime.mode === "wsl" ? "正在通过 WSL 调用 Hermes CLI。" : "正在调用 Hermes CLI。", at: now() };
     const permissionAudit = this.permissionBoundaryAudit(runtime, request);
@@ -672,6 +684,26 @@ export class HermesCliAdapter implements EngineAdapter {
     };
   }
 
+  private async syncHermesModelEnv(): Promise<{ ok: boolean; synced?: boolean; profileId?: string; provider?: string; model?: string; reason?: string; error?: string } | undefined> {
+    const sync = this.resolveHermesModelSync?.();
+    const readConfig = this.readRuntimeConfig;
+    if (!sync || !readConfig) return undefined;
+    try {
+      const config = await readConfig();
+      const result = await sync.syncRuntimeConfig(config);
+      return {
+        ok: true,
+        synced: result.synced,
+        profileId: result.profileId,
+        provider: result.provider,
+        model: result.model,
+        reason: result.skippedReason,
+      };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
   private async *runViaNativeWindowsAgent(
     rootPath: string,
     runtime: HermesRuntimeConfig,
@@ -692,9 +724,9 @@ export class HermesCliAdapter implements EngineAdapter {
     if (firstImage) {
       args.push("--image-path", firstImage.path);
     }
-    if (request.runtimeEnv?.model) {
-      args.push("--model", request.runtimeEnv.model);
-    }
+    // 注意：模型 / provider 通过 hermesEnv 写到 OPENAI_MODEL / HERMES_INFERENCE_PROVIDER
+    // 等环境变量，hermes-windows-agent.py 直接读 env，不要在这里再 push --model /
+    // --provider —— Python argparse 没有这两个参数，多塞会让 runner 直接退出 2。
 
     const proc = spawn("python", args, {
       cwd: request.workspacePath ?? rootPath,
@@ -794,20 +826,7 @@ export class HermesCliAdapter implements EngineAdapter {
   }
 
   private mapSourceTypeToHermesProvider(sourceType: string | undefined): string | undefined {
-    switch (sourceType) {
-      case "kimi_coding_api_key":
-        return "kimi-coding";
-      case "kimi_coding_cn_api_key":
-        return "kimi-coding-cn";
-      case "stepfun_coding_api_key":
-        return "stepfun";
-      case "minimax_coding_api_key":
-        return "minimax";
-      case "minimax_cn_token_plan_api_key":
-        return "minimax-cn";
-      default:
-        return undefined;
-    }
+    return mapSourceTypeToHermesProvider(sourceType);
   }
 
   private resolveCliPermissionStrategy(runtime: HermesRuntimeConfig): HermesCliPermissionStrategy {
@@ -1232,11 +1251,28 @@ export class HermesCliAdapter implements EngineAdapter {
     const stderrDetails = stderrLines
       .map((line) => line.trim())
       .filter(Boolean)
+      .filter((line) => !/^launch_metadata\s*:/i.test(line))
       .slice(-12)
       .join("\n");
-    return stderrDetails
-      ? `Hermes CLI 退出码 ${exitCode ?? "unknown"}：\n${stderrDetails}`
-      : `Hermes CLI 退出码 ${exitCode ?? "unknown"}`;
+
+    const stdoutDetails = stdoutLines
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .filter((line) => !this.isTechnicalLine(line))
+      .filter((line) => !/^launch_metadata\s*:/i.test(line))
+      .slice(-12)
+      .join("\n");
+
+    if (stderrDetails && stdoutDetails) {
+      return `Hermes CLI 退出码 ${exitCode ?? "unknown"}：\n--- stderr ---\n${stderrDetails}\n--- stdout ---\n${stdoutDetails}`;
+    }
+    if (stderrDetails) {
+      return `Hermes CLI 退出码 ${exitCode ?? "unknown"}：\n${stderrDetails}`;
+    }
+    if (stdoutDetails) {
+      return `Hermes CLI 退出码 ${exitCode ?? "unknown"}（stderr 为空）：\n${stdoutDetails}`;
+    }
+    return `Hermes CLI 退出码 ${exitCode ?? "unknown"}（无输出，请检查模型配置与网络环境）`;
   }
 
   private async cleanReply(lines: string[], startedAt: number, streamReplyLines: string[] = []) {
@@ -1379,6 +1415,7 @@ export class HermesCliAdapter implements EngineAdapter {
       /^usage\s*:/i.test(text) ||
       /^trace\s*:/i.test(text) ||
       /^debug\s*:/i.test(text) ||
+      /^launch_metadata\s*:/i.test(text) ||
       /^任务完成[：:]/i.test(text) ||
       /^hermes\s*任务完成/i.test(text) ||
       isHermesCliLifecycleLine(text) ||
@@ -1426,7 +1463,7 @@ export class HermesCliAdapter implements EngineAdapter {
       PROMPT_TOOLKIT_COLOR_DEPTH: "DEPTH_1_BIT",
       HERMES_HOME: runtime.mode === "wsl" ? toWslPath(hermesHome) : hermesHome,
       ...(request?.runtimeEnv ? {
-        HERMES_INFERENCE_PROVIDER: this.hermesProvider(request.runtimeEnv.provider),
+        HERMES_INFERENCE_PROVIDER: this.hermesProvider(request.runtimeEnv.provider, request.runtimeEnv.sourceType),
         OPENAI_MODEL: request.runtimeEnv.model,
       } : {}),
       ...(request?.runtimeEnv?.model ? { OPENAI_MODEL: request.runtimeEnv.model } : {}),
@@ -1435,11 +1472,8 @@ export class HermesCliAdapter implements EngineAdapter {
     return env;
   }
 
-  private hermesProvider(provider: string) {
-    if (provider === "copilot_acp") {
-      return "copilot-acp";
-    }
-    return provider === "openai" ? "openrouter" : provider;
+  private hermesProvider(provider: string, sourceType?: string) {
+    return resolveHermesProvider({ provider, sourceType });
   }
 
   private hostFromUrl(url: string) {

@@ -15,21 +15,21 @@ export function inferSourceType(provider: string, baseUrl?: string): ModelSource
   if (provider === "copilot_acp") return "github_copilot_acp";
   if (provider === "custom") {
     const text = (baseUrl ?? "").toLowerCase();
-    if (text.includes("coding-intl.dashscope.aliyuncs.com")) return "dashscope_coding_api_key";
+    if (text.includes("coding-intl.dashscope.aliyuncs.com") || text.includes("coding.dashscope.aliyuncs.com")) return "dashscope_coding_api_key";
     if (text.includes("dashscope.aliyuncs.com")) return "dashscope_api_key";
-    if (text.includes("open.bigmodel.cn/api/coding/paas/v4")) return "zhipu_coding_api_key";
-    if (text.includes("bigmodel.cn")) return "zhipu_api_key";
+    if (text.includes("open.bigmodel.cn/api/coding/paas/v4") || text.includes("api.z.ai/api/coding/paas/v4")) return "zhipu_coding_api_key";
+    if (text.includes("bigmodel.cn") || text.includes("api.z.ai")) return "zhipu_api_key";
     if (text.includes("api.kimi.com/coding/v1")) return "kimi_coding_api_key";
     if (text.includes("moonshot.cn")) return "moonshot_api_key";
     if (text.includes("qianfan.baidubce.com/v2/coding")) return "baidu_qianfan_coding_api_key";
     if (text.includes("aip.baidubce.com")) return "baidu_wenxin_api_key";
     if (text.includes("spark-api-open.xf-yun.com")) return "spark_api_key";
     if (text.includes("baichuan-ai.com")) return "baichuan_api_key";
-    if (text.includes("api.minimaxi.com/v1")) return "minimax_token_plan_api_key";
+    if (text.includes("api.minimaxi.com/anthropic") || text.includes("api.minimax.io/anthropic") || text.includes("api.minimaxi.com/v1")) return "minimax_token_plan_api_key";
     if (text.includes("minimax.chat")) return "minimax_api_key";
     if (text.includes("lingyiwanwu.com")) return "yi_api_key";
-    if (text.includes("api.lkeap.cloud.tencent.com/plan/v3")) return "tencent_token_plan_api_key";
-    if (text.includes("tokenhub.tencentmaas.com/plan/v3")) return "tencent_hunyuan_token_plan_api_key";
+    if (text.includes("api.lkeap.cloud.tencent.com/coding/v3") || text.includes("api.lkeap.cloud.tencent.com/plan/v3")) return "tencent_token_plan_api_key";
+    if (text.includes("tokenhub.tencentmaas.com")) return "tencent_hunyuan_token_plan_api_key";
     if (text.includes("hunyuan.cloud.tencent.com")) return "hunyuan_api_key";
     if (text.includes("siliconflow.cn")) return "siliconflow_api_key";
     if (text.includes("ark.cn-beijing.volces.com/api/coding")) return "volcengine_coding_api_key";
@@ -134,11 +134,12 @@ export function roleLabel(role: ModelCapabilityRole) {
 
 export function healthStepLabel(stepId: NonNullable<ModelConnectionTestResult["healthChecks"]>[number]["id"]) {
   if (stepId === "auth") return "鉴权";
-  if (stepId === "models") return "模型发现";
-  if (stepId === "chat") return "最小 Chat";
-  if (stepId === "agent_capability") return "Agent 能力";
-  if (stepId === "runtime") return "运行态";
-  return "WSL 可达性";
+  if (stepId === "models") return "模型列表";
+  if (stepId === "chat") return "对话测试";
+  if (stepId === "agent_capability") return "Agent 能力评估";
+  if (stepId === "runtime") return "运行环境";
+  if (stepId === "wsl_network") return "WSL 网络连通";
+  return stepId;
 }
 
 export function getSourceStatus(models: OverviewModels, secrets: SecretMeta[], sourceType: ModelSourceType, catalog = providerPresetsForDefinitions(models.providers)) {

@@ -144,6 +144,12 @@ function SettingsView(props: {
     });
   }, []);
 
+  useEffect(() => {
+    if (!props.overview) {
+      void props.onRefresh();
+    }
+  }, []);
+
   async function saveSecretSettings() {
     if (!secretRef.trim() || !secretValue.trim()) return;
     await window.workbenchClient.saveSecret({ ref: secretRef.trim(), plainText: secretValue.trim() });
@@ -537,17 +543,17 @@ function SettingsSectionHeader(props: { label: string; title: string; descriptio
   return (
     <div>
       <p className="text-[11px] font-semibold uppercase tracking-[0.24em] text-slate-400">{props.label}</p>
-      <h2 className="mt-3 text-[25px] font-semibold tracking-[-0.01em] text-slate-950">{props.title}</h2>
-      <p className="mt-3 text-[14px] leading-7 text-slate-500">{props.description}</p>
+      <h2 className="mt-2 text-[20px] font-semibold tracking-[-0.01em] text-slate-950">{props.title}</h2>
+      <p className="mt-1 text-[13px] leading-6 text-slate-500">{props.description}</p>
     </div>
   );
 }
 
 function SettingsPanelCard(props: { title: string; children: React.ReactNode }) {
   return (
-    <section className="rounded-2xl border border-slate-200/70 bg-white p-4 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
-      <h3 className="mb-3 text-[14px] font-semibold text-slate-900">{props.title}</h3>
-      <div className="space-y-3">{props.children}</div>
+    <section className="rounded-xl border border-slate-200/70 bg-white p-3 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+      <h3 className="mb-2 text-[13px] font-semibold text-slate-900">{props.title}</h3>
+      <div className="space-y-2">{props.children}</div>
     </section>
   );
 }
@@ -562,9 +568,9 @@ function StatusMetric(props: { label: string; value: string; tone: "ok" | "warni
           ? "border-rose-100 bg-rose-50 text-rose-700"
           : "border-slate-200 bg-slate-50 text-slate-600";
   return (
-    <div className={`rounded-2xl border px-4 py-3 ${toneClass}`}>
+    <div className={`rounded-xl border px-3 py-2 ${toneClass}`}>
       <p className="text-[11px] font-medium opacity-75">{props.label}</p>
-      <p className="mt-1 truncate text-[18px] font-semibold">{props.value}</p>
+      <p className="mt-0.5 truncate text-base font-semibold">{props.value}</p>
     </div>
   );
 }
@@ -585,7 +591,7 @@ function SetupCheckCard(props: {
       : "border-slate-200/70 bg-slate-50/70 text-slate-600";
 
   return (
-    <div className={`rounded-2xl border px-4 py-4 text-[12px] ${cardClass}`}>
+    <div className={`rounded-xl border px-3 py-3 text-[12px] ${cardClass}`}>
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2">
@@ -593,16 +599,16 @@ function SetupCheckCard(props: {
             <p className="font-medium text-slate-900">{props.check.label}</p>
           </div>
           {props.check.description ? (
-            <p className="mt-1.5 leading-5 text-slate-500">{props.check.description}</p>
+            <p className="mt-1 leading-4 text-slate-500">{props.check.description}</p>
           ) : null}
         </div>
         <span className="shrink-0 rounded-full bg-white/80 px-2 py-1 text-[11px] font-medium uppercase tracking-[0.08em]">
           {setupStatusLabel(props.check.status)}
         </span>
       </div>
-      <p className="mt-2 break-words leading-6 [overflow-wrap:anywhere]">{props.check.message}</p>
+      <p className="mt-1.5 break-words leading-5 [overflow-wrap:anywhere]">{props.check.message}</p>
       {props.check.recommendedAction ? (
-        <p className="mt-2 rounded-xl bg-white/65 px-3 py-2 leading-5 text-slate-600">
+        <p className="mt-1.5 rounded-lg bg-white/65 px-2.5 py-1.5 leading-4 text-slate-600">
           建议：{props.check.recommendedAction}
         </p>
       ) : null}
@@ -611,7 +617,7 @@ function SetupCheckCard(props: {
           type="button"
           onClick={() => void props.onFix(props.check)}
           disabled={props.busy}
-          className="mt-3 rounded-xl border border-slate-200 bg-white px-3 py-2 text-[12px] font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+          className="mt-2 rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-[11px] font-semibold text-slate-700 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
         >
           {props.busy ? "处理中..." : fixLabel}
         </button>
@@ -623,8 +629,8 @@ function SetupCheckCard(props: {
 function OneClickDiagnosticsResultView(props: { report: OneClickDiagnosticsReport }) {
   return (
     <SettingsPanelCard title="一键诊断结果">
-      <div className="space-y-3 text-[12px] text-slate-600">
-        <div className={`rounded-xl border px-3 py-3 ${props.report.summary.failed ? "border-rose-100 bg-rose-50 text-rose-800" : props.report.summary.warnings ? "border-amber-100 bg-amber-50 text-amber-800" : "border-emerald-100 bg-emerald-50 text-emerald-800"}`}>
+      <div className="space-y-2 text-[12px] text-slate-600">
+        <div className={`rounded-lg border px-3 py-2 ${props.report.summary.failed ? "border-rose-100 bg-rose-50 text-rose-800" : props.report.summary.warnings ? "border-amber-100 bg-amber-50 text-amber-800" : "border-emerald-100 bg-emerald-50 text-emerald-800"}`}>
           <p className="font-semibold">
             {props.report.summary.failed ? "诊断完成，但仍有失败项。" : props.report.summary.warnings ? "诊断完成，有需要留意的提醒。" : "诊断通过。"}
           </p>
@@ -788,6 +794,7 @@ function App() {
     }
     let pendingEvents: TaskEventEnvelope[] = [];
     let rafId: number | null = null;
+    const MAX_PENDING_EVENTS = 100;
 
     function handleAuxiliaryEvent(event: TaskEventEnvelope) {
       if (event.event.type !== "approval") return;
@@ -904,7 +911,13 @@ function App() {
         releaseTaskLockForTerminalEvent(event);
       } else {
         pendingEvents.push(event);
-        if (rafId === null) {
+        if (pendingEvents.length >= MAX_PENDING_EVENTS) {
+          if (rafId !== null) {
+            cancelAnimationFrame(rafId);
+            rafId = null;
+          }
+          flushEvents();
+        } else if (rafId === null) {
           rafId = requestAnimationFrame(flushEvents);
         }
       }

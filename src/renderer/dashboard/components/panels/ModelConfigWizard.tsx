@@ -47,7 +47,10 @@ export function ModelConfigWizard(props: {
   const [discovery, setDiscovery] = useState<LocalModelDiscoveryResult | undefined>();
   const [busyAction, setBusyAction] = useState<BusyAction | undefined>();
   const [operationNotice, setOperationNotice] = useState<OperationNotice | undefined>();
+  const [connectionTestPassedInSession, setConnectionTestPassedInSession] = useState(false);
+  const [draftNonce, setDraftNonce] = useState(0);
   const feedbackPanelRef = useRef<HTMLDivElement | null>(null);
+  const wizardTopRef = useRef<HTMLDivElement | null>(null);
   const draftRef = useRef({ sourceType, baseUrl, model, secretRef, apiKey, apiSecret });
 
   useEffect(() => {
@@ -80,6 +83,7 @@ export function ModelConfigWizard(props: {
   const hasRequiredFields = model.trim().length > 0 && (!baseUrlRequired || baseUrl.trim().length > 0);
   const canTestConnection = hasRequiredFields && canUseSavedSecret && !busyAction;
   const canSaveModel = hasRequiredFields && canUseSavedSecret && !busyAction;
+  const canSaveAsAuxiliary = hasRequiredFields && canUseSavedSecret && !busyAction && testResult && !testResult.ok;
   const currentEditingProfile = editingProfileId ? props.models.modelProfiles.find((item) => item.id === editingProfileId) : undefined;
   const pendingProviderId = providerIdForSource(sourceType);
   const pendingProfileIsCurrent = Boolean(currentEditingProfile && sameModelIdentity(currentEditingProfile, {
@@ -119,10 +123,15 @@ export function ModelConfigWizard(props: {
     setDiscovery(undefined);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function createNewProfile(nextSource: ModelSourceType = sourceType) {
     updateSource(nextSource);
+    setDraftNonce((n) => n + 1);
+    window.setTimeout(() => {
+      wizardTopRef.current?.scrollIntoView({ block: "start", behavior: "smooth" });
+    }, 0);
   }
 
   function editProfile(profileId: string) {
@@ -138,6 +147,7 @@ export function ModelConfigWizard(props: {
     setDiscovery(undefined);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function updateBaseUrl(value: string) {
@@ -145,6 +155,7 @@ export function ModelConfigWizard(props: {
     setBaseUrl(value);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function updateModel(value: string) {
@@ -152,6 +163,7 @@ export function ModelConfigWizard(props: {
     setModel(value);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function updateApiKey(value: string) {
@@ -159,6 +171,7 @@ export function ModelConfigWizard(props: {
     setApiKey(value);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function updateApiSecret(value: string) {
@@ -166,6 +179,7 @@ export function ModelConfigWizard(props: {
     setApiSecret(value);
     setTestResult(undefined);
     setOperationNotice(undefined);
+    setConnectionTestPassedInSession(false);
   }
 
   function revealFeedbackPanel() {
@@ -203,6 +217,18 @@ export function ModelConfigWizard(props: {
     }
   }
 
+  async function runTestConnection(): Promise<ModelConnectionTestResult> {
+    const ref = await ensureSecretIfNeeded(sourceType);
+    const draft = draftRef.current;
+    return await window.workbenchClient.testModelConnection({
+      sourceType: draft.sourceType,
+      model: draft.model.trim(),
+      baseUrl: draft.baseUrl.trim(),
+      secretRef: ref,
+      maxTokens: DEFAULT_MAX_CONTEXT,
+    });
+  }
+
   async function testConnection() {
     setBusyAction("test");
     setTestResult(undefined);
@@ -213,16 +239,9 @@ export function ModelConfigWizard(props: {
     });
     revealFeedbackPanel();
     try {
-      const ref = await ensureSecretIfNeeded(sourceType);
-      const draft = draftRef.current;
-      const result = await window.workbenchClient.testModelConnection({
-        sourceType: draft.sourceType,
-        model: draft.model.trim(),
-        baseUrl: draft.baseUrl.trim(),
-        secretRef: ref,
-        maxTokens: DEFAULT_MAX_CONTEXT,
-      });
+      const result = await runTestConnection();
       setTestResult(result);
+      setConnectionTestPassedInSession(result.ok);
       setOperationNotice(noticeForTestResult(result));
     } catch (error) {
       const failure = connectionFailureFromError(error, sourceType);
@@ -233,25 +252,54 @@ export function ModelConfigWizard(props: {
     }
   }
 
-  async function saveModel() {
+  async function saveModel(asAuxiliary = false) {
     setBusyAction("save");
+    revealFeedbackPanel();
+
+    let health = testResult;
+
+    if (!connectionTestPassedInSession && !asAuxiliary) {
+      setOperationNotice({
+        tone: "info",
+        title: "正在测试并保存",
+        message: "正在依次检查鉴权、模型可达性、最小 Chat、tool calling 和 WSL 可达性，通过后会自动保存。",
+      });
+      try {
+        health = await runTestConnection();
+        setTestResult(health);
+        setConnectionTestPassedInSession(health.ok);
+        if (!health.ok) {
+          setOperationNotice(noticeForTestResult(health));
+          setBusyAction(undefined);
+          return;
+        }
+      } catch (error) {
+        const failure = connectionFailureFromError(error, sourceType);
+        setTestResult(failure);
+        setOperationNotice(noticeForTestResult(failure));
+        setBusyAction(undefined);
+        return;
+      }
+    }
+
     setOperationNotice({
       tone: "info",
-      title: "正在保存并测试",
-      message: "会先保存密钥，再复检模型能力，最后写入模型配置。",
+      title: asAuxiliary ? "正在保存为辅助模型" : "正在保存并测试",
+      message: asAuxiliary ? "以辅助模型身份保存，不强制要求通过全部连接测试。" : "会先保存密钥，再复检模型能力，最后写入模型配置。",
     });
-    revealFeedbackPanel();
     try {
       const ref = await ensureSecretIfNeeded(sourceType);
       const draft = draftRef.current;
-      const health = await window.workbenchClient.testModelConnection({
-        sourceType: draft.sourceType,
-        model: draft.model.trim(),
-        baseUrl: draft.baseUrl.trim(),
-        secretRef: ref,
-        maxTokens: DEFAULT_MAX_CONTEXT,
-      });
-      setTestResult(health);
+      if (!health) {
+        health = await window.workbenchClient.testModelConnection({
+          sourceType: draft.sourceType,
+          model: draft.model.trim(),
+          baseUrl: draft.baseUrl.trim(),
+          secretRef: ref,
+          maxTokens: DEFAULT_MAX_CONTEXT,
+        });
+        setTestResult(health);
+      }
 
       const currentSourceType = draft.sourceType;
       const currentProvider = providerForCatalog(currentSourceType, providerCatalog);
@@ -290,12 +338,16 @@ export function ModelConfigWizard(props: {
         ...props.models.modelProfiles.filter((item) => item.id !== profileId),
         nextProfile,
       ];
-      const roleAssignments = {
-        ...(props.models.roleAssignments ?? {}),
-        ...(currentProvider.roleCapabilities.includes("coding_plan") && health.roleCompatibility?.coding_plan?.ok ? { coding_plan: profileId } : {}),
-        ...(health.roleCompatibility?.chat?.ok || health.agentRole === "primary_agent" ? { chat: profileId } : {}),
-      };
-      const nextDefaultProfileId = roleAssignments.chat ?? props.models.defaultProfileId;
+      const roleAssignments = asAuxiliary
+        ? props.models.roleAssignments ?? {}
+        : {
+            ...(props.models.roleAssignments ?? {}),
+            ...(currentProvider.roleCapabilities.includes("coding_plan") && health.roleCompatibility?.coding_plan?.ok ? { coding_plan: profileId } : {}),
+            ...(health.roleCompatibility?.chat?.ok || health.agentRole === "primary_agent" ? { chat: profileId } : {}),
+          };
+      const nextDefaultProfileId = asAuxiliary
+        ? props.models.defaultProfileId
+        : (roleAssignments.chat ?? props.models.defaultProfileId);
       await window.workbenchClient.updateModelConfig({
         defaultProfileId: nextDefaultProfileId,
         modelRoleAssignments: roleAssignments,
@@ -303,12 +355,14 @@ export function ModelConfigWizard(props: {
       });
       await props.onRefresh();
       setEditingProfileId(profileId);
-      const savedMessage = health.agentRole === "primary_agent"
-        ? "模型已保存，并设为默认"
-        : "模型已保存为辅助/待确认来源，未自动设为默认";
+      const savedMessage = asAuxiliary
+        ? "模型已保存为辅助模型"
+        : health.agentRole === "primary_agent"
+          ? "模型已保存，并设为默认"
+          : "模型已保存为辅助/待确认来源，未自动设为默认";
       setOperationNotice({
-        tone: health.agentRole === "primary_agent" ? "success" : "warning",
-        title: health.agentRole === "primary_agent" ? "保存完成" : "已保存，暂未设为默认",
+        tone: asAuxiliary ? "info" : health.agentRole === "primary_agent" ? "success" : "warning",
+        title: asAuxiliary ? "已保存为辅助模型" : health.agentRole === "primary_agent" ? "保存完成" : "已保存，暂未设为默认",
         message: savedMessage,
       });
       props.onSaved(savedMessage);
@@ -401,10 +455,10 @@ export function ModelConfigWizard(props: {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-5">
+    <div ref={wizardTopRef} className="mx-auto max-w-3xl space-y-5">
       <ProviderSelector sourceType={sourceType} models={props.models} secrets={props.secrets} providers={providerCatalog} onChange={updateSource} />
       <ModelConfigForm
-        key={`${sourceType}-${editingProfileId ?? "new"}`}
+        key={`${sourceType}-${editingProfileId ?? "new"}-${draftNonce}`}
         draft={{
           sourceType,
           provider,
@@ -421,6 +475,8 @@ export function ModelConfigWizard(props: {
         busyAction={busyAction}
         canTestConnection={canTestConnection}
         canSaveModel={canSaveModel}
+        canSaveAsAuxiliary={canSaveAsAuxiliary}
+        testPassed={connectionTestPassedInSession}
         willCreateNewProfile={willCreateNewProfile}
         formBlockingHint={formBlockingHint}
         onModelChange={updateModel}
@@ -430,6 +486,7 @@ export function ModelConfigWizard(props: {
         onSecretRefChange={setSecretRef}
         onTest={testConnection}
         onSave={saveModel}
+        onSaveAsAuxiliary={() => saveModel(true)}
         onDiscover={discoverLocal}
         onCreateDraft={() => createNewProfile(sourceType)}
         onApplyDiscovery={(candidate) => {

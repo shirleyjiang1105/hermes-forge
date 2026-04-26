@@ -115,4 +115,6 @@ export const IpcChannels = {
   cancelWeixinQrLogin: "connectors:weixin-qr:cancel",
   installWeixinDependency: "connectors:weixin-qr:install-dependency",
   discoverLocalModelSources: "config:discover-local-model-sources",
+  exportMessage: "message:export",
+  writeClipboard: "clipboard:write-text",
 } as const;

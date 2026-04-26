@@ -98,6 +98,48 @@ describe("HermesModelSyncService", () => {
     await expect(fs.readFile(path.join(profileHome, ".env"), "utf8")).resolves.toContain("OPENAI_API_KEY=pwd");
   });
 
+  it("writes the canonical Hermes provider name for Coding Plan chat profiles", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-model-sync-coding-plan-"));
+    const config: RuntimeConfig = {
+      defaultModelProfileId: "kimi-coding",
+      modelProfiles: [{
+        id: "kimi-coding",
+        provider: "custom",
+        sourceType: "kimi_coding_api_key",
+        model: "kimi-for-coding",
+        baseUrl: "https://api.kimi.com/coding/v1",
+        secretRef: "provider.kimi-coding.apiKey",
+      }],
+      updateSources: {},
+    };
+    const resolver = {
+      resolveFromConfig: async () => ({
+        profileId: "kimi-coding",
+        provider: "custom",
+        sourceType: "kimi_coding_api_key",
+        model: "kimi-for-coding",
+        baseUrl: "https://api.kimi.com/coding/v1",
+        env: {
+          AI_PROVIDER: "custom",
+          AI_MODEL: "kimi-for-coding",
+          OPENAI_BASE_URL: "https://api.kimi.com/coding/v1",
+          OPENAI_API_KEY: "sk-kimi",
+          KIMI_API_KEY: "sk-kimi",
+        },
+      }),
+    };
+
+    const service = new HermesModelSyncService(resolver as never, () => home);
+    const result = await service.syncRuntimeConfig(config);
+
+    expect(result.synced).toBe(true);
+    expect(result.roles?.chat?.provider).toBe("kimi-coding");
+    const yaml = await fs.readFile(path.join(home, "config.yaml"), "utf8");
+    expect(yaml).toContain("provider: \"kimi-coding\"");
+    const env = await fs.readFile(path.join(home, ".env"), "utf8");
+    expect(env).toContain("HERMES_INFERENCE_PROVIDER=kimi-coding");
+  });
+
   it("writes separate chat and Coding Plan runtime env values", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-model-sync-roles-"));
     const config: RuntimeConfig = {

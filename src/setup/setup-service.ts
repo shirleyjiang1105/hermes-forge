@@ -666,10 +666,10 @@ export class SetupService {
       return {
         id: "model-placeholder",
         label: "模型配置",
-        status: "warning",
-        message: "当前默认模型仍是示例占位配置 mock-model，请在设置中改成真实可用模型。",
+        status: "missing",
+        message: "当前默认模型仍是示例占位配置 mock-model，请在设置中改成真实可用模型。保存为默认前必须先通过连接测试。",
         fixAction: "configure_model",
-        blocking: false,
+        blocking: true,
       };
     }
     if (profile.provider === "custom") {
@@ -691,7 +691,7 @@ export class SetupService {
         id: "model-secret",
         label: "模型密钥",
         status: "missing",
-        message: missingSecretMessage(profile),
+        message: `${missingSecretMessage(profile)} 请在模型配置向导里重新输入 API Key 并点击「保存密钥」，然后再测试连接。`,
         fixAction: "configure_model",
         blocking: true,
       };

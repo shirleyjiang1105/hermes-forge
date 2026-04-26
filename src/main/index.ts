@@ -115,6 +115,7 @@ app.whenReady().then(async () => {
     resolveHermesRoot,
     () => configStore.read(),
     runtimeAdapterFactory,
+    () => hermesModelSyncService,
   );
   const sessionLog = new SessionLog(appPaths);
   const sessionAgentInsightService = new SessionAgentInsightService(appPaths, sessionLog);

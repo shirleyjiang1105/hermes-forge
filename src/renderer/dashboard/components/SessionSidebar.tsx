@@ -63,7 +63,7 @@ export function SessionSidebar(props: {
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto px-0.5 pt-2">
+      <div className="custom-scrollbar min-h-0 flex-1 overflow-y-auto px-0.5 pt-2">
         {sections.map((section) => (
           <SessionListSection
             key={section.title}
@@ -155,7 +155,7 @@ function SessionItem(props: {
   modelLabel: string;
 }) {
   return (
-    <div className={cn("hermes-session-item group overflow-hidden rounded-xl px-2.5 py-2 text-[12px] transition-all focus-within:bg-white", props.active ? "is-active bg-[var(--hermes-primary-soft)] text-[var(--hermes-primary)] shadow-sm ring-1 ring-[var(--hermes-primary-border)]" : "text-slate-600 hover:bg-white hover:shadow-sm hover:ring-1 hover:ring-slate-200/70")}>
+    <div className={cn("hermes-session-item group rounded-xl px-2.5 py-2 text-[12px] transition-all focus-within:bg-white", props.active ? "is-active bg-[var(--hermes-primary-soft)] text-[var(--hermes-primary)] shadow-sm ring-1 ring-[var(--hermes-primary-border)]" : "text-slate-600 hover:bg-white hover:shadow-sm hover:ring-1 hover:ring-slate-200/70")}>
       <div className="flex items-start gap-2">
         <span className={cn("mt-1 h-1.5 w-1.5 shrink-0 rounded-full", props.active ? "bg-[var(--hermes-primary)] shadow-[0_0_10px_rgba(91,77,255,0.4)]" : props.session.pinned ? "bg-amber-400" : "bg-slate-300/70")} />
         <button className="min-w-0 flex-1 overflow-hidden text-left" onClick={props.onSelect} type="button">

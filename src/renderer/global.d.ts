@@ -225,6 +225,8 @@ declare global {
       getOneClickDiagnosticsStatus(): Promise<OneClickDiagnosticsStatus>;
       onTaskEvent(callback: (event: TaskEventEnvelope) => void): () => void;
       onHermesAgentCompatibilityWarning(callback: (event: { compatible: boolean; message: string }) => void): () => void;
+      exportMessage(input: { content: string; suggestedName: string }): Promise<{ ok: boolean; path?: string; message?: string }>;
+      writeClipboard(text: string): Promise<{ ok: boolean }>;
     };
   }
 }
