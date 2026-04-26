@@ -281,6 +281,7 @@ app.whenReady().then(async () => {
     setupService,
     runtimeProbeService,
     wslDoctorService,
+    wslRepairService,
     hermesConnectorService,
     hermesModelSyncService,
     hermesSystemAuditService,

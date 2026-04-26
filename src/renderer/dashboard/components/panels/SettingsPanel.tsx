@@ -12,7 +12,6 @@ import {
   Save,
   Settings,
   ShieldCheck,
-  Sparkles,
   Wrench,
   XCircle,
 } from "lucide-react";
@@ -52,7 +51,6 @@ export function SettingsPanel(props: {
   onOpenSettings: () => void;
   onClearSession: () => void;
   onOpenSessionFolder: () => void;
-  onExportDiagnostics: () => void;
 }) {
   const store = useAppStore();
   const [runtimeChoice, setRuntimeChoice] = useState<RuntimeChoice>("auto");
@@ -273,17 +271,6 @@ export function SettingsPanel(props: {
   const matrix = permissionOverview.data ? overviewMatrix(permissionOverview.data) : enforcementMatrix(effectiveRuntime(), bridge);
   const policyBlock = permissionOverview.data?.blockReason ?? policyBlockReason(effectiveRuntime());
   const bridgeCapabilities = permissionOverview.data ? overviewBridgeCapabilities(permissionOverview.data) : bridgeCapabilityRows(bridge, effectiveRuntime());
-  const installingWsl = effectiveRuntime().mode === "wsl";
-  const installActionLabel = installingHermes
-    ? "正在处理..."
-    : installingWsl
-      ? "一键安装 / 修复 WSL Hermes"
-    : status.install.state === "missing"
-      ? "安装到此位置"
-      : status.install.state === "broken"
-        ? "修复安装"
-        : "重新安装";
-
   return (
     <div className="space-y-3">
       <HeroStatus
@@ -365,7 +352,6 @@ export function SettingsPanel(props: {
           </div>
 
           <div className="flex flex-wrap gap-2">
-            <PrimaryButton icon={Sparkles} label={installActionLabel} loading={installingHermes} onClick={installHermes} />
             <SecondaryButton icon={Save} label="保存设置" loading={savingRuntime} onClick={() => void saveRuntime()} />
           </div>
           {installEvent ? <InstallProgressView event={installEvent} /> : null}
@@ -472,7 +458,6 @@ export function SettingsPanel(props: {
                 <ManagedWslInstallerPanel
                   title="Managed WSL 安装链路"
                   onAfterAction={props.onRefresh}
-                  onExportDiagnostics={props.onExportDiagnostics}
                   onNotice={(message, detail, tone) => {
                     if (tone === "error") store.error(message, detail);
                     else if (tone === "warning") store.warning(message, detail);

@@ -33,7 +33,6 @@ export function ControlCenter(props: {
   onOpenSettings: () => void;
   onClearSession: () => void;
   onOpenSessionFolder: () => void;
-  onExportDiagnostics: () => void;
 }) {
   const store = useAppStore();
   const active = store.activePanel;

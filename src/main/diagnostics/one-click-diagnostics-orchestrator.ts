@@ -18,6 +18,8 @@ import {
   type HermesCliValidationResult,
   type ResolvedHermesCli,
 } from "../../runtime/hermes-cli-resolver";
+import type { WslRepairService } from "../../install/wsl-repair-service";
+import type { WslRepairDependencyCheck } from "../../install/wsl-doctor-types";
 import { migrateRuntimeConfigModels } from "../../shared/model-config";
 import { redactSensitiveValue } from "../../shared/redaction";
 import type {
@@ -50,6 +52,7 @@ export class OneClickDiagnosticsOrchestrator {
     private readonly setupService: SetupService,
     private readonly runtimeProbeService: RuntimeProbeService,
     private readonly wslDoctorService: WslDoctorService,
+    private readonly wslRepairService: WslRepairService,
     private readonly hermesConnectorService: HermesConnectorService,
     private readonly hermesModelSyncService: HermesModelSyncService,
     private readonly hermesSystemAuditService: HermesSystemAuditService,
@@ -88,9 +91,15 @@ export class OneClickDiagnosticsOrchestrator {
         await this.capture(items, "wsl.runtime", "WSL 基础检查", "runtime-probe-service", async () => {
           await this.checkWsl(items, context!, options);
         });
+        await this.capture(items, "wsl.essentials", "WSL 基础依赖检查", "wsl-repair-service", async () => {
+          await this.checkWslEssentials(items, context!, options);
+        });
         resolvedCli = await this.captureValue(items, "hermes.path", "Hermes 路径检查", "hermes-cli-resolver", async () =>
           this.checkHermesPath(items, context!, options),
         );
+        await this.capture(items, "python.deps", "Python 依赖检查", "hermes-cli-resolver", async () => {
+          await this.checkPythonDeps(items, context!, resolvedCli, options);
+        });
         await this.capture(items, "hermes.cli", "Hermes CLI 能力检查", "hermes-cli-resolver", async () => {
           await this.checkHermesCli(items, context!, resolvedCli, options);
         });
@@ -295,6 +304,51 @@ export class OneClickDiagnosticsOrchestrator {
       suggestedActions: probe.distroReachable ? [] : ["运行 wsl.exe 检查发行版状态，必要时执行 wsl --shutdown 后重试。"],
       source: "runtime-probe-service",
     }));
+  }
+
+  private async checkWslEssentials(
+    items: OneClickDiagnosticItem[],
+    context: RuntimeContext,
+    options: OneClickDiagnosticsRunOptions,
+  ) {
+    this.setStage("wsl.essentials", "正在检查 WSL 基础依赖...");
+    if (context.runtime.mode !== "wsl") {
+      items.push(skippedItem("wsl.essentials", "WSL 基础依赖", "当前不是 WSL runtime，跳过基础依赖检查。", "wsl-repair-service"));
+      return;
+    }
+
+    const dryRun = await this.wslRepairService.dryRun();
+    let dependencyChecks = dryRun.dependencyChecks;
+    let repairResult: import("../../install/wsl-doctor-types").WslRepairResult | undefined;
+
+    const needsRepair = dependencyChecks.some((check) => check.status === "repair_planned");
+    if (options.autoFix && needsRepair) {
+      repairResult = await this.wslRepairService.repair(dryRun.before, { dryRun: false });
+      const recheck = await this.wslRepairService.dryRun();
+      dependencyChecks = recheck.dependencyChecks;
+    }
+
+    for (const check of dependencyChecks) {
+      const wasRepaired = repairResult ? repairResult.repairedDependencies.includes(check.dependency) : false;
+      const isFixed = wasRepaired && check.available;
+      const isFailed = repairResult ? repairResult.failedDependencies.includes(check.dependency) : false;
+      const needsManual = check.status === "manual_action_required" || (isFailed && !isFixed);
+      const titleMap: Record<string, string> = { python3: "Python3", git: "Git", pip: "Pip", venv: "Python venv" };
+      items.push(item({
+        id: `wsl.essentials.${check.dependency}`,
+        title: `WSL ${titleMap[check.dependency] ?? check.dependency}`,
+        status: isFixed ? "fixed" : check.available ? "pass" : needsManual ? "fail" : "warn",
+        severity: check.available ? "info" : needsManual ? "error" : "warning",
+        summary: isFixed ? `已自动安装 ${titleMap[check.dependency] ?? check.dependency}。` : check.summary,
+        details: check.detail,
+        evidence: check.debugContext,
+        autoFixable: check.status === "repair_planned",
+        fixed: isFixed,
+        userActionRequired: needsManual,
+        suggestedActions: needsManual ? [check.fixHint || `请在 WSL 中手动安装 ${check.dependency}。`] : [],
+        source: "wsl-repair-service",
+      }));
+    }
   }
 
   private async checkHermesPath(
@@ -642,6 +696,332 @@ export class OneClickDiagnosticsOrchestrator {
     }));
   }
 
+  private async checkPythonDeps(
+    items: OneClickDiagnosticItem[],
+    context: RuntimeContext,
+    resolvedCli: ResolvedHermesCli | undefined,
+    options: OneClickDiagnosticsRunOptions,
+  ) {
+    this.setStage("python.deps", "正在检查 Python 关键依赖...");
+    const isWsl = context.runtime.mode === "wsl";
+    const distro = context.runtime.distro?.trim();
+    const configuredPython = context.runtime.pythonCommand?.trim() || "python3";
+
+    if (!isWsl && !resolvedCli) {
+      items.push(skippedItem("python.deps", "Python 依赖", "当前不是 WSL runtime 且未配置 Windows Hermes，跳过 Python 依赖检查。", "hermes-cli-resolver"));
+      return;
+    }
+
+    // 1. 构建候选 Python 命令列表
+    const candidates: string[] = [];
+    if (resolvedCli) {
+      if (isWsl) {
+        candidates.push(`${resolvedCli.rootPath.replace(/\/+$/, "")}/.venv/bin/python`);
+      } else {
+        candidates.push(path.join(resolvedCli.rootPath, ".venv", "Scripts", "python.exe"));
+        candidates.push(path.join(resolvedCli.rootPath, ".venv", "bin", "python"));
+      }
+    }
+    candidates.push(configuredPython);
+    if (!isWsl && configuredPython !== "python") candidates.push("python");
+    if (!isWsl && configuredPython !== "python3") candidates.push("python3");
+
+    // 2. 找到第一个可用的 Python
+    let pythonCmd: string | undefined;
+    let pythonCheckOutput = "";
+    for (const cmd of candidates) {
+      const check = await this.runPythonCheck(cmd, isWsl, distro);
+      if (check.ok) {
+        pythonCmd = cmd;
+        break;
+      }
+      if (check.output) pythonCheckOutput = check.output;
+    }
+
+    if (!pythonCmd) {
+      items.push(item({
+        id: "python.deps",
+        title: "Python 依赖",
+        status: "fail",
+        severity: "error",
+        summary: `未找到可用的 Python 解释器（已尝试：${candidates.join("、")}）。`,
+        details: pythonCheckOutput || undefined,
+        autoFixable: false,
+        userActionRequired: true,
+        suggestedActions: isWsl
+          ? ["在 WSL 中安装 python3（如 apt-get install python3），或在设置中指定正确的 Python 命令。"]
+          : ["安装 Python（建议 3.10+），或在设置中指定正确的 Python 命令。"],
+        source: "hermes-cli-resolver",
+      }));
+      return;
+    }
+
+    // 3. 检查 pip 可用性（不能用 runPythonScript，因为那是 python -c '...' 的形式，-m pip 不是合法 Python 代码）
+    const pipCheck = await this.runPipVersionCheck(pythonCmd, isWsl, distro);
+    if (pipCheck.exitCode !== 0) {
+      let pipFixed = false;
+      if (options.autoFix && isWsl) {
+        pipFixed = await this.installPipViaApt(distro);
+        if (pipFixed) {
+          const recheck = await this.runPipVersionCheck(pythonCmd, isWsl, distro);
+          pipFixed = recheck.exitCode === 0;
+        }
+      }
+      items.push(item({
+        id: "python.deps",
+        title: "Python 依赖",
+        status: pipFixed ? "fixed" : "fail",
+        severity: "error",
+        summary: pipFixed
+          ? "已自动安装 pip，可以安装 PyYAML / python-dotenv。"
+          : "Python 环境缺少 pip（python3-pip），无法安装 PyYAML / python-dotenv。",
+        details: (pipCheck.stderr || pipCheck.stdout).trim() || undefined,
+        evidence: { pythonCommand: pythonCmd },
+        autoFixable: isWsl,
+        fixed: pipFixed,
+        userActionRequired: !pipFixed,
+        suggestedActions: isWsl
+          ? ["点击“一键修复”自动安装 python3-pip，或在 WSL 中执行 sudo apt-get install python3-pip。"]
+          : ["安装 pip：https://pip.pypa.io/en/stable/installation/"],
+        source: "hermes-cli-resolver",
+      }));
+      return;
+    }
+
+    // 4. 探测 yaml 和 dotenv
+    const probe = await this.probePythonModules(pythonCmd, isWsl, distro);
+
+    // 5. autoFix：尝试 pip install
+    let fixed = false;
+    let pipFailure: { reason: string; stderr: string; stdout: string } | undefined;
+    if (options.autoFix && !probe.ok && probe.missingModules.length > 0) {
+      const installResult = await this.installPythonModules(pythonCmd, probe.missingModules, isWsl, distro);
+      if (installResult.success) {
+        const recheck = await this.probePythonModules(pythonCmd, isWsl, distro);
+        if (recheck.ok) {
+          fixed = true;
+          probe.ok = true;
+          probe.missingModules = [];
+        }
+      } else {
+        pipFailure = { reason: installResult.reason, stderr: installResult.stderr, stdout: installResult.stdout };
+      }
+    }
+
+    // 6. 推送诊断项
+    items.push(item({
+      id: "python.deps",
+      title: "Python 依赖",
+      status: fixed ? "fixed" : probe.ok ? "pass" : "fail",
+      severity: probe.ok ? "info" : "error",
+      summary: fixed
+        ? "已自动安装缺失的 Python 依赖（PyYAML / python-dotenv）。"
+        : probe.ok
+          ? "Python 关键依赖（PyYAML、python-dotenv）已就绪。"
+          : pipFailure
+            ? `自动安装失败：${pipFailure.reason}`
+            : `Python 环境缺少关键依赖：${probe.missingModules.map((m) => (m === "yaml" ? "PyYAML" : "python-dotenv")).join("、")}。`,
+      details: pipFailure ? `${pipFailure.reason}\n${pipFailure.stderr.slice(0, 800)}` : probe.details,
+      evidence: { pythonCommand: pythonCmd, missingModules: probe.missingModules, rawOutput: probe.rawOutput },
+      autoFixable: !probe.ok && probe.missingModules.length > 0,
+      fixed,
+      userActionRequired: !probe.ok && !fixed,
+      suggestedActions: probe.ok
+        ? []
+        : pipFailure
+          ? [pipFailure.reason, "或尝试在 WSL 中手动执行 pip install。"]
+          : this.pythonDepFixSuggestions(pythonCmd, probe.missingModules, isWsl),
+      source: "hermes-cli-resolver",
+    }));
+  }
+
+  private async runPythonCheck(cmd: string, isWsl: boolean, distro?: string): Promise<{ ok: boolean; output?: string }> {
+    const script = `print("python_ok")`;
+    if (isWsl) {
+      const args = [
+        ...(distro ? ["-d", distro] : []),
+        "--",
+        "bash",
+        "-lc",
+        `${cmd} -c '${script}'`,
+      ];
+      const result = await runCommand("wsl.exe", args, {
+        cwd: process.cwd(),
+        timeoutMs: 10_000,
+        commandId: "one-click.python-check",
+        runtimeKind: "wsl",
+      });
+      return { ok: result.exitCode === 0, output: (result.stderr || result.stdout).trim() || undefined };
+    }
+    const result = await runCommand(cmd, ["-c", script], {
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      commandId: "one-click.python-check",
+      runtimeKind: "windows",
+    });
+    return { ok: result.exitCode === 0, output: (result.stderr || result.stdout).trim() || undefined };
+  }
+
+  private async probePythonModules(cmd: string, isWsl: boolean, distro?: string): Promise<{ ok: boolean; missingModules: string[]; details?: string; rawOutput?: string }> {
+    const combinedScript = `import yaml, dotenv; print("ok")`;
+    const combined = await this.runPythonScript(cmd, combinedScript, isWsl, distro, "one-click.python-modules");
+    if (combined.exitCode === 0) {
+      return { ok: true, missingModules: [] };
+    }
+
+    const output = (combined.stderr || combined.stdout || "").trim();
+    const missing: string[] = [];
+
+    // 分别探测，确定具体缺哪个
+    for (const mod of ["yaml", "dotenv"]) {
+      const modResult = await this.runPythonScript(cmd, `import ${mod}; print("${mod}_ok")`, isWsl, distro, `one-click.python-module-${mod}`);
+      if (modResult.exitCode !== 0) missing.push(mod);
+    }
+
+    return {
+      ok: false,
+      missingModules: missing,
+      details: output || undefined,
+      rawOutput: output || undefined,
+    };
+  }
+
+  private async runPipVersionCheck(cmd: string, isWsl: boolean, distro: string | undefined) {
+    if (isWsl) {
+      const args = [
+        ...(distro ? ["-d", distro] : []),
+        "--",
+        "bash",
+        "-lc",
+        `${cmd} -m pip --version`,
+      ];
+      return runCommand("wsl.exe", args, {
+        cwd: process.cwd(),
+        timeoutMs: 10_000,
+        commandId: "one-click.pip-check",
+        runtimeKind: "wsl",
+      });
+    }
+    return runCommand(cmd, ["-m", "pip", "--version"], {
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      commandId: "one-click.pip-check",
+      runtimeKind: "windows",
+    });
+  }
+
+  private async runPythonScript(cmd: string, script: string, isWsl: boolean, distro: string | undefined, commandId: string) {
+    if (isWsl) {
+      const args = [
+        ...(distro ? ["-d", distro] : []),
+        "--",
+        "bash",
+        "-lc",
+        `${cmd} -c '${script}'`,
+      ];
+      return runCommand("wsl.exe", args, {
+        cwd: process.cwd(),
+        timeoutMs: 10_000,
+        commandId,
+        runtimeKind: "wsl",
+      });
+    }
+    return runCommand(cmd, ["-c", script], {
+      cwd: process.cwd(),
+      timeoutMs: 10_000,
+      commandId,
+      runtimeKind: "windows",
+    });
+  }
+
+  private async installPythonModules(
+    cmd: string,
+    missingModules: string[],
+    isWsl: boolean,
+    distro?: string,
+  ): Promise<{ success: boolean; reason: string; stderr: string; stdout: string }> {
+    const packages = missingModules.map((m) => (m === "yaml" ? "pyyaml" : "python-dotenv"));
+    if (isWsl) {
+      const args = [
+        ...(distro ? ["-d", distro] : []),
+        "--",
+        "bash",
+        "-lc",
+        `${cmd} -m pip install ${packages.join(" ")}`,
+      ];
+      const result = await runCommand("wsl.exe", args, {
+        cwd: process.cwd(),
+        timeoutMs: 60_000,
+        commandId: "one-click.python-install",
+        runtimeKind: "wsl",
+      });
+      if (result.exitCode === 0) return { success: true, reason: "", stderr: "", stdout: result.stdout };
+      const reason = this.analyzePipFailure(result.stderr || "", result.stdout || "");
+      return { success: false, reason, stderr: result.stderr || "", stdout: result.stdout || "" };
+    }
+    const result = await runCommand(cmd, ["-m", "pip", "install", ...packages], {
+      cwd: process.cwd(),
+      timeoutMs: 60_000,
+      commandId: "one-click.python-install",
+      runtimeKind: "windows",
+    });
+    if (result.exitCode === 0) return { success: true, reason: "", stderr: "", stdout: result.stdout };
+    const reason = this.analyzePipFailure(result.stderr || "", result.stdout || "");
+    return { success: false, reason, stderr: result.stderr || "", stdout: result.stdout || "" };
+  }
+
+  private analyzePipFailure(stderr: string, stdout: string): string {
+    const combined = `${stderr}\n${stdout}`;
+    if (/permission denied|permission error|Errno 13/i.test(combined)) {
+      return "pip install 因权限不足失败。可尝试添加 --user 参数，或在 WSL 中使用 sudo。";
+    }
+    if (/externally-managed|PEP 668|externally managed/i.test(combined)) {
+      return "当前 Python 为系统级外部管理环境（PEP 668）。请使用 python3 -m pip install --break-system-packages，或在 venv 中安装。";
+    }
+    if (/No module named ensurepip/i.test(combined)) {
+      return "Python 环境缺少 ensurepip 模块。请安装 python3-venv 或 python3-full。";
+    }
+    if (/Could not find a version|Connection error|timeout|SSL|certificate|CERTIFICATE_VERIFY_FAILED/i.test(combined)) {
+      return "pip install 因网络问题失败，无法连接到 PyPI。请检查网络或代理设置。";
+    }
+    if (/No module named pip/i.test(combined) || /pip.*not found/i.test(combined)) {
+      return "Python 环境缺少 pip。请先安装 python3-pip。";
+    }
+    const preview = stderr.trim().slice(0, 200) || stdout.trim().slice(0, 200);
+    return `pip install 失败${preview ? `：${preview}` : "。"}`;
+  }
+
+  private async installPipViaApt(distro?: string): Promise<boolean> {
+    const args = [
+      ...(distro ? ["-d", distro] : []),
+      "--",
+      "bash",
+      "-lc",
+      "sudo apt-get update -qq && sudo apt-get install -y -qq python3-pip",
+    ];
+    const result = await runCommand("wsl.exe", args, {
+      cwd: process.cwd(),
+      timeoutMs: 120_000,
+      commandId: "one-click.pip-apt-install",
+      runtimeKind: "wsl",
+    });
+    return result.exitCode === 0;
+  }
+
+  private pythonDepFixSuggestions(pythonCmd: string, missingModules: string[], isWsl: boolean): string[] {
+    const packages = missingModules.map((m) => (m === "yaml" ? "pyyaml" : "python-dotenv")).join(" ");
+    if (isWsl) {
+      return [
+        `在 WSL 中执行：${pythonCmd} -m pip install ${packages}`,
+        "或者点击“一键修复”让 Forge 自动安装。",
+      ];
+    }
+    return [
+      `执行：${pythonCmd} -m pip install ${packages}`,
+      "或者点击“一键修复”让 Forge 自动安装。",
+    ];
+  }
+
   private skipHermesSystemAudit(items: OneClickDiagnosticItem[]) {
     this.setStage("hermes.audit", "已跳过高风险 Hermes 深度审计...");
     items.push(skippedItem(
@@ -865,6 +1245,8 @@ function capabilityFailureSummary(validation: HermesCliValidationResult) {
   if (validation.kind === "permission_denied") return "Hermes CLI 权限不足，无法执行 capabilities --json。";
   if (validation.kind === "capability_unsupported") return "Hermes CLI 存在，但版本或 capability 不满足最低门槛。";
   if (validation.message.includes("不是有效 JSON")) return "capabilities --json 返回内容不是有效 JSON。";
+  const missingModule = detectMissingPythonModuleFromMessage(validation.message);
+  if (missingModule) return `capabilities --json 执行失败：Hermes CLI 的 Python 环境缺少 ${missingModule}。`;
   return "capabilities --json 执行失败。";
 }
 
@@ -874,7 +1256,28 @@ function capabilitySuggestedActions(validation: HermesCliValidationResult) {
   if (validation.kind === "permission_denied") return ["修复 WSL 文件权限后重试。"];
   if (validation.kind === "capability_unsupported") return ["更新或修复 Hermes Agent，使 capabilities 包含 launch metadata 与 resume 支持。"];
   if (validation.message.includes("不是有效 JSON")) return ["检查 Hermes CLI 是否输出了错误栈，必要时重新安装 Agent。"];
+  const missingModule = detectMissingPythonModuleFromMessage(validation.message);
+  if (missingModule) {
+    const packageName = missingModule === "PyYAML" ? "pyyaml" : missingModule === "python-dotenv" ? "python-dotenv" : missingModule;
+    return [
+      `Hermes CLI 的 Python 环境缺少 ${missingModule}，请进入 Hermes 目录执行 pip install ${packageName}。`,
+      "或者先运行一键诊断的“一键修复”，让 Forge 自动补齐依赖。",
+    ];
+  }
   return ["查看 stderr 并修复 Hermes CLI 运行错误。"];
+}
+
+function detectMissingPythonModuleFromMessage(message: string): string | undefined {
+  const match = message.match(/缺少依赖\s+([\w-]+)/i);
+  if (match) return match[1];
+  const match2 = message.match(/ModuleNotFoundError:\s+No module named ['"]([^'"]+)['"]/i);
+  if (match2) {
+    const mod = match2[1];
+    if (mod === "yaml") return "PyYAML";
+    if (mod === "dotenv") return "python-dotenv";
+    return mod;
+  }
+  return undefined;
 }
 
 async function chmodWslExecutable(runtime: HermesRuntimeConfig, cliPath: string) {

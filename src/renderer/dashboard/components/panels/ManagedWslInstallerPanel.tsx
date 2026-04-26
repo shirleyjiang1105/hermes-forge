@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { AlertCircle, CheckCircle2, ClipboardList, Download, Hammer, Loader2, PlayCircle, RefreshCw, Wrench } from "lucide-react";
+import { AlertCircle, CheckCircle2, ClipboardList, Hammer, Loader2, PlayCircle, RefreshCw, Wrench } from "lucide-react";
 import type {
   ManagedWslInstallerDependencyResult,
   ManagedWslInstallerIpcResult,
@@ -12,7 +12,6 @@ export function ManagedWslInstallerPanel(props: {
   title?: string;
   onAfterAction?: () => Promise<unknown> | unknown;
   onNotice?: (message: string, detail?: string, tone?: "success" | "warning" | "error") => void;
-  onExportDiagnostics?: () => void;
 }) {
   const { result, report, loadingAction, refreshLastReport, planInstall, dryRunRepair, executeRepair, install } = useManagedWslInstaller();
   const [showRaw, setShowRaw] = useState(false);
@@ -78,9 +77,6 @@ export function ManagedWslInstallerPanel(props: {
         <ActionButton icon={Wrench} label="预演修复" busy={loadingAction === "dry_run_repair"} disabled={loadingAction !== undefined} onClick={() => void runAction(dryRunRepair)} />
         <ActionButton icon={Hammer} label="仅执行修复" busy={loadingAction === "execute_repair"} disabled={executeDisabled} onClick={() => void runAction(executeRepair)} />
         <ActionButton icon={RefreshCw} label="读取上次结果" busy={loadingAction === "get_last_report"} disabled={loadingAction !== undefined} onClick={() => void runAction(refreshLastReport)} />
-        {props.onExportDiagnostics ? (
-          <ActionButton icon={Download} label="导出诊断" disabled={loadingAction !== undefined} onClick={() => void props.onExportDiagnostics?.()} />
-        ) : null}
       </div>
 
       {result ? (

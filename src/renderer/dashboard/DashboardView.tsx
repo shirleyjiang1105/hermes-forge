@@ -32,7 +32,6 @@ export function DashboardView(props: {
   onCancelTask: () => void;
   onRestoreSnapshot: () => void;
   onRefreshFileTree: () => void;
-  onExportDiagnostics: () => void;
   onOpenFix?: (target: FixTarget) => void;
   onRefreshWebUiOverview?: () => Promise<unknown>;
 }) {
@@ -133,7 +132,6 @@ export function DashboardView(props: {
                 onOpenSettings={() => store.setView("settings")}
                 onClearSession={props.onClearSession}
                 onOpenSessionFolder={props.onOpenSessionFolder}
-                onExportDiagnostics={props.onExportDiagnostics}
               />
             </div>
           )}
@@ -160,7 +158,6 @@ export function DashboardView(props: {
         onClose={() => store.setInspectorOpen(false)}
         onRefreshFileTree={props.onRefreshFileTree}
         onRestoreSnapshot={props.onRestoreSnapshot}
-        onExportDiagnostics={props.onExportDiagnostics}
         onOpenSessionFolder={props.onOpenSessionFolder}
       />
     </section>

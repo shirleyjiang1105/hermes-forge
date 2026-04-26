@@ -84,7 +84,6 @@ function SettingsView(props: {
   onRefresh: () => Promise<void>;
   onClearSession: () => void;
   onOpenSessionFolder: () => void;
-  onExportDiagnostics?: () => void;
 }) {
   const overview = props.overview;
   const store = useAppStore();
@@ -399,7 +398,6 @@ function SettingsView(props: {
           onOpenSettings={() => setActiveSection("general")}
           onClearSession={props.onClearSession}
           onOpenSessionFolder={props.onOpenSessionFolder}
-          onExportDiagnostics={props.onExportDiagnostics ?? (() => undefined)}
         />
       ) : null}
 
@@ -686,7 +684,7 @@ function oneClickStatusLabel(status: OneClickDiagnosticItem["status"]) {
 
 function needsManagedWslHermesInstall(report: OneClickDiagnosticsReport) {
   if (!report.summary.failed && !report.summary.unresolved) return false;
-  const installRelatedIds = new Set(["wsl.runtime", "wsl.distro", "wsl.command", "hermes.path", "hermes.cli", "hermes.capabilities"]);
+  const installRelatedIds = new Set(["wsl.runtime", "wsl.distro", "wsl.command", "wsl.essentials.python3", "wsl.essentials.git", "wsl.essentials.pip", "wsl.essentials.venv", "hermes.path", "hermes.cli", "hermes.capabilities"]);
   return report.items.some((diagnostic) => {
     if (diagnostic.status !== "fail") return false;
     const text = [
@@ -1473,27 +1471,6 @@ function App() {
     }
   }
 
-  async function exportDiagnostics() {
-    const current = useAppStore.getState();
-    const result = await window.workbenchClient.exportDiagnostics(current.workspacePath || undefined);
-    const event: EngineEvent = result.ok
-      ? { type: "status", level: "success", message: result.message, at: new Date().toISOString() }
-      : { type: "stderr", line: result.message, at: new Date().toISOString() };
-    store.pushEvent({
-      taskRunId: "diagnostics",
-      workSessionId: current.activeSessionId,
-      sessionId: "diagnostics",
-      engineId: "hermes",
-      event,
-    });
-    if (result.ok && result.path) {
-      store.success("诊断报告已导出", "已打开报告文件夹。报告已脱敏，可附到 issue 或发给维护者排查。");
-      void window.workbenchClient.openPath(result.path);
-    } else if (!result.ok) {
-      store.error("诊断导出失败", result.message);
-    }
-  }
-
   function openFixTarget(target: FixTarget) {
     if (target === "workspace") {
       store.setView("home");
@@ -1523,7 +1500,6 @@ function App() {
           onRefresh={() => loadConfigOverview(useAppStore.getState().workspacePath || undefined).then(() => undefined)}
           onClearSession={clearActiveSession}
           onOpenSessionFolder={openActiveSessionFolder}
-          onExportDiagnostics={exportDiagnostics}
         />
       ) : (
         <DashboardView
@@ -1545,7 +1521,6 @@ function App() {
           onCancelTask={cancelTask}
           onRestoreSnapshot={restoreSnapshot}
           onRefreshFileTree={refreshFileTree}
-          onExportDiagnostics={exportDiagnostics}
           onOpenFix={openFixTarget}
           onRefreshWebUiOverview={loadWebUiOverview}
         />

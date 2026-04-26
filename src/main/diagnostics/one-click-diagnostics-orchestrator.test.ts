@@ -26,6 +26,7 @@ describe("OneClickDiagnosticsOrchestrator", () => {
       {} as any,
       {} as any,
       {} as any,
+      {} as any,
       diagnosticsService as any,
       {} as any,
       {} as any,

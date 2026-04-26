@@ -57,7 +57,6 @@ describe("DashboardView", () => {
         onCancelTask={vi.fn()}
         onRestoreSnapshot={vi.fn()}
         onRefreshFileTree={vi.fn()}
-        onExportDiagnostics={vi.fn()}
         onOpenFix={overrides?.onOpenFix}
       />,
     );

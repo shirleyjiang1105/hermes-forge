@@ -1,4 +1,4 @@
-import { Download, FolderOpen, RotateCcw, ShieldCheck, X } from "lucide-react";
+import { FolderOpen, RotateCcw, ShieldCheck, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useAppStore } from "../store";
 import { cn, formatShortDate } from "./DashboardPrimitives";
@@ -8,7 +8,6 @@ export function ContextInspector(props: {
   onClose: () => void;
   onRefreshFileTree: () => void;
   onRestoreSnapshot: () => void;
-  onExportDiagnostics: () => void;
   onOpenSessionFolder: () => void;
 }) {
   const store = useAppStore();
@@ -39,10 +38,6 @@ export function ContextInspector(props: {
             <button className="inline-flex h-9 items-center justify-center gap-2 rounded-lg text-[12px] font-medium text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-40" onClick={props.onRestoreSnapshot} type="button" disabled={!store.snapshots.length || Boolean(store.locks.length)}>
               <RotateCcw size={14} />
               恢复快照
-            </button>
-            <button className="col-span-2 inline-flex h-9 items-center justify-center gap-2 rounded-lg bg-indigo-600 text-[12px] font-medium text-white shadow-sm transition-colors hover:bg-indigo-700" onClick={props.onExportDiagnostics} type="button">
-              <Download size={14} />
-              导出 Hermes 诊断
             </button>
           </div>
         </Panel>
