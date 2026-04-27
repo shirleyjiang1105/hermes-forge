@@ -70,3 +70,6 @@ python/
 __pycache__/
 *.pyc
 *.pyo
+
+# Skills directory
+skills/
