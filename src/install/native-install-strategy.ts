@@ -76,6 +76,20 @@ export class NativeInstallStrategy implements InstallStrategy {
     const log: string[] = [];
     const startedAt = new Date().toISOString();
     const hermesRoot = await this.configStore.getEnginePath("hermes");
+    const source = resolveInstallSource(await this.configStore.read());
+    const mismatch = await this.detectSourceMismatch(hermesRoot, source);
+    if (mismatch.stale) {
+      log.push(mismatch.reason!);
+      const reinstall = await this.performInstallHermes(undefined, { rootPath: hermesRoot });
+      return {
+        ok: reinstall.ok,
+        engineId: "hermes",
+        message: reinstall.message,
+        log: [...log, ...reinstall.log],
+        logPath: reinstall.logPath,
+        plan: reinstall.plan,
+      };
+    }
     const launch = await this.hermesMaintenanceLaunch(hermesRoot, ["update"]);
     log.push(`$ ${launch.command} ${JSON.stringify(launch.args)}`);
     const result = await runCommand(launch.command, launch.args, {
@@ -201,9 +215,19 @@ export class NativeInstallStrategy implements InstallStrategy {
       });
       if (currentHealth?.available) {
         const rootPath = currentHealth.path ?? await this.configStore.getEnginePath("hermes");
-        await this.saveHermesRoot(rootPath);
-        log.push(`Hermes is already available at ${rootPath}.`);
-        return await finish({ ok: true, rootPath, message: `已检测到可用 Hermes：${rootPath}` }, "completed");
+        const currentSource = resolveInstallSource(await this.configStore.read());
+        const mismatch = await this.detectSourceMismatch(rootPath, currentSource);
+        if (mismatch.stale) {
+          log.push(mismatch.reason!);
+          quarantinedPath = `${rootPath}.stale-${Date.now()}`;
+          await fs.rename(rootPath, quarantinedPath);
+          log.push(`Quarantined stale install to ${quarantinedPath}`);
+          // Fall through to reinstall
+        } else {
+          await this.saveHermesRoot(rootPath);
+          log.push(`Hermes is already available at ${rootPath}.`);
+          return await finish({ ok: true, rootPath, message: `已检测到可用 Hermes：${rootPath}` }, "completed");
+        }
       }
 
       const source = resolveInstallSource(await this.configStore.read());
@@ -500,6 +524,26 @@ export class NativeInstallStrategy implements InstallStrategy {
       log.push(`${label} 可写：${targetPath}`);
     } catch (error) {
       throw new Error(`${label} 不可写：${targetPath}。${error instanceof Error ? error.message : "未知错误"}`);
+    }
+  }
+
+  private async detectSourceMismatch(rootPath: string, currentSource: InstallSource): Promise<{ stale: boolean; reason?: string }> {
+    const markerPath = path.join(rootPath, ".zhenghebao-managed-install.json");
+    const raw = await fs.readFile(markerPath, "utf8").catch(() => undefined);
+    if (!raw) return { stale: false };
+    try {
+      const marker = JSON.parse(raw) as { repoUrl?: string; commit?: string };
+      const repoMismatch = marker.repoUrl && marker.repoUrl !== currentSource.repoUrl;
+      const commitMismatch = Boolean(currentSource.commit) && marker.commit !== currentSource.commit;
+      if (repoMismatch || commitMismatch) {
+        return {
+          stale: true,
+          reason: `Detected stale install: source moved from ${marker.repoUrl ?? "unknown"}@${marker.commit ?? "unknown"} to ${currentSource.repoUrl}@${currentSource.commit ?? currentSource.branch ?? "main"}`,
+        };
+      }
+      return { stale: false };
+    } catch {
+      return { stale: false };
     }
   }
 
