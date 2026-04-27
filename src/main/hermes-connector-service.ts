@@ -1464,7 +1464,7 @@ export class HermesConnectorService {
     const launch = await runtime.adapter.buildHermesLaunch({
       runtime: runtime.runtime,
       rootPath: runtimeRoot,
-      pythonArgs: [cliPath, "capabilities", "--json"],
+      pythonArgs: [cliPath, "--version"],
       cwd: runtime.root,
       env: { ...PYTHON_ENV, PYTHONPATH: runtimeRoot },
     });
@@ -1472,7 +1472,7 @@ export class HermesConnectorService {
       cwd: launch.cwd,
       timeoutMs: 20_000,
       env: launch.env,
-      commandId: "connector.gateway.preflight.capabilities",
+      commandId: "connector.gateway.preflight.version",
       runtimeKind: runtime.runtime.mode,
     });
     console.info("[Hermes Forge] Gateway preflight", {
@@ -1485,7 +1485,7 @@ export class HermesConnectorService {
     });
     return result.exitCode === 0
       ? { ok: true }
-      : { ok: false, message: `Gateway 启动前 capabilities --json 检查失败：${result.stderr || result.stdout || `exit ${result.exitCode ?? "unknown"}`}` };
+      : { ok: false, message: `Gateway 启动前 hermes --version 检查失败：${result.stderr || result.stdout || `exit ${result.exitCode ?? "unknown"}`}` };
   }
 
   private async gatewayLaunchFromRuntime(runtime: Extract<ConnectorRuntimeContext, { ok: true }>, hermesEnv: Record<string, string>) {

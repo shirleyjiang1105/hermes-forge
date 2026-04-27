@@ -1,9 +1,6 @@
-import path from "node:path";
-import { runCommand } from "../process/command-runner";
 import { validateWslHermesCli, type HermesCliValidationFailureKind } from "../runtime/hermes-cli-resolver";
 import type { RuntimeAdapterFactory } from "../runtime/runtime-adapter";
 import type { AppPaths } from "./app-paths";
-import { resolveActiveHermesHome } from "./hermes-home";
 import { createPermissionBoundaryAudit, createPermissionPolicyBlockReason } from "../shared/permission-audit";
 import { resolveEnginePermissions } from "../shared/types";
 import type {
@@ -125,84 +122,24 @@ async function probeCapabilities(input: {
       failureKind: "file_missing",
     });
   }
-  const hermesHome = await resolveActiveHermesHome(input.appPaths.hermesDir());
-  const cliPath = input.runtime.mode === "wsl"
-    ? `${rootPath.replace(/\/+$/, "")}/hermes`
-    : path.join(rootPath, "hermes");
-  const env: NodeJS.ProcessEnv = {
-    PYTHONUTF8: "1",
-    PYTHONIOENCODING: "utf-8",
-    PYTHONUNBUFFERED: "1",
-    PYTHONPATH: rootPath,
-    HERMES_HOME: adapter.toRuntimePath(hermesHome),
-    NO_COLOR: "1",
-    FORCE_COLOR: "0",
-  };
-  if (input.runtime.mode === "wsl") {
-    const validation = await validateWslHermesCli(input.runtime, cliPath);
-    if (!validation.ok) {
-      return classifyCapabilities({
-        cliVersion: validation.capabilities?.cliVersion,
-        supportsLaunchMetadataArg: validation.capabilities?.supportsLaunchMetadataArg === true,
-        supportsLaunchMetadataEnv: validation.capabilities?.supportsLaunchMetadataEnv === true,
-        supportsResume: validation.capabilities?.supportsResume === true,
-        reason: validation.message,
-        failureKind: validation.kind,
-      });
-    }
+  const cliPath = `${rootPath.replace(/\/+$/, "")}/hermes`;
+  const validation = await validateWslHermesCli(input.runtime, cliPath);
+  if (!validation.ok) {
     return classifyCapabilities({
-      cliVersion: validation.capabilities.cliVersion,
-      supportsLaunchMetadataArg: validation.capabilities.supportsLaunchMetadataArg,
-      supportsLaunchMetadataEnv: validation.capabilities.supportsLaunchMetadataEnv,
-      supportsResume: validation.capabilities.supportsResume,
+      cliVersion: validation.capabilities?.cliVersion,
+      supportsLaunchMetadataArg: validation.capabilities?.supportsLaunchMetadataArg === true,
+      supportsLaunchMetadataEnv: validation.capabilities?.supportsLaunchMetadataEnv === true,
+      supportsResume: validation.capabilities?.supportsResume === true,
+      reason: validation.message,
+      failureKind: validation.kind,
     });
   }
-  const launch = await adapter.buildHermesLaunch({
-    runtime: input.runtime,
-    rootPath,
-    pythonArgs: [cliPath, "capabilities", "--json"],
-    cwd: rootPath,
-    env,
+  return classifyCapabilities({
+    cliVersion: validation.capabilities.cliVersion,
+    supportsLaunchMetadataArg: validation.capabilities.supportsLaunchMetadataArg,
+    supportsLaunchMetadataEnv: validation.capabilities.supportsLaunchMetadataEnv,
+    supportsResume: validation.capabilities.supportsResume,
   });
-  const result = await runCommand(launch.command, launch.args, {
-    cwd: launch.cwd,
-    timeoutMs: 20_000,
-    env: launch.env,
-    detached: launch.detached,
-  });
-  if (result.exitCode !== 0) {
-    return classifyCapabilities({
-      cliVersion: undefined,
-      supportsLaunchMetadataArg: false,
-      supportsLaunchMetadataEnv: false,
-      supportsResume: false,
-      reason: `capabilities --json failed with exit ${result.exitCode ?? "unknown"}: ${(result.stderr || result.stdout || "").trim() || "no output"}`,
-    });
-  }
-  try {
-    const parsed = JSON.parse(result.stdout) as {
-      cliVersion?: unknown;
-      capabilities?: {
-        supportsLaunchMetadataArg?: unknown;
-        supportsLaunchMetadataEnv?: unknown;
-        supportsResume?: unknown;
-      };
-    };
-    return classifyCapabilities({
-      cliVersion: typeof parsed.cliVersion === "string" ? parsed.cliVersion : undefined,
-      supportsLaunchMetadataArg: parsed.capabilities?.supportsLaunchMetadataArg === true,
-      supportsLaunchMetadataEnv: parsed.capabilities?.supportsLaunchMetadataEnv === true,
-      supportsResume: parsed.capabilities?.supportsResume === true,
-    });
-  } catch (error) {
-    return classifyCapabilities({
-      cliVersion: undefined,
-      supportsLaunchMetadataArg: false,
-      supportsLaunchMetadataEnv: false,
-      supportsResume: false,
-      reason: `capabilities --json parse failed: ${error instanceof Error ? error.message : String(error)}`,
-    });
-  }
 }
 
 function classifyCapabilities(input: {
